@@ -273,8 +273,8 @@ make web-e2e-full-stack
 ### Final verification, 2026-07-24 14:18 CDT
 
 - `make verify`: passed.
-- Python: 71 passed; Ruff and mypy passed. One Starlette TestClient deprecation warning remains.
-- TypeScript: contracts lint/type/test passed; web lint/type/test passed (5 tests); Next.js production build passed.
+- Python: 76 passed; Ruff and mypy passed. One Starlette TestClient deprecation warning remains.
+- TypeScript: contracts lint/type/test passed; web lint/type/test passed (7 tests); Next.js production build passed.
 - Browser: mocked suite passed (2 passed, 1 real-stack case intentionally skipped); real API/artifact/browser suite passed (1 passed).
 - Golden set: 100 records validate structurally; 0 reviewed and 0 published, so `release_ready=False`.
 - Dependency audit: pnpm and pip-audit reported no known third-party vulnerabilities; the local package is not a PyPI audit target.

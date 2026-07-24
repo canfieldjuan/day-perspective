@@ -30,7 +30,11 @@ from app.models import (
     profile_type_for_date,
 )
 from app.services import LocalFilesystemPublishedProfileStore, record_correction
-from app.usgs import accept_and_resolve_release, publish_golden_profile
+from app.usgs import (
+    USGS_SOURCE_SLUG,
+    accept_and_resolve_release,
+    publish_golden_profile,
+)
 
 settings = get_settings()
 app = FastAPI(title="Day Perspective API", version=settings.service_version)
@@ -286,6 +290,14 @@ def admin_releases(
             {
                 "release_id": str(release.id),
                 "release_label": release.release_label,
+                "source_slug": (
+                    source.slug
+                    if (source := session.get(Source, release.source_id)) is not None
+                    else None
+                ),
+                "resolution_supported": (
+                    source is not None and source.slug == USGS_SOURCE_SLUG
+                ),
                 "source_url": release.source_url,
                 "checksum": release.raw_checksum_sha256,
                 "claim_statuses": sorted(

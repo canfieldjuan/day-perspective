@@ -1,19 +1,24 @@
 from __future__ import annotations
 
+import csv
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.governance import SourceReleaseLicense
 from app.models import (
     Claim,
+    ClaimAssertionStatus,
     DataStatus,
     DerivedValue,
     PipelineRun,
     QualityCheck,
     RawSourceRecord,
+    ResolvedClaim,
+    ResolvedClaimEvidence,
     SourceRelease,
     TemporalAssignment,
 )
@@ -89,3 +94,97 @@ def test_review_derives_leap_year_daily_equivalents_without_date_claim(
     assert births.value_json is not None
     assert births.value_json["days_in_year"] == 366
     assert "date" not in births.value_json
+
+
+def test_rejected_wpp_claim_blocks_review_before_any_resolution(
+    session: Session, tmp_path: Path
+) -> None:
+    result = ingest(session, tmp_path)
+    rejected = session.scalar(
+        select(Claim).where(
+            Claim.source_release_id == result.source_release_id,
+            Claim.claim_type == "annual_births",
+        )
+    )
+    assert rejected is not None
+    rejected.assertion_status = ClaimAssertionStatus.REJECTED
+    session.flush()
+
+    with pytest.raises(ValueError, match="Non-accepted WPP claims block review"):
+        review_un_wpp(session, result.source_release_id)
+
+    assert rejected.assertion_status == ClaimAssertionStatus.REJECTED
+    assert session.scalar(select(func.count()).select_from(ResolvedClaim)) == 0
+
+
+def test_revised_wpp_release_versions_resolution_and_daily_equivalent(
+    session: Session, tmp_path: Path
+) -> None:
+    first = ingest(session, tmp_path)
+    review_un_wpp(session, first.source_release_id)
+
+    with FIXTURE.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        fieldnames = reader.fieldnames
+        rows = list(reader)
+    assert fieldnames is not None
+    revised_births = next(row for row in rows if row["year"] == "1964")
+    revised_births["births_thousands"] = "117658.2"
+    revised_fixture = tmp_path / "revised-wpp.csv"
+    with revised_fixture.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    second = ingest_un_wpp(
+        session,
+        fixture_path=revised_fixture,
+        raw_store=LocalFilesystemRawSourceStore(tmp_path / "raw"),
+    )
+    review_un_wpp(session, second.source_release_id)
+    latest = session.scalar(
+        select(ResolvedClaim)
+        .where(ResolvedClaim.canonical_key == "un-wpp:world:1964:annual_births")
+        .order_by(ResolvedClaim.version.desc())
+    )
+    assert latest is not None
+    assert latest.version == 2
+    assert latest.resolved_value["value"] == "117658.2"
+    supporting_release = session.scalar(
+        select(Claim.source_release_id)
+        .join(ResolvedClaimEvidence, ResolvedClaimEvidence.claim_id == Claim.id)
+        .where(
+            ResolvedClaimEvidence.resolved_claim_id == latest.id,
+            ResolvedClaimEvidence.stance == "supporting",
+        )
+    )
+    assert supporting_release == second.source_release_id
+    revised_daily = session.scalar(
+        select(DerivedValue).where(
+            DerivedValue.provenance_resolved_claim_id == latest.id,
+            DerivedValue.value_kind == "average_daily_births",
+        )
+    )
+    assert revised_daily is not None
+    assert revised_daily.value_numeric == Decimal("321470")
+
+
+def test_wpp_ingestion_rejects_a_fixture_missing_a_required_year(
+    session: Session, tmp_path: Path
+) -> None:
+    lines = FIXTURE.read_text(encoding="utf-8").splitlines()
+    invalid = tmp_path / "missing-1964.csv"
+    invalid.write_text(
+        "\n".join(line for line in lines if ",1964," not in line) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="exactly 1950, 1964, 1989, and 2023"):
+        ingest_un_wpp(
+            session,
+            fixture_path=invalid,
+            raw_store=LocalFilesystemRawSourceStore(tmp_path / "raw"),
+        )
+
+    assert session.scalar(select(func.count()).select_from(SourceRelease)) == 0
+    assert session.scalar(select(PipelineRun.status)) == "failed"

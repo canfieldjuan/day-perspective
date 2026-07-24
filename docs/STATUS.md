@@ -109,8 +109,8 @@ technically ready for public launch.
 ## Final Senior Verification - 2026-07-24 14:18 CDT
 
 - `make verify`: passed.
-- Python: 71 tests passed; Ruff and mypy passed. One Starlette TestClient deprecation warning remains.
-- TypeScript: contracts gates passed; 5 frontend tests passed; the Next.js production build passed.
+- Python: 76 tests passed; Ruff and mypy passed. One Starlette TestClient deprecation warning remains.
+- TypeScript: contracts gates passed; 7 frontend tests passed; the Next.js production build passed.
 - Browser: 2 mocked tests passed, the real-stack case was intentionally skipped there, and the separate real API/artifact/browser test passed.
 - Golden-set structure: 100 records passed validation, but 0 are reviewed and 0 are published; release readiness remains false.
 - Dependency audits: pnpm and pip-audit found no known third-party vulnerabilities; the local Python package is not published on PyPI and was skipped.

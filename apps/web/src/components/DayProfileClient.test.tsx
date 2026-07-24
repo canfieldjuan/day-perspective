@@ -168,7 +168,11 @@ describe("DayProfileClient", () => {
     expect(
       screen.getByText("Why can the app say this?")
     ).toBeInTheDocument();
-    expect(screen.getByText(/USGS Earthquake Catalog/)).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", {
+        name: "the USGS Earthquake Catalog source record"
+      })
+    ).toBeInTheDocument();
     expect(screen.getByText("None in this publication.")).toBeInTheDocument();
   });
 

@@ -172,12 +172,16 @@ export default function ReviewPage() {
               <strong>{String(release.release_label)}</strong>
               <p>{String(release.claim_statuses)}</p>
             </div>
-            <button
-              type="button"
-              onClick={() => resolve(String(release.release_id))}
-            >
-              Resolve accepted claims
-            </button>
+            {release.resolution_supported === true ? (
+              <button
+                type="button"
+                onClick={() => resolve(String(release.release_id))}
+              >
+                Resolve accepted claims
+              </button>
+            ) : (
+              <p>Use this source&apos;s specific review workflow to resolve it.</p>
+            )}
           </article>
         ))}
       </section>

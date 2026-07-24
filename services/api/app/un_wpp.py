@@ -41,6 +41,7 @@ from app.models import (
     RawSourceRecord,
     ResolutionMethod,
     ResolvedClaim,
+    ResolvedClaimEvidence,
     ReviewTask,
     Source,
     SourceRelease,
@@ -71,6 +72,7 @@ UN_WPP_LICENSE_SNAPSHOT = (
 )
 GOLDEN_YEAR = 1964
 GOLDEN_DATE = date(1964, 3, 27)
+SELECTED_YEARS = frozenset({1950, 1964, 1989, 2023})
 
 METRIC_DEFINITIONS = {
     "population_midyear": (
@@ -201,6 +203,11 @@ def _parse(payload: bytes) -> tuple[WPPRecord, ...]:
         records.append(record)
     if not records or len({record.record_id for record in records}) != len(records):
         raise ValueError("The WPP fixture must contain unique selected records.")
+    years = {record.year for record in records}
+    if years != SELECTED_YEARS or len(records) != len(SELECTED_YEARS):
+        raise ValueError(
+            "The WPP fixture must contain exactly 1950, 1964, 1989, and 2023."
+        )
     return tuple(records)
 
 
@@ -466,6 +473,20 @@ def review_un_wpp(session: Session, source_release_id: UUID) -> int:
     )
     if len(claims) != 20:
         raise ValueError("The selected WPP fixture must contain twenty claims.")
+    blocked = [
+        claim.claim_type
+        for claim in claims
+        if claim.assertion_status
+        not in {
+            ClaimAssertionStatus.CANDIDATE,
+            ClaimAssertionStatus.IN_REVIEW,
+            ClaimAssertionStatus.ACCEPTED,
+        }
+    ]
+    if blocked:
+        raise ValueError(
+            "Non-accepted WPP claims block review: " + ", ".join(sorted(blocked))
+        )
     methodology = _methodology(session)
     resolved_count = 0
     for claim in claims:
@@ -480,6 +501,8 @@ def review_un_wpp(session: Session, source_release_id: UUID) -> int:
                 rationale="Matched the selected row and metric to WPP GEN/01/REV1.",
                 reviewed_by="development-fixture-review",
             )
+        if claim.assertion_status != ClaimAssertionStatus.ACCEPTED:
+            raise ValueError("Every WPP claim must be accepted before resolution.")
         year = claim.temporal_start.year if claim.temporal_start is not None else 0
         canonical_key = f"un-wpp:world:{year}:{claim.claim_type}"
         prior = session.scalar(
@@ -487,7 +510,22 @@ def review_un_wpp(session: Session, source_release_id: UUID) -> int:
             .where(ResolvedClaim.canonical_key == canonical_key)
             .order_by(ResolvedClaim.version.desc())
         )
-        if prior is None:
+        prior_supports_current = (
+            prior is not None
+            and session.scalar(
+                select(ResolvedClaimEvidence.claim_id).where(
+                    ResolvedClaimEvidence.resolved_claim_id == prior.id,
+                    ResolvedClaimEvidence.claim_id == claim.id,
+                    ResolvedClaimEvidence.stance == "supporting",
+                )
+            )
+            is not None
+        )
+        if (
+            prior is None
+            or prior.resolved_value != (claim.assertion_json or {})
+            or not prior_supports_current
+        ):
             resolved_row = resolve_claim(
                 session,
                 canonical_key=canonical_key,
@@ -499,6 +537,7 @@ def review_un_wpp(session: Session, source_release_id: UUID) -> int:
                 supporting_claim_ids=[claim.id],
                 resolution_method=ResolutionMethod.SINGLE_SOURCE,
                 methodology_id=methodology.id,
+                supersedes_resolved_claim_id=prior.id if prior is not None else None,
             )
             resolved_row.comparability_status = ComparabilityStatus.COMPARABLE
         else:
@@ -519,6 +558,8 @@ def review_un_wpp(session: Session, source_release_id: UUID) -> int:
             )
             session.add(metric)
             session.flush()
+        else:
+            metric.provenance_resolved_claim_id = resolved_row.id
         observation = session.scalar(
             select(Observation).where(
                 Observation.metric_id == metric.id,
@@ -642,6 +683,8 @@ def review_un_wpp(session: Session, source_release_id: UUID) -> int:
                 )
                 session.add(daily_metric)
                 session.flush()
+            else:
+                daily_metric.provenance_resolved_claim_id = resolved_input.id
             derived = DerivedValue(
                 metric_id=daily_metric.id,
                 methodology_id=methodology.id,

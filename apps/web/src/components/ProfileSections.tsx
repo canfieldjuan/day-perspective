@@ -76,7 +76,9 @@ export function ProfileSections({
                           {statement.provenance.supporting_claims.map((claim) => (
                             <span key={claim.predicate}>
                               {claim.predicate} from{" "}
-                              <a href={claim.source_record_locator}>the USGS source record</a>
+                              <a href={claim.source_record_locator}>
+                                the {statement.provenance?.source_release.source} source record
+                              </a>
                             </span>
                           ))}
                         </dd>

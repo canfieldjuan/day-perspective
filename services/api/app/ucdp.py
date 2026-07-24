@@ -716,6 +716,13 @@ def ingest_ucdp_ged(
             if len(rows) != 1 or rows[0]["id"] != "6833":
                 raise ValueError("The GED fixture must contain event 6833 only.")
             row = rows[0]
+            low = int(row["low"])
+            best = int(row["best"])
+            high = int(row["high"])
+            if low < 0 or not low <= best <= high:
+                raise ValueError(
+                    "The GED fatality estimate must satisfy 0 <= low <= best <= high."
+                )
             source = _source(session)
             existing = _existing_result(
                 session, run=run, source_id=source.id, checksum=checksum
@@ -842,9 +849,7 @@ def ingest_ucdp_ged(
                     details={
                         "record_count": 1,
                         "claim_count": len(claims),
-                        "fatality_bounds_ordered": (
-                            int(row["low"]) <= int(row["best"]) <= int(row["high"])
-                        ),
+                        "fatality_bounds_ordered": True,
                     },
                 )
             )
@@ -1025,6 +1030,10 @@ def review_ucdp_ged(session: Session, source_release_id: UUID) -> Event:
             )
             session.add(fatality_metric)
             session.flush()
+        fatalities = resolved["fatalities"].resolved_value
+        fatality_best = int(fatalities["best"])
+        fatality_low = int(fatalities["low"])
+        fatality_high = int(fatalities["high"])
         session.add(
             EventImpact(
                 event_id=event.id,
@@ -1033,9 +1042,10 @@ def review_ucdp_ged(session: Session, source_release_id: UUID) -> Event:
                 methodology_id=methodology.id,
                 impact_directness=ImpactDirectness.DIRECT,
                 narrative=(
-                    "UCDP GED best estimate 100 direct deaths; low 100, high 1,100."
+                    f"UCDP GED best estimate {fatality_best:,} direct deaths; "
+                    f"low {fatality_low:,}, high {fatality_high:,}."
                 ),
-                value_numeric=Decimal("100"),
+                value_numeric=Decimal(fatality_best),
                 data_status=DataStatus.ESTIMATED,
             )
         )
@@ -1057,7 +1067,11 @@ def review_ucdp_ged(session: Session, source_release_id: UUID) -> Event:
                     "geographic_precision": "named town and coordinates",
                     "measurement_directness": "direct deaths",
                     "source_agreement": "single source",
-                    "fatality_bounds": {"low": 100, "best": 100, "high": 1100},
+                    "fatality_bounds": {
+                        "low": fatality_low,
+                        "best": fatality_best,
+                        "high": fatality_high,
+                    },
                 },
                 public_grade="B",
                 public_explanation=(
