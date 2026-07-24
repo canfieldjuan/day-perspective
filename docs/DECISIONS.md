@@ -232,3 +232,59 @@ to identify the method used to perform an assessment.
 **Revisit trigger:** Introduce a separately versioned archival snapshot store
 only when measured profile volume or retention requirements make relational
 JSONB unsuitable; never weaken historical reconstructability.
+
+## D012: Use the official USGS FDSN summary record as the first adapter release
+
+**Decision:** Pin the official date-range GeoJSON response containing `official19640328033616_30` as the minimal network-independent fixture, while retaining an explicit live offline retrieval command.
+
+**Context:** The event detail product is much larger and changes as USGS product bundles are updated. The summary record contains every predicate supported in this slice.
+
+**Alternatives considered:** Commit the full detail product; hardcode selected values; query USGS at render time.
+
+**Reason:** Exact raw bytes remain reproducible without network tests, while the adapter still validates the official response schema and record identity.
+
+**Consequences:** Casualties are unsupported and omitted. A changed live response creates a new content-sensitive release.
+
+**Revisit trigger:** A required predicate exists only in a detail product or a separate authoritative source.
+
+## D013: Separate UTC occurrence from historical local civil-date assignment
+
+**Decision:** Store the UTC instant, IANA timezone, instant-specific offset, local date, and interpretation separately.
+
+**Context:** The earthquake occurred on March 28 UTC but belongs to the March 27 public profile in Alaska civil time.
+
+**Alternatives considered:** Store only UTC date; store a fixed offset without a timezone rule; place local date inside prose.
+
+**Reason:** This keeps temporal precision distinct from product date assignment and makes the interpretation inspectable.
+
+**Consequences:** Historical timezone data becomes a reproducibility dependency and is surfaced in provenance.
+
+**Revisit trigger:** Events require disputed or jurisdiction-specific calendar assignment.
+
+## D014: Version-address public profile objects while retaining evidence hashes
+
+**Decision:** Publish local objects at `day/{date}/profile-v{n}.json`; use content hashes for integrity and manifest evidence snapshots for provenance.
+
+**Context:** Consumers need a stable version locator, while corrections must never rewrite version 1.
+
+**Alternatives considered:** Content-hash-only filenames; mutable `latest.json`; database reconstruction at request time.
+
+**Reason:** Version paths express publication history clearly and content hashes still detect corruption.
+
+**Consequences:** Identical republishing can create a new version if explicitly triggered; orchestration should avoid unnecessary republishes operationally.
+
+**Revisit trigger:** A remote object store needs atomic aliases or retention policies.
+
+## D015: Use an explicit development review guard, not simulated authentication
+
+**Decision:** Guard `/api/v1/admin/` with `X-Development-Review-Token` and label it development-only everywhere.
+
+**Context:** The slice must prove review actions, while production identity and authorization are out of scope.
+
+**Alternatives considered:** Unguarded endpoints; fake login UI; full production authentication.
+
+**Reason:** The guard prevents accidental casual use locally without misrepresenting security.
+
+**Consequences:** Admin endpoints must never be exposed as production-ready.
+
+**Revisit trigger:** Any deployment or multi-user review workflow.

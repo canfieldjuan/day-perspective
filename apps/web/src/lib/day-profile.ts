@@ -38,7 +38,9 @@ function isProfileStatement(value: unknown): value is ProfileStatement {
     statement !== undefined &&
     typeof statement.statement_id === "string" &&
     typeof statement.statement === "string" &&
-    (statement.provenance_note === undefined || typeof statement.provenance_note === "string")
+    (statement.provenance_note === undefined || typeof statement.provenance_note === "string") &&
+    (statement.details === undefined || asRecord(statement.details) !== undefined) &&
+    (statement.provenance === undefined || asRecord(statement.provenance) !== undefined)
   );
 }
 
@@ -88,6 +90,7 @@ export function isPublishedProfileResponse(
   const sections = asRecord(profile.sections);
   return (
     sections !== undefined &&
+    DAY_PROFILE_SECTION_KEYS.every((key) => Array.isArray(sections[key])) &&
     Object.entries(sections).every(
       ([key, statements]) =>
         isSectionKey(key) &&

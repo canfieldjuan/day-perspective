@@ -47,6 +47,7 @@ class ClaimAssertionStatus(str, Enum):
 
 
 class TemporalPrecision(str, Enum):
+    SECOND = "second"
     DAY = "day"
     MONTH = "month"
     YEAR = "year"
@@ -228,6 +229,31 @@ class SourceRelease(Base):
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     source: Mapped[Source] = relationship(back_populates="releases")
     claims: Mapped[list[Claim]] = relationship(back_populates="source_release")
+    raw_records: Mapped[list[RawSourceRecord]] = relationship(back_populates="source_release")
+
+
+class RawSourceRecord(Base):
+    __tablename__ = "raw_source_records"
+    __table_args__ = (
+        UniqueConstraint(
+            "source_release_id",
+            "source_record_id",
+            name="raw_source_records_release_record_key",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    source_release_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("source_releases.id", ondelete="RESTRICT")
+    )
+    source_record_id: Mapped[str] = mapped_column(String(240))
+    source_record_locator: Mapped[str] = mapped_column(Text)
+    raw_storage_uri: Mapped[str] = mapped_column(Text)
+    raw_checksum_sha256: Mapped[str] = mapped_column(String(64))
+    schema_version: Mapped[str] = mapped_column(String(80))
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    source_release: Mapped[SourceRelease] = relationship(back_populates="raw_records")
 
 
 class Claim(Base):
@@ -238,12 +264,16 @@ class Claim(Base):
         ForeignKey("source_releases.id", ondelete="RESTRICT")
     )
     source_record_locator: Mapped[str] = mapped_column(Text)
+    source_record_hash_sha256: Mapped[str] = mapped_column(String(64))
     assertion_status: Mapped[ClaimAssertionStatus] = mapped_column(
         enum_type(ClaimAssertionStatus, "claim_assertion_status"), default=ClaimAssertionStatus.IMPORTED
     )
     claim_type: Mapped[str] = mapped_column(String(120))
     assertion_text: Mapped[str | None] = mapped_column(Text)
     assertion_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    unit: Mapped[str | None] = mapped_column(Text)
+    lower_bound: Mapped[Decimal | None] = mapped_column(Numeric)
+    upper_bound: Mapped[Decimal | None] = mapped_column(Numeric)
     temporal_start: Mapped[date | None] = mapped_column(Date)
     temporal_end: Mapped[date | None] = mapped_column(Date)
     temporal_precision: Mapped[TemporalPrecision] = mapped_column(
@@ -364,6 +394,11 @@ class EventTime(Base):
     date_role: Mapped[DateRole] = mapped_column(enum_type(DateRole, "date_role"))
     is_primary: Mapped[bool] = mapped_column(Boolean, default=False)
     display_label: Mapped[str | None] = mapped_column(Text)
+    exact_timestamp: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    local_date: Mapped[date | None] = mapped_column(Date)
+    timezone_name: Mapped[str | None] = mapped_column(Text)
+    utc_offset_minutes: Mapped[int | None] = mapped_column(Integer)
+    interpretation: Mapped[str | None] = mapped_column(Text)
 
 
 class EventLocation(Base):
@@ -446,6 +481,7 @@ class PublicationManifest(Base):
     profile_date: Mapped[date] = mapped_column(Date)
     profile_type: Mapped[ProfileType] = mapped_column(enum_type(ProfileType, "profile_type"))
     version: Mapped[int] = mapped_column(Integer)
+    editorial_revision: Mapped[int] = mapped_column(Integer, default=1)
     status: Mapped[PublicationStatus] = mapped_column(
         enum_type(PublicationStatus, "publication_status"), default=PublicationStatus.DRAFT
     )
@@ -705,6 +741,8 @@ class QualityAssessment(Base):
     assessment_kind: Mapped[str] = mapped_column(String(120))
     score: Mapped[Decimal | None] = mapped_column(Numeric)
     findings: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    public_grade: Mapped[str | None] = mapped_column(String(8))
+    public_explanation: Mapped[str | None] = mapped_column(Text)
     assessed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

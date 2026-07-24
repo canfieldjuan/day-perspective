@@ -16,6 +16,14 @@ class Settings(BaseSettings):
         default=Path("../../.local/published-profiles"),
         validation_alias="PUBLISHED_PROFILE_ROOT",
     )
+    raw_source_root: Path = Field(
+        default=Path("../../.local/raw-sources"),
+        validation_alias="RAW_SOURCE_ROOT",
+    )
+    development_review_token: str = Field(
+        default="development-only-not-authentication",
+        validation_alias="DEVELOPMENT_REVIEW_TOKEN",
+    )
     service_name: str = "day-perspective-api"
     service_version: str = "0.1.0"
     web_origin: str = Field(default="http://localhost:3000", validation_alias="WEB_ORIGIN")

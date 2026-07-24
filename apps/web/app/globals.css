@@ -237,3 +237,30 @@ h2 {
     grid-column: auto;
   }
 }
+.provenance-view {
+  margin-top: 1rem;
+  border-top: 1px solid color-mix(in srgb, currentColor 20%, transparent);
+  padding-top: 0.8rem;
+}
+
+.provenance-view summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.provenance-view dt {
+  margin-top: 0.75rem;
+  font-weight: 700;
+}
+
+.provenance-view dd {
+  margin-left: 0;
+}
+
+.provenance-view dd span {
+  display: block;
+}
+
+.quality-grade {
+  font-weight: 800;
+}

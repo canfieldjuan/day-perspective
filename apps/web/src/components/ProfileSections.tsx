@@ -15,14 +15,20 @@ const sectionMessages: Record<Exclude<SectionAvailability, "published">, string>
 type ProfileSectionsProps = {
   availability: SectionAvailability;
   sections?: PublishedDayProfile["sections"];
+  sectionStates?: PublishedDayProfile["section_states"];
 };
 
-export function ProfileSections({ availability, sections }: ProfileSectionsProps) {
+export function ProfileSections({
+  availability,
+  sections,
+  sectionStates
+}: ProfileSectionsProps) {
   return (
     <div className="section-grid" aria-label="Day profile sections">
       {DAY_PROFILE_SECTIONS.map((section, index) => {
         const headingId = section.id + "-heading";
         const statements = sections?.[section.key];
+        const sectionState = sectionStates?.[section.key];
 
         return (
           <section className="section-card" key={section.key} aria-labelledby={headingId}>
@@ -37,12 +43,56 @@ export function ProfileSections({ availability, sections }: ProfileSectionsProps
                   {statement.provenance_note ? (
                     <p className="profile-statement__provenance">{statement.provenance_note}</p>
                   ) : null}
+                  {statement.details?.quality_grade ? (
+                    <p className="quality-grade">
+                      Evidence quality: {String(statement.details.quality_grade)}
+                    </p>
+                  ) : null}
+                  {statement.provenance ? (
+                    <details className="provenance-view">
+                      <summary>Why can the app say this?</summary>
+                      <dl>
+                        <dt>Resolved claim</dt>
+                        <dd>
+                          {statement.provenance.resolved_claim.canonical_key}, version{" "}
+                          {statement.provenance.resolved_claim.version}:{" "}
+                          {statement.provenance.resolved_claim.rationale}
+                        </dd>
+                        <dt>Supporting claims</dt>
+                        <dd>
+                          {statement.provenance.supporting_claims.map((claim) => (
+                            <span key={claim.predicate}>
+                              {claim.predicate} from{" "}
+                              <a href={claim.source_record_locator}>the USGS source record</a>
+                            </span>
+                          ))}
+                        </dd>
+                        <dt>Dissenting claims</dt>
+                        <dd>
+                          {statement.provenance.dissenting_claims.length === 0
+                            ? "None in this publication."
+                            : `${statement.provenance.dissenting_claims.length} retained.`}
+                        </dd>
+                        <dt>Source release</dt>
+                        <dd>
+                          {statement.provenance.source_release.source}:{" "}
+                          {statement.provenance.source_release.release}
+                        </dd>
+                        <dt>Methodology</dt>
+                        <dd>
+                          {statement.provenance.methodology.name}, version{" "}
+                          {statement.provenance.methodology.version}
+                        </dd>
+                      </dl>
+                    </details>
+                  ) : null}
                 </article>
               ))
             ) : (
               <p>
                 {availability === "published"
-                  ? "No evidence-backed content was published for this section."
+                  ? sectionState?.reason ??
+                    "No evidence-backed content was published for this section."
                   : sectionMessages[availability]}
               </p>
             )}

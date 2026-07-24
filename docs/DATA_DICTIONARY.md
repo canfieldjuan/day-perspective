@@ -92,3 +92,37 @@ cascade-deleted.
 `enhanced_structured` only from 1989 through 2025. Both manifests and day
 profiles enforce those bands. Publication status is distinct from data status,
 and temporal assignment is distinct from temporal precision.
+
+## Phase 2 Schema Additions (`20260724_0007`)
+
+### `raw_source_records`
+
+One immutable source record retained inside one immutable source release. `source_record_id` is unique within its release. `source_record_locator` is the public record URL; `raw_storage_uri` is an internal storage key; `raw_checksum_sha256` identifies exact bytes; `schema_version` identifies the adapter validation contract; `payload_json` retains the validated record. Update and delete are rejected. Release deletion is restricted.
+
+### `claims` additions
+
+- `source_record_hash_sha256`: required 64-character SHA-256. A database insert trigger derives it from the immutable release checksum when older callers omit it.
+- `unit`: predicate unit or measurement scale; nullable for nonnumeric predicates.
+- `lower_bound`, `upper_bound`: optional numeric uncertainty bounds. When both exist, lower must not exceed upper.
+
+### `event_times` additions
+
+- `exact_timestamp`: timezone-aware occurrence instant.
+- `local_date`: separately assigned civil date.
+- `timezone_name`: IANA rule set used for conversion.
+- `utc_offset_minutes`: offset at the historical instant.
+- `interpretation`: public explanation of the assignment.
+
+A local date requires the complete timestamp/timezone/offset/interpretation tuple. `temporal_precision=second` was added to the existing enum; temporal assignment remains a separate field.
+
+### `quality_assessments` additions
+
+`public_grade` and `public_explanation` are an all-or-none pair. The USGS slice stores eight named quality dimensions in `findings` and uses the pair for the public result.
+
+### `publication_manifests` addition
+
+`editorial_revision` is a positive integer independent of profile version and publication status.
+
+### New and changed constraints
+
+`source_releases(source_id, raw_checksum_sha256)` is unique for idempotent imports. Raw records are immutable. Claim hashes and raw checksums must be lowercase SHA-256. Stable profile locations are version-addressed and protected by the existing published-manifest/day-profile immutability triggers.

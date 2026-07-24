@@ -5,10 +5,10 @@ API_PYTHON ?= $(PROJECT_ROOT)/.venv/bin/python
 DATABASE_URL ?= postgresql+psycopg://day_perspective:day_perspective@localhost:54329/day_perspective
 TEST_DATABASE_URL ?= postgresql+psycopg://day_perspective:day_perspective@localhost:54329/day_perspective_test
 
-.PHONY: help install web-install api-install db-up db-down db-reset api-migrate api-seed api-run api-test api-lint api-typecheck contracts-test contracts-lint contracts-typecheck web-run web-test web-lint web-typecheck web-e2e web-build check
+.PHONY: help install web-install api-install db-up db-down db-reset db-migrate seed api-migrate api-seed ingest-usgs-fixture ingest-usgs-live ingest-usgs-dry-run publish-golden api api-run api-test api-lint api-typecheck contracts-test contracts-lint contracts-typecheck web web-run web-test web-lint web-typecheck web-e2e web-build test-integration test-e2e build check verify
 
 help:
-	@printf '%s\n' 'Targets: install, db-up, db-down, db-reset, api-migrate, api-seed, api-run, api-test, api-lint, api-typecheck, contracts-test, contracts-lint, contracts-typecheck, web-run, web-test, web-lint, web-typecheck, web-e2e, web-build, check'
+	@printf '%s\n' 'Targets: install, db-up, db-down, db-reset, db-migrate, seed, ingest-usgs-fixture, ingest-usgs-live, ingest-usgs-dry-run, publish-golden, api, web, test-integration, test-e2e, build, check, verify'
 
 install: web-install api-install
 
@@ -33,11 +33,29 @@ db-reset:
 api-migrate:
 	cd services/api && DATABASE_URL='$(DATABASE_URL)' $(API_PYTHON) -m alembic upgrade head
 
+db-migrate: api-migrate
+
 api-seed:
 	DAY_PERSPECTIVE_ALLOW_TEST_FIXTURES=1 DATABASE_URL='$(DATABASE_URL)' bash scripts/seed_test_fixtures.sh
 
+seed: api-seed
+
+ingest-usgs-fixture:
+	cd services/api && DATABASE_URL='$(DATABASE_URL)' RAW_SOURCE_ROOT='$(PROJECT_ROOT)/.local/raw-sources' $(API_PYTHON) -m app.usgs_cli ingest --fixture '$(PROJECT_ROOT)/data/fixtures/usgs/1964-prince-william-sound.geojson'
+
+ingest-usgs-live:
+	cd services/api && DATABASE_URL='$(DATABASE_URL)' RAW_SOURCE_ROOT='$(PROJECT_ROOT)/.local/raw-sources' $(API_PYTHON) -m app.usgs_cli ingest
+
+ingest-usgs-dry-run:
+	cd services/api && DATABASE_URL='$(DATABASE_URL)' RAW_SOURCE_ROOT='$(PROJECT_ROOT)/.local/raw-sources' $(API_PYTHON) -m app.usgs_cli ingest --fixture '$(PROJECT_ROOT)/data/fixtures/usgs/1964-prince-william-sound.geojson' --dry-run
+
+publish-golden:
+	cd services/api && DATABASE_URL='$(DATABASE_URL)' PUBLISHED_PROFILE_ROOT='$(PROJECT_ROOT)/.local/published-profiles' $(API_PYTHON) -m app.usgs_cli publish
+
 api-run:
 	cd services/api && DATABASE_URL='$(DATABASE_URL)' $(API_PYTHON) -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+
+api: api-run
 
 api-test:
 	TEST_DATABASE_URL='$(TEST_DATABASE_URL)' $(API_PYTHON) -m pytest -q services/api/tests
@@ -60,6 +78,8 @@ contracts-typecheck:
 web-run:
 	corepack pnpm --filter @day-perspective/web dev
 
+web: web-run
+
 web-test:
 	corepack pnpm --filter @day-perspective/web test
 
@@ -75,4 +95,12 @@ web-e2e:
 web-build:
 	corepack pnpm --filter @day-perspective/web build
 
+test-integration: api-test
+
+test-e2e: web-e2e
+
+build: web-build
+
 check: contracts-lint contracts-typecheck contracts-test api-lint api-typecheck api-test web-lint web-typecheck web-test
+
+verify: check web-build web-e2e

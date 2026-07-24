@@ -111,3 +111,43 @@ No external historical ingestion, full profile publication, production data,
 universal score, live APIs, user features, queues, vector/graph DB, or deployment
 is included. The foundation is designed for a senior engineer to build those
 capabilities without losing provenance or reconstructing intent.
+
+## Official USGS vertical slice
+
+The repository now proves one offline evidence-to-publication chain for the March 27, 1964 Alaska earthquake. Automated tests use only the committed official response in `data/fixtures/usgs/1964-prince-william-sound.geojson`; ordinary page requests never contact USGS.
+
+```bash
+make db-reset
+make db-up
+make db-migrate
+make ingest-usgs-fixture
+make publish-golden
+```
+
+The published development artifact is `.local/published-profiles/day/1964-03-27/profile-v1.json`. Start the services in separate terminals:
+
+```bash
+make api
+make web
+```
+
+Open `http://localhost:3000/day/1964-03-27`. Live official retrieval is an explicit offline operation:
+
+```bash
+make ingest-usgs-dry-run
+make ingest-usgs-live
+```
+
+A changed response creates a new immutable source release. Do not use live ingestion in automated tests.
+
+The minimal review API is development-only. Send `X-Development-Review-Token` with the value configured by `DEVELOPMENT_REVIEW_TOKEN` to `/api/v1/admin/claims`, `/api/v1/admin/conflicts`, `/api/v1/admin/review-tasks`, claim decision, release resolution, publication, and manifest endpoints. This guard is not secure authentication.
+
+Full checks:
+
+```bash
+make check
+make web-build
+make web-e2e
+# or all repository gates
+make verify
+```

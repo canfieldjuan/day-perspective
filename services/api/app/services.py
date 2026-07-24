@@ -7,6 +7,7 @@ import tempfile
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Protocol
 from uuid import UUID
@@ -25,6 +26,7 @@ from app.models import (
     DerivedValueInput,
     Geography,
     GeographyVersion,
+    LegalReviewStatus,
     Methodology,
     Metric,
     Observation,
@@ -102,6 +104,33 @@ class LocalFilesystemPublishedProfileStore:
                 os.unlink(temporary_path)
         return relative.as_posix()
 
+    def write_versioned(
+        self,
+        profile_date: date,
+        version: int,
+        payload: dict[str, Any],
+    ) -> str:
+        digest = content_hash(payload)
+        relative = Path("day") / profile_date.isoformat() / f"profile-v{version}.json"
+        destination = (self.root / relative).resolve()
+        if not destination.is_relative_to(self.root):
+            raise RuntimeError("Refused profile write outside the configured storage root.")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if destination.exists():
+            self.read(relative.as_posix(), digest)
+            return relative.as_posix()
+        descriptor, temporary_path = tempfile.mkstemp(prefix=".profile-", dir=destination.parent)
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(canonical_json_bytes(payload))
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.link(temporary_path, destination)
+        finally:
+            if os.path.exists(temporary_path):
+                os.unlink(temporary_path)
+        return relative.as_posix()
+
     def read(self, storage_uri: str, expected_hash: str) -> dict[str, Any]:
         candidate = (self.root / storage_uri).resolve()
         if not candidate.is_relative_to(self.root):
@@ -122,6 +151,9 @@ def create_source_release(
     raw_record_count: int,
     raw_bytes: bytes | None = None,
     raw_checksum_sha256: str | None = None,
+    pipeline_run_id: UUID | None = None,
+    metadata_json: dict[str, Any] | None = None,
+    legal_review_status: LegalReviewStatus = LegalReviewStatus.PENDING,
 ) -> SourceRelease:
     calculated_checksum = hashlib.sha256(raw_bytes).hexdigest() if raw_bytes is not None else None
     if raw_checksum_sha256 is not None and calculated_checksum is not None:
@@ -137,6 +169,9 @@ def create_source_release(
         raw_storage_uri=raw_storage_uri,
         raw_checksum_sha256=checksum,
         raw_record_count=raw_record_count,
+        pipeline_run_id=pipeline_run_id,
+        metadata_json=metadata_json or {},
+        legal_review_status=legal_review_status,
     )
     session.add(release)
     session.flush()
@@ -152,7 +187,16 @@ def create_claim(
     assertion_text: str | None,
     assertion_json: dict[str, Any] | None = None,
     assertion_status: ClaimAssertionStatus = ClaimAssertionStatus.IMPORTED,
+    source_record_hash_sha256: str | None = None,
+    unit: str | None = None,
+    lower_bound: Decimal | None = None,
+    upper_bound: Decimal | None = None,
 ) -> Claim:
+    if source_record_hash_sha256 is None:
+        release = session.get(SourceRelease, source_release_id)
+        if release is None:
+            raise ValueError("A claim requires an existing source release.")
+        source_record_hash_sha256 = release.raw_checksum_sha256
     claim = Claim(
         source_release_id=source_release_id,
         source_record_locator=source_record_locator,
@@ -160,6 +204,10 @@ def create_claim(
         assertion_text=assertion_text,
         assertion_json=assertion_json,
         assertion_status=assertion_status,
+        source_record_hash_sha256=source_record_hash_sha256,
+        unit=unit,
+        lower_bound=lower_bound,
+        upper_bound=upper_bound,
     )
     session.add(claim)
     session.flush()
@@ -182,6 +230,10 @@ def supersede_claim(
         assertion_json=assertion_json,
         assertion_status=ClaimAssertionStatus.CANDIDATE,
         supersedes_claim_id=prior_claim.id,
+        source_record_hash_sha256=prior_claim.source_record_hash_sha256,
+        unit=prior_claim.unit,
+        lower_bound=prior_claim.lower_bound,
+        upper_bound=prior_claim.upper_bound,
     )
     session.add(replacement)
     session.flush()
@@ -196,6 +248,9 @@ def resolve_claim(
     rationale: str,
     supporting_claim_ids: Iterable[UUID],
     dissenting_claim_ids: Iterable[UUID] = (),
+    resolution_method: ResolutionMethod = ResolutionMethod.EDITORIAL_REVIEW,
+    methodology_id: UUID | None = None,
+    supersedes_resolved_claim_id: UUID | None = None,
 ) -> ResolvedClaim:
     supporting = list(supporting_claim_ids)
     dissenting = list(dissenting_claim_ids)
@@ -215,9 +270,11 @@ def resolve_claim(
         canonical_key=canonical_key,
         version=next_version,
         resolved_value=resolved_value,
-        resolution_method=ResolutionMethod.EDITORIAL_REVIEW,
+        resolution_method=resolution_method,
         comparability_status=ComparabilityStatus.UNKNOWN,
         rationale=rationale,
+        methodology_id=methodology_id,
+        supersedes_resolved_claim_id=supersedes_resolved_claim_id,
     )
     session.add(resolved)
     session.flush()
@@ -518,10 +575,14 @@ def _claim_snapshot(session: Session, claim: Claim) -> dict[str, Any]:
     return {
         "id": str(claim.id),
         "source_record_locator": claim.source_record_locator,
+        "source_record_hash_sha256": claim.source_record_hash_sha256,
         "claim_type": claim.claim_type,
         "assertion_status": claim.assertion_status.value,
         "assertion_text": claim.assertion_text,
         "assertion": claim.assertion_json,
+        "unit": claim.unit,
+        "lower_bound": str(claim.lower_bound) if claim.lower_bound is not None else None,
+        "upper_bound": str(claim.upper_bound) if claim.upper_bound is not None else None,
         "temporal_start": _optional_date(claim.temporal_start),
         "temporal_end": _optional_date(claim.temporal_end),
         "temporal_precision": claim.temporal_precision.value,
@@ -829,6 +890,9 @@ def publish_day_profile(
     statement_evidence: Iterable[PublicationStatementEvidenceInput],
     supersedes_manifest_id: UUID | None = None,
     supersedes_day_profile_id: UUID | None = None,
+    methodology_id: UUID | None = None,
+    editorial_revision: int = 1,
+    manifest_metadata: dict[str, Any] | None = None,
 ) -> DayProfile:
     if profile_type_for_date(profile_date) != profile_type:
         raise ValueError("The profile type does not match the public date band.")
@@ -861,11 +925,13 @@ def publish_day_profile(
         profile_date=profile_date,
         profile_type=profile_type,
         version=version,
+        editorial_revision=editorial_revision,
         status=PublicationStatus.DRAFT,
         content_hash=digest,
         source_snapshot_hash=_source_snapshot_hash(snapshotted_evidence),
         storage_uri="pending://local-filesystem-write",
         code_version=get_settings().service_version,
+        methodology_id=methodology_id,
         supersedes_manifest_id=supersedes_manifest_id,
         metadata_json={
             "evidence_snapshot_schema_version": "1",
@@ -876,6 +942,7 @@ def publish_day_profile(
                 }
                 for item in snapshotted_evidence
             ],
+            **(manifest_metadata or {}),
         },
     )
     session.add(manifest)
@@ -894,7 +961,10 @@ def publish_day_profile(
         ]
     )
     session.flush()
-    manifest.storage_uri = store.write(profile_date, profile_type, payload)
+    if isinstance(store, LocalFilesystemPublishedProfileStore):
+        manifest.storage_uri = store.write_versioned(profile_date, version, payload)
+    else:
+        manifest.storage_uri = store.write(profile_date, profile_type, payload)
     manifest.status = PublicationStatus.PUBLISHED
     manifest.published_at = datetime.now(UTC)
     session.flush()

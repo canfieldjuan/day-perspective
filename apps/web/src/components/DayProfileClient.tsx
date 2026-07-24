@@ -138,7 +138,13 @@ export function DayProfileClient({ date }: { date: string }) {
   }
 
   if (state.kind === "published") {
-    return <ProfileSections availability="published" sections={state.profile.sections} />;
+    return (
+      <ProfileSections
+        availability="published"
+        sections={state.profile.sections}
+        sectionStates={state.profile.section_states}
+      />
+    );
   }
 
   return (

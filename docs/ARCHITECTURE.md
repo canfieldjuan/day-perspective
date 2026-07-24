@@ -96,3 +96,25 @@ Third-party data is never queried during ordinary page rendering because live
 calls make sources nondeterministic, undermine provenance and reproducibility,
 introduce availability/licensing drift, and can silently change history after
 publication.
+
+## USGS Vertical Slice Runtime (Phase 2)
+
+The offline pipeline entry point is `app.usgs_cli`. `USGSEarthquakeAdapter` retrieves either the committed fixture or the official FDSN query, validates it with Pydantic, and transforms one source record into nine predicate claims. `LocalFilesystemRawSourceStore` writes immutable checksum-addressed raw bytes. A database transaction records the pipeline run, release, raw record, claims, review tasks, and quality check.
+
+Publication calls deterministic single-source resolution, materializes event/time/geography projections, derives an eight-dimension public quality assessment, builds the seven-section JSON artifact, snapshots each statement's transitive evidence, writes `/day/{date}/profile-v{version}.json`, and finalizes the immutable manifest. Ordinary browser requests query neither USGS nor the normalized evidence graph. The API selects the latest published manifest, reads its object, verifies SHA-256, and returns the stored profile.
+
+```mermaid
+flowchart LR
+  USGS[Official USGS or committed fixture] --> Adapter[USGS adapter validation]
+  Adapter --> Raw[Immutable raw object and source release]
+  Raw --> Claims[Predicate claims and review tasks]
+  Claims --> Resolve[Deterministic resolution]
+  Resolve --> Quality[Public quality assessment]
+  Quality --> Publish[Editorial selection and immutable manifest]
+  Publish --> JSON[Versioned profile JSON]
+  Browser --> Next[Next.js day route]
+  Next --> API[FastAPI day endpoint]
+  API --> JSON
+```
+
+The review endpoints under `/api/v1/admin/` are guarded by an explicitly development-only header token. They are not production authentication.
