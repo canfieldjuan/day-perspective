@@ -5,22 +5,37 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from geoalchemy2.elements import WKTElement
 from sqlalchemy import select, update
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models import (
+    Claim,
     ComparabilityStatus,
     DataStatus,
+    DateRole,
     DayProfile,
     DerivedValue,
     DerivedValueInput,
+    Geography,
+    GeographyVersion,
+    LegalReviewStatus,
     Methodology,
+    Metric,
+    Observation,
+    PipelineRun,
     ProfileType,
     PublicationManifest,
     PublicationStatementEvidence,
     PublicationStatus,
+    QualityAssessment,
+    Source,
+    SourceLineage,
+    SourceLineageRelationship,
+    SourceRelease,
     TemporalAssignment,
+    TemporalPrecision,
 )
 from app.services import (
     LocalFilesystemPublishedProfileStore,
@@ -103,6 +118,375 @@ def test_publication_manifest_hash_is_canonical_and_input_sensitive() -> None:
 
 
 @pytest.mark.integration
+def test_publication_snapshots_resolved_evidence_and_derives_manifest_hash(
+    session: Session, tmp_path: Path
+) -> None:
+    release = source_release(session)
+    supporting = create_claim(
+        session,
+        source_release_id=release.id,
+        source_record_locator="record:snapshot-support",
+        claim_type="synthetic_assertion",
+        assertion_text="Original supporting assertion.",
+    )
+    dissenting = create_claim(
+        session,
+        source_release_id=release.id,
+        source_record_locator="record:snapshot-dissent",
+        claim_type="synthetic_assertion",
+        assertion_text="Original dissenting assertion.",
+    )
+    resolved = resolve_claim(
+        session,
+        canonical_key="test:snapshot-resolution",
+        resolved_value={"statement": "Original resolved value."},
+        rationale="Snapshot test resolution.",
+        supporting_claim_ids=[supporting.id],
+        dissenting_claim_ids=[dissenting.id],
+    )
+    profile = publish_day_profile(
+        session,
+        store=LocalFilesystemPublishedProfileStore(tmp_path),
+        profile_date=date(1969, 7, 20),
+        profile_type=ProfileType.STANDARD_STATISTICAL,
+        payload=payload("Snapshot test profile."),
+        statement_evidence=[
+            PublicationStatementEvidenceInput(
+                statement_path="/sections/evidence_notes/0",
+                resolved_claim_id=resolved.id,
+            )
+        ],
+    )
+    session.commit()
+    evidence = session.scalar(
+        select(PublicationStatementEvidence).where(
+            PublicationStatementEvidence.publication_manifest_id
+            == profile.publication_manifest_id
+        )
+    )
+    manifest = session.get(PublicationManifest, profile.publication_manifest_id)
+    assert evidence is not None and manifest is not None
+    original_snapshot = evidence.evidence_snapshot
+    original_snapshot_hash = evidence.evidence_snapshot_hash
+    assert original_snapshot_hash == content_hash(original_snapshot)
+    assert [item["stance"] for item in original_snapshot["evidence"]] == [
+        "supporting",
+        "dissenting",
+    ]
+    assert (
+        original_snapshot["evidence"][0]["claim"]["source_release"]["release"][
+            "raw_checksum_sha256"
+        ]
+        == release.raw_checksum_sha256
+    )
+    expected_source_hash = content_hash(
+        {
+            "schema_version": "1",
+            "statements": [
+                {
+                    "statement_path": "/sections/evidence_notes/0",
+                    "evidence_snapshot_hash": original_snapshot_hash,
+                }
+            ],
+        }
+    )
+    assert manifest.source_snapshot_hash == expected_source_hash
+
+    supporting.assertion_text = "Later working-graph edit."
+    resolved.resolved_value = {"statement": "Later resolved working value."}
+    session.commit()
+    session.refresh(evidence)
+    assert evidence.evidence_snapshot == original_snapshot
+    assert evidence.evidence_snapshot_hash == original_snapshot_hash
+
+
+@pytest.mark.integration
+def test_publication_snapshots_derived_value_lineage(session: Session, tmp_path: Path) -> None:
+    provenance = statement_evidence(session)
+    resolved_claim_id = provenance[0].resolved_claim_id
+    assert resolved_claim_id is not None
+    derived_value = untraceable_derived_value(session)
+    session.add(
+        DerivedValueInput(
+            derived_value_id=derived_value.id,
+            resolved_claim_id=resolved_claim_id,
+            input_role="primary",
+        )
+    )
+    profile = publish_day_profile(
+        session,
+        store=LocalFilesystemPublishedProfileStore(tmp_path),
+        profile_date=date(1969, 7, 20),
+        profile_type=ProfileType.STANDARD_STATISTICAL,
+        payload=payload("Derived snapshot profile."),
+        statement_evidence=[
+            PublicationStatementEvidenceInput(
+                statement_path="/sections/evidence_notes/0",
+                derived_value_id=derived_value.id,
+            )
+        ],
+    )
+    session.commit()
+    evidence = session.scalar(
+        select(PublicationStatementEvidence).where(
+            PublicationStatementEvidence.publication_manifest_id
+            == profile.publication_manifest_id
+        )
+    )
+    assert evidence is not None
+    assert evidence.evidence_snapshot["root_type"] == "derived_value"
+    assert evidence.evidence_snapshot["inputs"][0]["root"]["root_type"] == "resolved_claim"
+    assert evidence.evidence_snapshot_hash == content_hash(evidence.evidence_snapshot)
+
+
+@pytest.mark.integration
+def test_publication_snapshot_closes_over_mutable_transitive_dependencies(
+    session: Session, tmp_path: Path
+) -> None:
+    pipeline = PipelineRun(
+        pipeline_name="test-transitive-pipeline",
+        code_version="test-code-v1",
+        configuration_hash="1" * 64,
+        status="succeeded",
+        started_at=datetime(2026, 1, 1, tzinfo=UTC),
+        completed_at=datetime(2026, 1, 1, 0, 1, tzinfo=UTC),
+        details={"fixture_mode": True},
+    )
+    methodology = Methodology(
+        slug="test-transitive-methodology",
+        version="1",
+        name="Test transitive methodology",
+        description="Defines the test-only transitive publication value.",
+        method_kind="calculation",
+        formula="input",
+        code_version="test-code-v1",
+        definition_hash="2" * 64,
+    )
+    parent_source = Source(
+        slug="test-parent-source",
+        name="Test parent source",
+        publisher="Test suite",
+        canonical_url="https://example.invalid/parent",
+        legal_review_status=LegalReviewStatus.NOT_REQUIRED,
+    )
+    child_source = Source(
+        slug="test-child-source",
+        name="Test child source",
+        publisher="Test suite",
+        canonical_url="https://example.invalid/child",
+        legal_review_status=LegalReviewStatus.NOT_REQUIRED,
+    )
+    session.add_all([pipeline, methodology, parent_source, child_source])
+    session.flush()
+    parent_release = SourceRelease(
+        source_id=parent_source.id,
+        release_label="parent-v1",
+        source_url="https://example.invalid/parent/v1",
+        raw_storage_uri="test://raw/parent-v1",
+        raw_checksum_sha256="3" * 64,
+        raw_record_count=1,
+        pipeline_run_id=pipeline.id,
+        legal_review_status=LegalReviewStatus.NOT_REQUIRED,
+    )
+    child_release = SourceRelease(
+        source_id=child_source.id,
+        release_label="child-v1",
+        source_url="https://example.invalid/child/v1",
+        raw_storage_uri="test://raw/child-v1",
+        raw_checksum_sha256="4" * 64,
+        raw_record_count=1,
+        pipeline_run_id=pipeline.id,
+        legal_review_status=LegalReviewStatus.NOT_REQUIRED,
+    )
+    session.add_all([parent_release, child_release])
+    session.flush()
+    session.add(
+        SourceLineage(
+            child_release_id=child_release.id,
+            parent_release_id=parent_release.id,
+            relationship=SourceLineageRelationship.DERIVED,
+            methodology_id=methodology.id,
+            note="Test-only derived lineage.",
+        )
+    )
+    claim = Claim(
+        source_release_id=child_release.id,
+        source_record_locator="record:transitive",
+        claim_type="synthetic_assertion",
+        assertion_text="Test-only transitive assertion.",
+        pipeline_run_id=pipeline.id,
+    )
+    session.add(claim)
+    session.flush()
+    resolved = resolve_claim(
+        session,
+        canonical_key="test:transitive-resolution",
+        resolved_value={"statement": "Test transitive resolution."},
+        rationale="Test-only transitive dependency resolution.",
+        supporting_claim_ids=[claim.id],
+    )
+    geography = Geography(
+        stable_key="test-transitive-geography",
+        geography_kind="synthetic",
+    )
+    session.add(geography)
+    session.flush()
+    geography_version = GeographyVersion(
+        geography_id=geography.id,
+        provenance_resolved_claim_id=resolved.id,
+        name="Test historical geography",
+        identifier_code="TEST-1969",
+        valid_from=date(1960, 1, 1),
+        valid_to=date(1970, 12, 31),
+        boundary_geometry=WKTElement(
+            "MULTIPOLYGON(((-150 60,-149 60,-149 61,-150 61,-150 60)))",
+            srid=4326,
+        ),
+    )
+    metric = Metric(
+        metric_key="test-transitive-metric",
+        display_name="Test transitive metric",
+        unit="test-unit",
+        definition="The complete meaning of the test-only value.",
+        provenance_resolved_claim_id=resolved.id,
+        methodology_id=methodology.id,
+    )
+    session.add_all([geography_version, metric])
+    session.flush()
+    observation = Observation(
+        metric_id=metric.id,
+        geography_version_id=geography_version.id,
+        source_release_id=child_release.id,
+        provenance_resolved_claim_id=resolved.id,
+        period_start=date(1969, 7, 20),
+        temporal_precision=TemporalPrecision.DAY,
+        temporal_assignment=TemporalAssignment.DIRECT_RECORD,
+        date_role=DateRole.OCCURRED,
+        value_numeric=Decimal("7"),
+        data_status=DataStatus.FINAL,
+    )
+    session.add(observation)
+    session.flush()
+    derived = DerivedValue(
+        metric_id=metric.id,
+        geography_version_id=geography_version.id,
+        methodology_id=methodology.id,
+        value_kind="test-derived-value",
+        period_start=date(1969, 7, 20),
+        temporal_assignment=TemporalAssignment.UNIFORM_PERIOD_ALLOCATION,
+        value_numeric=Decimal("7"),
+        data_status=DataStatus.FINAL,
+        comparability_status=ComparabilityStatus.COMPARABLE,
+        input_fingerprint="5" * 64,
+        calculation_version="test-code-v1",
+    )
+    session.add(derived)
+    session.flush()
+    session.add(
+        DerivedValueInput(
+            derived_value_id=derived.id,
+            observation_id=observation.id,
+            input_role="primary",
+        )
+    )
+    session.add_all(
+        [
+            QualityAssessment(
+                source_release_id=child_release.id,
+                methodology_id=methodology.id,
+                assessment_kind="release_quality",
+                score=Decimal("0.80"),
+                findings={"note": "release assessment"},
+            ),
+            QualityAssessment(
+                claim_id=claim.id,
+                methodology_id=methodology.id,
+                assessment_kind="claim_quality",
+                score=Decimal("0.81"),
+                findings={"note": "claim assessment"},
+            ),
+            QualityAssessment(
+                observation_id=observation.id,
+                methodology_id=methodology.id,
+                assessment_kind="observation_quality",
+                score=Decimal("0.82"),
+                findings={"note": "observation assessment"},
+            ),
+            QualityAssessment(
+                derived_value_id=derived.id,
+                methodology_id=methodology.id,
+                assessment_kind="derived_quality",
+                score=Decimal("0.83"),
+                findings={"note": "derived assessment"},
+            ),
+            QualityAssessment(
+                target_methodology_id=methodology.id,
+                assessment_kind="methodology_quality",
+                score=Decimal("0.84"),
+                findings={"note": "methodology assessment"},
+            ),
+        ]
+    )
+    session.flush()
+    profile = publish_day_profile(
+        session,
+        store=LocalFilesystemPublishedProfileStore(tmp_path),
+        profile_date=date(1969, 7, 20),
+        profile_type=ProfileType.STANDARD_STATISTICAL,
+        payload=payload("Transitive dependency snapshot profile."),
+        statement_evidence=[
+            PublicationStatementEvidenceInput(
+                statement_path="/sections/evidence_notes/0",
+                derived_value_id=derived.id,
+            )
+        ],
+    )
+    session.commit()
+    evidence = session.scalar(
+        select(PublicationStatementEvidence).where(
+            PublicationStatementEvidence.publication_manifest_id
+            == profile.publication_manifest_id
+        )
+    )
+    assert evidence is not None
+    snapshot = evidence.evidence_snapshot
+    derived_snapshot = snapshot["derived_value"]
+    assert derived_snapshot["metric"]["metric_key"] == "test-transitive-metric"
+    assert derived_snapshot["metric"]["unit"] == "test-unit"
+    geography_snapshot = derived_snapshot["geography_version"]
+    assert geography_snapshot["name"] == "Test historical geography"
+    assert geography_snapshot["boundary_geojson"]["type"] == "MultiPolygon"
+    observation_snapshot = snapshot["inputs"][0]["root"]["observation"]
+    release_snapshot = observation_snapshot["source_release"]["release"]
+    assert release_snapshot["pipeline_run"]["configuration_hash"] == "1" * 64
+    assert release_snapshot["lineage"][0]["parent_release"]["release"][
+        "raw_checksum_sha256"
+    ] == "3" * 64
+    assert {
+        item["assessment_kind"]
+        for item in derived_snapshot["quality_assessments"]
+    } == {"derived_quality"}
+    assert {
+        item["assessment_kind"]
+        for item in observation_snapshot["quality_assessments"]
+    } == {"observation_quality"}
+    claim_snapshot = derived_snapshot["metric"]["provenance_resolved_claim"]["evidence"][0][
+        "claim"
+    ]
+    assert {
+        item["assessment_kind"] for item in claim_snapshot["quality_assessments"]
+    } == {"claim_quality"}
+    assert {
+        item["assessment_kind"] for item in release_snapshot["quality_assessments"]
+    } == {"release_quality"}
+    assert {
+        item["assessment_kind"]
+        for item in derived_snapshot["methodology"]["quality_assessments"]
+    } == {"methodology_quality"}
+    assert evidence.evidence_snapshot_hash == content_hash(snapshot)
+
+
+@pytest.mark.integration
 def test_published_profile_is_immutable(session: Session, tmp_path: Path) -> None:
     profile = publish_day_profile(
         session,
@@ -110,7 +494,6 @@ def test_published_profile_is_immutable(session: Session, tmp_path: Path) -> Non
         profile_date=date(1969, 7, 20),
         profile_type=ProfileType.STANDARD_STATISTICAL,
         payload=payload("Immutable test profile."),
-        source_snapshot_hash="a" * 64,
         statement_evidence=statement_evidence(session),
     )
     session.commit()
@@ -138,7 +521,6 @@ def test_published_statement_evidence_cannot_move_to_a_draft_manifest(
         profile_date=date(1969, 7, 20),
         profile_type=ProfileType.STANDARD_STATISTICAL,
         payload=payload("Evidence immutability test profile."),
-        source_snapshot_hash="a" * 64,
         statement_evidence=statement_evidence(session),
     )
     session.commit()
@@ -208,7 +590,6 @@ def test_correction_creates_a_new_version_without_overwriting_original(session: 
         profile_date=date(1969, 7, 20),
         profile_type=ProfileType.STANDARD_STATISTICAL,
         payload=payload("Original test profile."),
-        source_snapshot_hash="a" * 64,
         statement_evidence=provenance,
     )
     session.commit()
@@ -221,7 +602,6 @@ def test_correction_creates_a_new_version_without_overwriting_original(session: 
         profile_date=date(1969, 7, 20),
         profile_type=ProfileType.STANDARD_STATISTICAL,
         payload=payload("Corrected test profile."),
-        source_snapshot_hash="a" * 64,
         statement_evidence=provenance,
         supersedes_manifest_id=original_manifest.id,
         supersedes_day_profile_id=original.id,
@@ -251,7 +631,6 @@ def test_publishing_requires_a_provenance_mapping_for_each_statement(
             profile_date=date(1969, 7, 20),
             profile_type=ProfileType.STANDARD_STATISTICAL,
             payload=payload("Unmapped test profile."),
-            source_snapshot_hash="a" * 64,
             statement_evidence=[],
         )
 
@@ -266,7 +645,6 @@ def test_publishing_rejects_an_untraceable_derived_statement(session: Session, t
             profile_date=date(1969, 7, 20),
             profile_type=ProfileType.STANDARD_STATISTICAL,
             payload=payload("Untraceable derived statement."),
-            source_snapshot_hash="a" * 64,
             statement_evidence=[
                 PublicationStatementEvidenceInput(
                     statement_path="/sections/evidence_notes/0",
@@ -356,7 +734,6 @@ def test_manifest_supersession_rejects_a_different_profile_date(session: Session
         profile_date=date(1969, 7, 20),
         profile_type=ProfileType.STANDARD_STATISTICAL,
         payload=payload("Original manifest identity test."),
-        source_snapshot_hash="a" * 64,
         statement_evidence=statement_evidence(session),
     )
     session.commit()
@@ -389,7 +766,6 @@ def test_publishing_rejects_a_second_successor_for_the_same_manifest(
         profile_date=date(1969, 7, 20),
         profile_type=ProfileType.STANDARD_STATISTICAL,
         payload=payload("Original linear-history profile."),
-        source_snapshot_hash="a" * 64,
         statement_evidence=provenance,
     )
     session.commit()
@@ -399,7 +775,6 @@ def test_publishing_rejects_a_second_successor_for_the_same_manifest(
         profile_date=date(1969, 7, 20),
         profile_type=ProfileType.STANDARD_STATISTICAL,
         payload=payload("First successor profile."),
-        source_snapshot_hash="a" * 64,
         statement_evidence=provenance,
         supersedes_manifest_id=original.publication_manifest_id,
         supersedes_day_profile_id=original.id,
@@ -412,7 +787,6 @@ def test_publishing_rejects_a_second_successor_for_the_same_manifest(
             profile_date=date(1969, 7, 20),
             profile_type=ProfileType.STANDARD_STATISTICAL,
             payload=payload("Invalid second successor profile."),
-            source_snapshot_hash="a" * 64,
             statement_evidence=provenance,
             supersedes_manifest_id=original.publication_manifest_id,
             supersedes_day_profile_id=original.id,
@@ -429,7 +803,6 @@ def test_publishing_rejects_cross_date_profile_supersession(session: Session, tm
         profile_date=date(1969, 7, 20),
         profile_type=ProfileType.STANDARD_STATISTICAL,
         payload=payload("Original test profile."),
-        source_snapshot_hash="a" * 64,
         statement_evidence=provenance,
     )
     session.commit()
@@ -442,7 +815,6 @@ def test_publishing_rejects_cross_date_profile_supersession(session: Session, tm
             profile_date=date(1970, 7, 20),
             profile_type=ProfileType.STANDARD_STATISTICAL,
             payload=replacement_payload,
-            source_snapshot_hash="a" * 64,
             statement_evidence=provenance,
             supersedes_manifest_id=original.publication_manifest_id,
             supersedes_day_profile_id=original.id,

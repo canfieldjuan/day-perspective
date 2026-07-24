@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Protocol
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
@@ -23,13 +23,22 @@ from app.models import (
     DayProfile,
     DerivedValue,
     DerivedValueInput,
+    Geography,
+    GeographyVersion,
+    Methodology,
+    Metric,
+    Observation,
+    PipelineRun,
     ProfileType,
     PublicationManifest,
     PublicationStatementEvidence,
     PublicationStatus,
+    QualityAssessment,
     ResolutionMethod,
     ResolvedClaim,
     ResolvedClaimEvidence,
+    Source,
+    SourceLineage,
     SourceRelease,
     TemporalAssignment,
     profile_type_for_date,
@@ -55,6 +64,13 @@ class PublicationStatementEvidenceInput:
     statement_path: str
     resolved_claim_id: UUID | None = None
     derived_value_id: UUID | None = None
+
+
+@dataclass(frozen=True)
+class SnapshottedStatementEvidence:
+    evidence: PublicationStatementEvidenceInput
+    snapshot: dict[str, Any]
+    snapshot_hash: str
 
 
 class LocalFilesystemPublishedProfileStore:
@@ -300,6 +316,487 @@ def _validate_statement_evidence(
     return evidence
 
 
+def _optional_date(value: date | datetime | None) -> str | None:
+    return value.isoformat() if value is not None else None
+
+
+def _optional_enum(value: Any) -> str | None:
+    return str(value.value) if value is not None else None
+
+
+def _methodology_core_snapshot(methodology: Methodology | None) -> dict[str, Any] | None:
+    if methodology is None:
+        return None
+    return {
+        "id": str(methodology.id),
+        "slug": methodology.slug,
+        "version": methodology.version,
+        "name": methodology.name,
+        "description": methodology.description,
+        "method_kind": methodology.method_kind,
+        "formula": methodology.formula,
+        "code_version": methodology.code_version,
+        "definition_hash": methodology.definition_hash,
+        "legal_review_status": methodology.legal_review_status.value,
+        "created_at": methodology.created_at.isoformat(),
+    }
+
+
+def _quality_assessment_snapshots(
+    session: Session,
+    *,
+    source_release_id: UUID | None = None,
+    claim_id: UUID | None = None,
+    observation_id: UUID | None = None,
+    derived_value_id: UUID | None = None,
+    target_methodology_id: UUID | None = None,
+) -> list[dict[str, Any]]:
+    conditions = []
+    for column, value in (
+        (QualityAssessment.source_release_id, source_release_id),
+        (QualityAssessment.claim_id, claim_id),
+        (QualityAssessment.observation_id, observation_id),
+        (QualityAssessment.derived_value_id, derived_value_id),
+        (QualityAssessment.target_methodology_id, target_methodology_id),
+    ):
+        if value is not None:
+            conditions.append(column == value)
+    if not conditions:
+        return []
+    rows = list(
+        session.scalars(select(QualityAssessment).where(or_(*conditions)))
+    )
+    snapshots: list[dict[str, Any]] = []
+    for assessment in sorted(rows, key=lambda item: str(item.id)):
+        assessment_methodology = (
+            session.get(Methodology, assessment.methodology_id)
+            if assessment.methodology_id is not None
+            else None
+        )
+        snapshots.append(
+            {
+                "id": str(assessment.id),
+                "source_release_id": (
+                    str(assessment.source_release_id)
+                    if assessment.source_release_id is not None
+                    else None
+                ),
+                "claim_id": str(assessment.claim_id) if assessment.claim_id is not None else None,
+                "observation_id": (
+                    str(assessment.observation_id)
+                    if assessment.observation_id is not None
+                    else None
+                ),
+                "derived_value_id": (
+                    str(assessment.derived_value_id)
+                    if assessment.derived_value_id is not None
+                    else None
+                ),
+                "target_methodology_id": (
+                    str(assessment.target_methodology_id)
+                    if assessment.target_methodology_id is not None
+                    else None
+                ),
+                "assessment_kind": assessment.assessment_kind,
+                "score": str(assessment.score) if assessment.score is not None else None,
+                "findings": assessment.findings,
+                "legal_review_status": assessment.legal_review_status.value,
+                "assessed_at": assessment.assessed_at.isoformat(),
+                "assessment_methodology": _methodology_core_snapshot(
+                    assessment_methodology
+                ),
+            }
+        )
+    return snapshots
+
+
+def _methodology_snapshot(
+    session: Session, methodology: Methodology | None
+) -> dict[str, Any] | None:
+    snapshot = _methodology_core_snapshot(methodology)
+    if methodology is None or snapshot is None:
+        return None
+    snapshot["quality_assessments"] = _quality_assessment_snapshots(
+        session, target_methodology_id=methodology.id
+    )
+    return snapshot
+
+
+def _pipeline_run_snapshot(session: Session, pipeline_run_id: UUID | None) -> dict[str, Any] | None:
+    if pipeline_run_id is None:
+        return None
+    pipeline_run = session.get(PipelineRun, pipeline_run_id)
+    if pipeline_run is None:
+        raise ValueError("Publication evidence references an unknown pipeline run.")
+    return {
+        "id": str(pipeline_run.id),
+        "pipeline_name": pipeline_run.pipeline_name,
+        "code_version": pipeline_run.code_version,
+        "configuration_hash": pipeline_run.configuration_hash,
+        "status": pipeline_run.status,
+        "started_at": pipeline_run.started_at.isoformat(),
+        "completed_at": _optional_date(pipeline_run.completed_at),
+        "details": pipeline_run.details,
+    }
+
+
+def _source_release_snapshot(
+    session: Session,
+    release_id: UUID,
+    *,
+    lineage_stack: frozenset[UUID] = frozenset(),
+) -> dict[str, Any]:
+    if release_id in lineage_stack:
+        raise ValueError("Publication evidence contains cyclic source lineage.")
+    release = session.get(SourceRelease, release_id)
+    if release is None:
+        raise ValueError("Publication evidence references an unknown source release.")
+    source = session.get(Source, release.source_id)
+    if source is None:
+        raise ValueError("Publication evidence references a source release without a source.")
+    lineage_rows = list(
+        session.scalars(
+            select(SourceLineage).where(SourceLineage.child_release_id == release.id)
+        )
+    )
+    next_lineage_stack = lineage_stack | {release.id}
+    lineage: list[dict[str, Any]] = []
+    for edge in sorted(
+        lineage_rows,
+        key=lambda item: (item.relationship.value, str(item.parent_release_id), str(item.id)),
+    ):
+        methodology = (
+            session.get(Methodology, edge.methodology_id)
+            if edge.methodology_id is not None
+            else None
+        )
+        lineage.append(
+            {
+                "id": str(edge.id),
+                "relationship": edge.relationship.value,
+                "note": edge.note,
+                "created_at": edge.created_at.isoformat(),
+                "methodology": _methodology_snapshot(session, methodology),
+                "parent_release": _source_release_snapshot(
+                    session,
+                    edge.parent_release_id,
+                    lineage_stack=next_lineage_stack,
+                ),
+            }
+        )
+    return {
+        "source": {
+            "id": str(source.id),
+            "slug": source.slug,
+            "name": source.name,
+            "publisher": source.publisher,
+            "canonical_url": source.canonical_url,
+            "legal_review_status": source.legal_review_status.value,
+        },
+        "release": {
+            "id": str(release.id),
+            "release_label": release.release_label,
+            "source_url": release.source_url,
+            "published_at": _optional_date(release.published_at),
+            "retrieved_at": _optional_date(release.retrieved_at),
+            "ingested_at": _optional_date(release.ingested_at),
+            "raw_storage_uri": release.raw_storage_uri,
+            "raw_checksum_sha256": release.raw_checksum_sha256,
+            "raw_record_count": release.raw_record_count,
+            "legal_review_status": release.legal_review_status.value,
+            "pipeline_run": _pipeline_run_snapshot(session, release.pipeline_run_id),
+            "metadata": release.metadata_json,
+            "quality_assessments": _quality_assessment_snapshots(
+                session, source_release_id=release.id
+            ),
+            "lineage": lineage,
+        },
+    }
+
+
+def _claim_snapshot(session: Session, claim: Claim) -> dict[str, Any]:
+    return {
+        "id": str(claim.id),
+        "source_record_locator": claim.source_record_locator,
+        "claim_type": claim.claim_type,
+        "assertion_status": claim.assertion_status.value,
+        "assertion_text": claim.assertion_text,
+        "assertion": claim.assertion_json,
+        "temporal_start": _optional_date(claim.temporal_start),
+        "temporal_end": _optional_date(claim.temporal_end),
+        "temporal_precision": claim.temporal_precision.value,
+        "temporal_assignment": claim.temporal_assignment.value,
+        "date_role": _optional_enum(claim.date_role),
+        "data_status": claim.data_status.value,
+        "missing_reason": _optional_enum(claim.missing_reason),
+        "supersedes_claim_id": (
+            str(claim.supersedes_claim_id) if claim.supersedes_claim_id is not None else None
+        ),
+        "pipeline_run": _pipeline_run_snapshot(session, claim.pipeline_run_id),
+        "imported_at": claim.imported_at.isoformat(),
+        "source_release": _source_release_snapshot(session, claim.source_release_id),
+        "quality_assessments": _quality_assessment_snapshots(session, claim_id=claim.id),
+    }
+
+
+def _resolved_claim_snapshot(session: Session, resolved_claim_id: UUID) -> dict[str, Any]:
+    resolved = session.get(ResolvedClaim, resolved_claim_id)
+    if resolved is None:
+        raise ValueError("Publication evidence references an unknown resolved claim.")
+    evidence_rows = list(
+        session.scalars(
+            select(ResolvedClaimEvidence).where(
+                ResolvedClaimEvidence.resolved_claim_id == resolved.id
+            )
+        )
+    )
+    ordered_evidence = sorted(
+        evidence_rows,
+        key=lambda item: (0 if item.stance == "supporting" else 1, str(item.claim_id)),
+    )
+    if not any(item.stance == "supporting" for item in ordered_evidence):
+        raise ValueError("Published resolved claims require supporting imported evidence.")
+    evidence: list[dict[str, Any]] = []
+    for item in ordered_evidence:
+        claim = session.get(Claim, item.claim_id)
+        if claim is None:
+            raise ValueError("Resolved publication evidence references an unknown imported claim.")
+        evidence.append(
+            {
+                "stance": item.stance,
+                "note": item.note,
+                "claim": _claim_snapshot(session, claim),
+            }
+        )
+    methodology = (
+        session.get(Methodology, resolved.methodology_id)
+        if resolved.methodology_id is not None
+        else None
+    )
+    return {
+        "schema_version": "1",
+        "root_type": "resolved_claim",
+        "resolved_claim": {
+            "id": str(resolved.id),
+            "canonical_key": resolved.canonical_key,
+            "version": resolved.version,
+            "resolved_value": resolved.resolved_value,
+            "resolution_method": resolved.resolution_method.value,
+            "comparability_status": resolved.comparability_status.value,
+            "rationale": resolved.rationale,
+            "supersedes_resolved_claim_id": (
+                str(resolved.supersedes_resolved_claim_id)
+                if resolved.supersedes_resolved_claim_id is not None
+                else None
+            ),
+            "resolved_at": resolved.resolved_at.isoformat(),
+            "methodology": _methodology_snapshot(session, methodology),
+        },
+        "evidence": evidence,
+    }
+
+
+def _geography_version_snapshot(
+    session: Session, geography_version_id: UUID | None
+) -> dict[str, Any] | None:
+    if geography_version_id is None:
+        return None
+    version = session.get(GeographyVersion, geography_version_id)
+    if version is None:
+        raise ValueError("Publication evidence references an unknown geography version.")
+    geography = session.get(Geography, version.geography_id)
+    if geography is None:
+        raise ValueError("Publication evidence references a geography version without a geography.")
+    boundary_geojson = session.scalar(
+        select(func.ST_AsGeoJSON(GeographyVersion.boundary_geometry)).where(
+            GeographyVersion.id == version.id
+        )
+    )
+    return {
+        "id": str(version.id),
+        "geography": {
+            "id": str(geography.id),
+            "stable_key": geography.stable_key,
+            "geography_kind": geography.geography_kind,
+            "created_at": geography.created_at.isoformat(),
+        },
+        "name": version.name,
+        "identifier_code": version.identifier_code,
+        "valid_from": version.valid_from.isoformat(),
+        "valid_to": _optional_date(version.valid_to),
+        "boundary_geojson": (
+            json.loads(boundary_geojson) if boundary_geojson is not None else None
+        ),
+        "created_at": version.created_at.isoformat(),
+        "provenance_resolved_claim": _resolved_claim_snapshot(
+            session, version.provenance_resolved_claim_id
+        ),
+    }
+
+
+def _metric_snapshot(session: Session, metric_id: UUID | None) -> dict[str, Any] | None:
+    if metric_id is None:
+        return None
+    metric = session.get(Metric, metric_id)
+    if metric is None:
+        raise ValueError("Publication evidence references an unknown metric.")
+    methodology = (
+        session.get(Methodology, metric.methodology_id)
+        if metric.methodology_id is not None
+        else None
+    )
+    return {
+        "id": str(metric.id),
+        "metric_key": metric.metric_key,
+        "display_name": metric.display_name,
+        "unit": metric.unit,
+        "definition": metric.definition,
+        "data_status": metric.data_status.value,
+        "created_at": metric.created_at.isoformat(),
+        "methodology": _methodology_snapshot(session, methodology),
+        "provenance_resolved_claim": _resolved_claim_snapshot(
+            session, metric.provenance_resolved_claim_id
+        ),
+    }
+
+
+def _observation_snapshot(session: Session, observation_id: UUID) -> dict[str, Any]:
+    observation = session.get(Observation, observation_id)
+    if observation is None:
+        raise ValueError("Derived publication evidence references an unknown observation.")
+    provenance = (
+        _resolved_claim_snapshot(session, observation.provenance_resolved_claim_id)
+        if observation.provenance_resolved_claim_id is not None
+        else None
+    )
+    return {
+        "id": str(observation.id),
+        "metric": _metric_snapshot(session, observation.metric_id),
+        "geography_version": _geography_version_snapshot(
+            session, observation.geography_version_id
+        ),
+        "period_start": observation.period_start.isoformat(),
+        "period_end": _optional_date(observation.period_end),
+        "temporal_precision": observation.temporal_precision.value,
+        "temporal_assignment": observation.temporal_assignment.value,
+        "date_role": observation.date_role.value,
+        "value_numeric": (
+            str(observation.value_numeric) if observation.value_numeric is not None else None
+        ),
+        "value_text": observation.value_text,
+        "data_status": observation.data_status.value,
+        "missing_reason": _optional_enum(observation.missing_reason),
+        "source_release": _source_release_snapshot(session, observation.source_release_id),
+        "provenance_resolved_claim": provenance,
+        "quality_assessments": _quality_assessment_snapshots(
+            session, observation_id=observation.id
+        ),
+    }
+
+
+def _derived_value_snapshot(session: Session, derived_value_id: UUID) -> dict[str, Any]:
+    derived = session.get(DerivedValue, derived_value_id)
+    if derived is None:
+        raise ValueError("Publication evidence references an unknown derived value.")
+    methodology = session.get(Methodology, derived.methodology_id)
+    if methodology is None:
+        raise ValueError("Derived publication evidence requires a versioned methodology.")
+    input_rows = list(
+        session.scalars(
+            select(DerivedValueInput).where(DerivedValueInput.derived_value_id == derived.id)
+        )
+    )
+    ordered_inputs = sorted(input_rows, key=lambda item: (item.input_role, str(item.id)))
+    inputs: list[dict[str, Any]] = []
+    for item in ordered_inputs:
+        if item.resolved_claim_id is not None:
+            root = _resolved_claim_snapshot(session, item.resolved_claim_id)
+        elif item.observation_id is not None:
+            root = {
+                "schema_version": "1",
+                "root_type": "observation",
+                "observation": _observation_snapshot(session, item.observation_id),
+            }
+        else:
+            raise ValueError("Derived publication evidence contains an empty input.")
+        inputs.append({"input_role": item.input_role, "root": root})
+    direct_provenance = (
+        _resolved_claim_snapshot(session, derived.provenance_resolved_claim_id)
+        if derived.provenance_resolved_claim_id is not None
+        else None
+    )
+    if direct_provenance is None and not inputs:
+        raise ValueError("Published derived values require complete durable lineage.")
+    return {
+        "schema_version": "1",
+        "root_type": "derived_value",
+        "derived_value": {
+            "id": str(derived.id),
+            "metric": _metric_snapshot(session, derived.metric_id),
+            "geography_version": _geography_version_snapshot(
+                session, derived.geography_version_id
+            ),
+            "value_kind": derived.value_kind,
+            "period_start": derived.period_start.isoformat(),
+            "period_end": _optional_date(derived.period_end),
+            "temporal_assignment": derived.temporal_assignment.value,
+            "value_numeric": (
+                str(derived.value_numeric) if derived.value_numeric is not None else None
+            ),
+            "value": derived.value_json,
+            "data_status": derived.data_status.value,
+            "missing_reason": _optional_enum(derived.missing_reason),
+            "comparability_status": derived.comparability_status.value,
+            "input_fingerprint": derived.input_fingerprint,
+            "calculation_version": derived.calculation_version,
+            "created_at": derived.created_at.isoformat(),
+            "methodology": _methodology_snapshot(session, methodology),
+            "quality_assessments": _quality_assessment_snapshots(
+                session, derived_value_id=derived.id
+            ),
+        },
+        "direct_provenance": direct_provenance,
+        "inputs": inputs,
+    }
+
+
+def _snapshot_statement_evidence(
+    session: Session,
+    evidence: Iterable[PublicationStatementEvidenceInput],
+) -> list[SnapshottedStatementEvidence]:
+    snapshotted: list[SnapshottedStatementEvidence] = []
+    for item in evidence:
+        if item.resolved_claim_id is not None:
+            snapshot = _resolved_claim_snapshot(session, item.resolved_claim_id)
+        elif item.derived_value_id is not None:
+            snapshot = _derived_value_snapshot(session, item.derived_value_id)
+        else:
+            raise ValueError("Publication evidence has no provenance root.")
+        snapshotted.append(
+            SnapshottedStatementEvidence(
+                evidence=item,
+                snapshot=snapshot,
+                snapshot_hash=content_hash(snapshot),
+            )
+        )
+    return sorted(snapshotted, key=lambda item: item.evidence.statement_path)
+
+
+def _source_snapshot_hash(evidence: Iterable[SnapshottedStatementEvidence]) -> str:
+    return content_hash(
+        {
+            "schema_version": "1",
+            "statements": [
+                {
+                    "statement_path": item.evidence.statement_path,
+                    "evidence_snapshot_hash": item.snapshot_hash,
+                }
+                for item in evidence
+            ],
+        }
+    )
+
+
 def _validate_profile_supersession(
     session: Session,
     *,
@@ -329,7 +826,6 @@ def publish_day_profile(
     profile_date: date,
     profile_type: ProfileType,
     payload: dict[str, Any],
-    source_snapshot_hash: str,
     statement_evidence: Iterable[PublicationStatementEvidenceInput],
     supersedes_manifest_id: UUID | None = None,
     supersedes_day_profile_id: UUID | None = None,
@@ -343,6 +839,7 @@ def publish_day_profile(
         profile_date=profile_date,
         profile_type=profile_type,
     )
+    snapshotted_evidence = _snapshot_statement_evidence(session, evidence)
     _validate_profile_supersession(
         session,
         profile_date=profile_date,
@@ -366,10 +863,20 @@ def publish_day_profile(
         version=version,
         status=PublicationStatus.DRAFT,
         content_hash=digest,
-        source_snapshot_hash=source_snapshot_hash,
+        source_snapshot_hash=_source_snapshot_hash(snapshotted_evidence),
         storage_uri="pending://local-filesystem-write",
         code_version=get_settings().service_version,
         supersedes_manifest_id=supersedes_manifest_id,
+        metadata_json={
+            "evidence_snapshot_schema_version": "1",
+            "statement_evidence_hashes": [
+                {
+                    "statement_path": item.evidence.statement_path,
+                    "evidence_snapshot_hash": item.snapshot_hash,
+                }
+                for item in snapshotted_evidence
+            ],
+        },
     )
     session.add(manifest)
     session.flush()
@@ -377,11 +884,13 @@ def publish_day_profile(
         [
             PublicationStatementEvidence(
                 publication_manifest_id=manifest.id,
-                statement_path=item.statement_path,
-                resolved_claim_id=item.resolved_claim_id,
-                derived_value_id=item.derived_value_id,
+                statement_path=item.evidence.statement_path,
+                resolved_claim_id=item.evidence.resolved_claim_id,
+                derived_value_id=item.evidence.derived_value_id,
+                evidence_snapshot=item.snapshot,
+                evidence_snapshot_hash=item.snapshot_hash,
             )
-            for item in evidence
+            for item in snapshotted_evidence
         ]
     )
     session.flush()

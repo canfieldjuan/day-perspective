@@ -696,6 +696,9 @@ class QualityAssessment(Base):
     methodology_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("methodologies.id", ondelete="RESTRICT")
     )
+    target_methodology_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("methodologies.id", ondelete="RESTRICT")
+    )
     legal_review_status: Mapped[LegalReviewStatus] = mapped_column(
         enum_type(LegalReviewStatus, "legal_review_status"), default=LegalReviewStatus.NOT_REQUIRED
     )
@@ -750,4 +753,6 @@ class PublicationStatementEvidence(Base):
     derived_value_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("derived_values.id", ondelete="RESTRICT")
     )
+    evidence_snapshot: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    evidence_snapshot_hash: Mapped[str] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

@@ -17,10 +17,12 @@ raw source record
 Source releases and final publication records are append-only in this phase:
 later work may supersede them but cannot erase a release or published artifact.
 Imported claims are tied to an immutable release and use explicit lifecycle
-states, but the schema does not yet make every claim row immutable. Resolutions
-and derivations are version-capable products; the broader post-publication
-root-freeze versus immutable-snapshot policy is deliberately deferred for
-senior review before real profiles are published.
+states, but the schema does not make every claim row immutable. Resolutions and
+derivations are version-capable working products. Publication captures each
+statement's complete evidence root as canonical JSON with its own SHA-256 hash.
+The manifest source-snapshot hash is derived from those ordered hashes. Later
+working-graph edits therefore cannot alter the evidence representation retained
+for an earlier published statement.
 
 ## Import and review
 
@@ -89,9 +91,13 @@ it cannot alter evidence or introduce a provenance-free statement.
 ## Publication and correction
 
 Profile construction writes JSON, computes a content hash, then creates a
-manifest, immutable statement-evidence rows, and a profile version. Every JSON
-statement path must map to exactly one resolved claim or derived value before
-the manifest can be published. `publication_status` is `draft`, `published`,
+manifest, immutable statement-evidence rows with canonical evidence snapshots,
+and a profile version. Every JSON statement path must map to exactly one
+resolved claim or derived value before the manifest can be published. Snapshot
+construction must find every referenced claim, release, methodology, and
+derived input, including transitive metric definitions, geography versions,
+quality assessments, pipeline runs, and source lineage, or publication fails.
+`publication_status` is `draft`, `published`,
 `superseded`, or `withdrawn`; it is distinct from data status. A day profile
 references a publication manifest, and a published manifest is immutable.
 
