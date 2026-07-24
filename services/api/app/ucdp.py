@@ -5,7 +5,7 @@ import hashlib
 import io
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from uuid import UUID
 
@@ -285,6 +285,10 @@ def ingest_ucdp_annual(
                 pipeline_run_id=run.id,
                 metadata_json={
                     "dataset": "UCDP/PRIO Armed Conflict Dataset",
+                    "quality_contract_version": "1",
+                    "required_quality_checks": [
+                        "ucdp_prio_1964_unique_conflict_years"
+                    ],
                     "version": "26.1",
                     "fixture": "official minimal 1964 excerpt",
                     "upstream_archive_sha256": (
@@ -769,6 +773,22 @@ def ingest_ucdp_ged(
                 if source_date_precision == 1
                 else TemporalPrecision.UNKNOWN
             )
+            try:
+                latitude = Decimal(row["latitude"])
+                longitude = Decimal(row["longitude"])
+            except InvalidOperation as error:
+                raise ValueError(
+                    "GED coordinates must be finite numeric values."
+                ) from error
+            if (
+                not latitude.is_finite()
+                or not longitude.is_finite()
+                or not Decimal("-90") <= latitude <= Decimal("90")
+                or not Decimal("-180") <= longitude <= Decimal("180")
+            ):
+                raise ValueError(
+                    "GED coordinates must be finite and within latitude/longitude bounds."
+                )
             low = int(row["low"])
             best = int(row["best"])
             high = int(row["high"])
@@ -794,6 +814,10 @@ def ingest_ucdp_ged(
                 pipeline_run_id=run.id,
                 metadata_json={
                     "dataset": "UCDP Georeferenced Event Dataset Global",
+                    "quality_contract_version": "1",
+                    "required_quality_checks": [
+                        "ucdp_ged_event_6833_schema_and_bounds"
+                    ],
                     "version": "26.1",
                     "fixture": "official minimal event excerpt",
                     "upstream_archive_sha256": (
@@ -840,8 +864,8 @@ def ingest_ucdp_ged(
                 (
                     "coordinates",
                     {
-                        "latitude": row["latitude"],
-                        "longitude": row["longitude"],
+                        "latitude": str(latitude),
+                        "longitude": str(longitude),
                     },
                 ),
                 (
@@ -1197,7 +1221,7 @@ def review_ucdp_ged(session: Session, source_release_id: UUID) -> Event:
                 methodology_id=methodology.id,
                 assessment_kind="ucdp_ged_event_quality_v1",
                 findings={
-                    "temporal_precision": "day",
+                    "temporal_precision": temporal_precision.value,
                     "geographic_precision": "named town and coordinates",
                     "measurement_directness": "direct deaths",
                     "source_agreement": "single source",
@@ -1207,11 +1231,22 @@ def review_ucdp_ged(session: Session, source_release_id: UUID) -> Event:
                         "high": fatality_high,
                     },
                 },
-                public_grade="B",
+                public_grade=(
+                    "B" if temporal_precision == TemporalPrecision.DAY else "C"
+                ),
                 public_explanation=(
-                    "Grade B: official event-level UCDP record with day and place "
-                    "precision. It is single-source evidence and the fatality high "
-                    "bound is much larger than the best estimate."
+                    (
+                        "Grade B: official event-level UCDP record with day and place "
+                        "precision. It is single-source evidence and the fatality high "
+                        "bound is much larger than the best estimate."
+                    )
+                    if temporal_precision == TemporalPrecision.DAY
+                    else (
+                        "Grade C: official event-level UCDP record with place detail, "
+                        "but the source interval does not support day precision. It is "
+                        "single-source evidence and the fatality high bound is much "
+                        "larger than the best estimate."
+                    )
                 ),
                 legal_review_status=LegalReviewStatus.NOT_REQUIRED,
             )

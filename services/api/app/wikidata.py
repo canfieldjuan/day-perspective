@@ -298,6 +298,8 @@ def ingest_wikidata_candidate(
                 pipeline_run_id=run.id,
                 metadata_json={
                     "entity_id": ENTITY_ID,
+                    "quality_contract_version": "1",
+                    "required_quality_checks": ["wikidata_q749610_schema"],
                     "revision_id": REVISION_ID,
                     "fixture": "official pinned entity JSON",
                     "license": "CC0-1.0",

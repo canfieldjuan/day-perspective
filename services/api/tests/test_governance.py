@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -7,12 +8,19 @@ from sqlalchemy import func, select, update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 
-from app.governance import SourceReleaseLicense, lineage_root_ids
+from app.governance import (
+    EditorialSelection,
+    EditorialSelectionStatus,
+    SourceReleaseLicense,
+    lineage_root_ids,
+    record_editorial_selection,
+)
 from app.models import (
     DerivedValue,
     PublicationManifest,
     PublicationStatementEvidence,
     QualityCheck,
+    ResolvedClaim,
     Source,
     SourceLineage,
     SourceLineageRelationship,
@@ -114,6 +122,102 @@ def test_non_passed_required_check_blocks_publication(
             store=LocalFilesystemPublishedProfileStore(tmp_path / "published"),
         )
     assert session.scalar(select(func.count()).select_from(PublicationManifest)) == 0
+
+
+def test_passing_unrelated_check_cannot_satisfy_adapter_quality_contract(
+    session: Session, tmp_path: Path
+) -> None:
+    result = ingest(session, tmp_path)
+    assert result.source_release_id is not None
+    accept_and_resolve_release(session, result.source_release_id)
+    check = session.scalar(select(QualityCheck))
+    assert check is not None
+    check.check_name = "unrelated_passing_check"
+    session.flush()
+
+    with pytest.raises(ValueError, match="missing required quality checks"):
+        publish_golden_profile(
+            session,
+            store=LocalFilesystemPublishedProfileStore(tmp_path / "published"),
+        )
+
+
+def test_editorial_decisions_append_a_versioned_history(
+    session: Session, tmp_path: Path
+) -> None:
+    result = ingest(session, tmp_path)
+    assert result.source_release_id is not None
+    accept_and_resolve_release(session, result.source_release_id)
+    root = session.scalar(select(ResolvedClaim))
+    assert root is not None
+
+    deferred = record_editorial_selection(
+        session,
+        profile_date=date(1964, 3, 28),
+        section_key="recorded_on_this_date",
+        resolved_claim_id=root.id,
+        status=EditorialSelectionStatus.DEFERRED,
+        display_rank=None,
+        rationale="Awaiting a second editorial pass.",
+        reviewed_by="test-reviewer",
+    )
+    selected = record_editorial_selection(
+        session,
+        profile_date=date(1964, 3, 28),
+        section_key="recorded_on_this_date",
+        resolved_claim_id=root.id,
+        status=EditorialSelectionStatus.SELECTED,
+        display_rank=1,
+        rationale="Approved after the second editorial pass.",
+        reviewed_by="test-reviewer",
+    )
+
+    assert selected.id != deferred.id
+    assert deferred.decision_version == 1
+    assert selected.decision_version == 2
+    assert (
+        session.scalar(
+            select(func.count())
+            .select_from(EditorialSelection)
+            .where(
+                EditorialSelection.profile_date == date(1964, 3, 28),
+                EditorialSelection.resolved_claim_id == root.id,
+            )
+        )
+        == 2
+    )
+
+
+def test_latest_editorial_decision_controls_publication(
+    session: Session, tmp_path: Path
+) -> None:
+    result = ingest(session, tmp_path)
+    assert result.source_release_id is not None
+    accept_and_resolve_release(session, result.source_release_id)
+    review_context(session, tmp_path)
+    root = session.scalar(
+        select(ResolvedClaim).where(
+            ResolvedClaim.canonical_key
+            == "usgs:official19640328033616_30:event_identity"
+        )
+    )
+    assert root is not None
+    record_editorial_selection(
+        session,
+        profile_date=date(1964, 3, 27),
+        section_key="recorded_on_this_date",
+        resolved_claim_id=root.id,
+        status=EditorialSelectionStatus.REJECTED,
+        display_rank=None,
+        rationale="Withdrawn from this profile after review.",
+        reviewed_by="test-reviewer",
+    )
+
+    with pytest.raises(ValueError, match="explicit editorial selection"):
+        publish_golden_profile(
+            session,
+            store=LocalFilesystemPublishedProfileStore(tmp_path / "published"),
+        )
 
 
 def test_quality_statement_uses_a_derived_evidence_root(

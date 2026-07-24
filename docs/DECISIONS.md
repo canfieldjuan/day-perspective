@@ -405,3 +405,49 @@ pins; document accepted risk.
 an existing React effect issue that was corrected.
 
 **Revisit trigger:** A new audit finding or framework compatibility issue.
+
+## D022: Make editorial review transitions append-only and explicitly ordered
+
+**Decision:** Store every changed editorial decision as a new row with a
+monotonic `decision_version`, and use only the latest version for publication
+eligibility.
+
+**Context:** The original one-row uniqueness rule made a deferred or rejected
+root impossible to select later. Ordering replacement rows by transaction
+timestamps would be ambiguous because PostgreSQL `now()` is stable within a
+transaction.
+
+**Alternatives considered:** Mutate the original row; order by timestamps and
+UUIDs; maintain only the latest state.
+
+**Reason:** Editorial history is evidence and must remain reconstructable with
+deterministic ordering.
+
+**Consequences:** Migration `0010` removes one-shot indexes, adds
+`decision_version`, and blocks unsafe downgrade when history exists.
+
+**Revisit trigger:** A generalized workflow ledger replaces editorial
+selections.
+
+## D023: Couple local publication artifacts to transaction rollback
+
+**Decision:** Stage a versioned artifact, finalize it for pre-commit inspection,
+and register ownership with the SQLAlchemy session so rollback or commit failure
+removes only the artifact created by that transaction.
+
+**Context:** Writing the immutable final object before the database commit could
+leave an orphan that blocked a retry at the same version.
+
+**Alternatives considered:** Finalize only after commit; overwrite conflicts;
+store artifacts inside PostgreSQL.
+
+**Reason:** Existing publication callers inspect the artifact before commit,
+while retries must not inherit failed transaction output.
+
+**Consequences:** Ordinary rollback and commit-failure paths are clean and
+retry version 1 successfully. A process crash between object finalization and
+database commit remains a documented local-storage limitation; an unreferenced
+version is recoverable on retry.
+
+**Revisit trigger:** Production object storage provides a durable
+prepare/finalize protocol or transactional outbox.

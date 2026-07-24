@@ -147,8 +147,10 @@ services that create this record.
 ### `editorial_selections`
 
 Append-only selection decisions for exactly one resolved claim or derived value
-in one date/section. It stores status, display rank, rationale and reviewer.
-Publication eligibility checks selected roots against this table.
+in one date/section. It stores a monotonically increasing `decision_version`,
+status, display rank, rationale and reviewer. Publication eligibility uses the
+highest decision version for each root; later selection, rejection or deferral
+never overwrites the earlier decision.
 
 ### Temporal assignment addition
 

@@ -20,6 +20,7 @@ from app.models import (
     EventTime,
     ImpactDirectness,
     PipelineRun,
+    QualityAssessment,
     QualityCheck,
     RawSourceRecord,
     ResolvedClaim,
@@ -349,3 +350,63 @@ def test_ucdp_ged_rejects_best_estimate_outside_bounds_before_release(
     assert session.scalar(select(func.count()).select_from(SourceRelease)) == 0
     assert session.scalar(select(PipelineRun.status)) == "failed"
     assert session.scalar(select(QualityCheck.status)) == "failed"
+
+
+@pytest.mark.parametrize(
+    ("latitude", "longitude"),
+    [
+        ("not-a-number", "33.066667"),
+        ("91", "33.066667"),
+        ("8.600000", "181"),
+    ],
+)
+def test_ucdp_ged_rejects_invalid_coordinates_before_release(
+    session: Session,
+    tmp_path: Path,
+    latitude: str,
+    longitude: str,
+) -> None:
+    invalid = tmp_path / "invalid-ged-coordinates.csv"
+    invalid.write_text(
+        GED_FIXTURE.read_text(encoding="utf-8").replace(
+            ",8.600000,33.066667,100,",
+            f",{latitude},{longitude},100,",
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="GED coordinates"):
+        ingest_ucdp_ged(
+            session,
+            fixture_path=invalid,
+            raw_store=LocalFilesystemRawSourceStore(tmp_path / "raw"),
+        )
+
+    assert session.scalar(select(func.count()).select_from(SourceRelease)) == 0
+    assert session.scalar(select(PipelineRun.status)) == "failed"
+    assert session.scalar(select(QualityCheck.status)) == "failed"
+
+
+def test_ucdp_ged_quality_preserves_unknown_source_date_precision(
+    session: Session, tmp_path: Path
+) -> None:
+    imprecise = tmp_path / "imprecise-ged.csv"
+    imprecise.write_text(
+        GED_FIXTURE.read_text(encoding="utf-8").replace(
+            ",1,1,Nasir town",
+            ",2,1,Nasir town",
+        ),
+        encoding="utf-8",
+    )
+    result = ingest_ucdp_ged(
+        session,
+        fixture_path=imprecise,
+        raw_store=LocalFilesystemRawSourceStore(tmp_path / "raw"),
+    )
+    review_ucdp_ged(session, result.source_release_id)
+    assessment = session.scalar(select(QualityAssessment))
+
+    assert assessment is not None
+    assert assessment.findings["temporal_precision"] == "unknown"
+    assert assessment.public_grade == "C"
+    assert (assessment.public_explanation or "").startswith("Grade C:")

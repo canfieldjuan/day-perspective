@@ -29,9 +29,16 @@ from app.models import (
     ResolvedClaim,
     ResolvedClaimEvidence,
     ReviewTask,
+    Source,
+    SourceLineage,
+    SourceLineageRelationship,
     SourceRelease,
 )
-from app.services import LocalFilesystemPublishedProfileStore, content_hash
+from app.services import (
+    LocalFilesystemPublishedProfileStore,
+    content_hash,
+    create_source_release,
+)
 from app.ucdp import ingest_ucdp_annual, review_ucdp_annual
 from app.un_wpp import ingest_un_wpp, review_un_wpp
 from app.usgs import (
@@ -235,12 +242,32 @@ def test_geography_assignment_retains_version_and_point(
     assert location.display_label is not None and "Alaska" in location.display_label
 
 
-def test_out_of_tolerance_dissent_remains_unresolved() -> None:
+def evidence_releases(session: Session, count: int) -> list[SourceRelease]:
+    source = Source(slug=f"resolution-source-{count}", name="Resolution test source")
+    session.add(source)
+    session.flush()
+    return [
+        create_source_release(
+            session,
+            source_id=source.id,
+            release_label=f"release-{index}",
+            source_url=f"https://example.invalid/release-{index}",
+            raw_storage_uri=f"test://release-{index}",
+            raw_bytes=f"release-{index}".encode(),
+            raw_record_count=1,
+        )
+        for index in range(count)
+    ]
+
+
+def test_out_of_tolerance_dissent_remains_unresolved(session: Session) -> None:
+    releases = evidence_releases(session, 3)
     decision = deterministic_resolution(
+        session,
         (
-            EvidenceCandidate(9.2, True, "usgs"),
-            EvidenceCandidate(9.2, False, "independent"),
-            EvidenceCandidate(9.0, False, "dissent"),
+            EvidenceCandidate(9.2, True, releases[0].id),
+            EvidenceCandidate(9.2, False, releases[1].id),
+            EvidenceCandidate(9.0, False, releases[2].id),
         ),
         tolerance=0.05,
     )
@@ -250,23 +277,35 @@ def test_out_of_tolerance_dissent_remains_unresolved() -> None:
     assert decision.dissenting_indexes == (2,)
 
 
-def test_dependent_lineage_is_not_counted_as_independent() -> None:
+def test_dependent_lineage_is_not_counted_as_independent(session: Session) -> None:
+    releases = evidence_releases(session, 3)
+    session.add(
+        SourceLineage(
+            child_release_id=releases[1].id,
+            parent_release_id=releases[0].id,
+            relationship=SourceLineageRelationship.REPUBLISHED,
+        )
+    )
+    session.flush()
     decision = deterministic_resolution(
+        session,
         (
-            EvidenceCandidate("same", True, "usgs"),
-            EvidenceCandidate("same", False, "usgs"),
-            EvidenceCandidate("same", False, "other"),
+            EvidenceCandidate("same", True, releases[0].id),
+            EvidenceCandidate("same", False, releases[1].id),
+            EvidenceCandidate("same", False, releases[2].id),
         )
     )
 
     assert decision.independent_source_count == 2
 
 
-def test_unbounded_disagreement_remains_unresolved() -> None:
+def test_unbounded_disagreement_remains_unresolved(session: Session) -> None:
+    releases = evidence_releases(session, 2)
     decision = deterministic_resolution(
+        session,
         (
-            EvidenceCandidate("A", True, "one"),
-            EvidenceCandidate("B", False, "two"),
+            EvidenceCandidate("A", True, releases[0].id),
+            EvidenceCandidate("B", False, releases[1].id),
         )
     )
     assert decision.status == "unresolved"
@@ -611,3 +650,45 @@ def test_admin_decision_records_ledger_and_resolution_requires_prior_acceptance(
         assert decision.rationale.startswith("Matched the claim")
     finally:
         main.app.dependency_overrides.clear()
+
+
+def test_subsecond_usgs_timestamp_fails_before_release_creation(
+    session: Session, tmp_path: Path
+) -> None:
+    fixture = tmp_path / "subsecond.geojson"
+    payload = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    payload["features"][0]["properties"]["time"] += 1
+    fixture.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="subsecond precision"):
+        ingest_usgs(
+            session,
+            adapter=USGSEarthquakeAdapter(),
+            raw_store=LocalFilesystemRawSourceStore(tmp_path / "raw"),
+            fixture_path=fixture,
+        )
+
+    assert session.scalar(select(PipelineRun.status)) == "failed"
+    assert session.scalar(select(QualityCheck.status)) == "failed"
+    assert session.scalar(select(func.count()).select_from(SourceRelease)) == 0
+
+
+def test_canonical_event_type_comes_from_resolved_source_claim(
+    session: Session, tmp_path: Path
+) -> None:
+    fixture = tmp_path / "retyped.geojson"
+    payload = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    payload["features"][0]["properties"]["type"] = "seismic-event"
+    fixture.write_text(json.dumps(payload), encoding="utf-8")
+    result = ingest_usgs(
+        session,
+        adapter=USGSEarthquakeAdapter(),
+        raw_store=LocalFilesystemRawSourceStore(tmp_path / "raw"),
+        fixture_path=fixture,
+    )
+    assert result.source_release_id is not None
+    accept_and_resolve_release(session, result.source_release_id)
+
+    event = session.scalar(select(Event))
+    assert event is not None
+    assert event.event_type == "seismic-event"

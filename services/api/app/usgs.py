@@ -27,6 +27,7 @@ from app.governance import (
     LicenseInput,
     ReviewDecisionValue,
     assert_release_publication_eligible,
+    lineage_root_ids,
     record_claim_review,
     record_editorial_selection,
     register_release_license,
@@ -205,6 +206,11 @@ class USGSEarthquakeAdapter:
 
     def record_to_claims(self, record: USGSFeature) -> tuple[ClaimDraft, ...]:
         longitude, latitude, depth = record.geometry.coordinates
+        if record.properties.time % 1000 != 0:
+            raise ValueError(
+                "USGS timestamps with subsecond precision are not supported by "
+                "the current claim and publication schema"
+            )
         occurrence = datetime.fromtimestamp(record.properties.time / 1000, tz=UTC)
         local = occurrence.astimezone(ZoneInfo(ALASKA_TIMEZONE))
         offset = local.utcoffset()
@@ -435,6 +441,10 @@ def ingest_usgs(
                 pipeline_run_id=run.id,
                 metadata_json={
                     "dataset": "FDSN Event Web Service v1 GeoJSON",
+                    "quality_contract_version": "1",
+                    "required_quality_checks": [
+                        "usgs_schema_and_golden_record"
+                    ],
                     "retrieval_mode": "fixture" if fixture_path is not None else "live",
                     "record_locator": record.properties.url,
                     "usage_and_attribution": adapter.metadata.usage_notes,
@@ -537,10 +547,11 @@ class ResolutionDecision:
 class EvidenceCandidate:
     value: str | float
     authoritative: bool
-    lineage_root: str
+    source_release_id: UUID
 
 
 def deterministic_resolution(
+    session: Session,
     candidates: tuple[EvidenceCandidate, ...],
     *,
     tolerance: float | None = None,
@@ -569,7 +580,12 @@ def deterministic_resolution(
         ):
             agrees = abs(float(candidate.value) - float(baseline)) <= tolerance
         (supporting if agrees else dissenting).append(index)
-    independent = len({candidates[index].lineage_root for index in supporting})
+    independent_roots: set[UUID] = set()
+    for index in supporting:
+        independent_roots.update(
+            lineage_root_ids(session, candidates[index].source_release_id)
+        )
+    independent = len(independent_roots)
     if dissenting:
         return ResolutionDecision(
             "unresolved",
@@ -729,7 +745,7 @@ def accept_and_resolve_release(
         session.scalars(
             select(ReviewTask).where(
                 ReviewTask.claim_id.in_([claim.id for claim in claims]),
-                ReviewTask.status == "open",
+                ReviewTask.status.in_(("open", "in_progress")),
             )
         )
     )
@@ -760,7 +776,7 @@ def accept_and_resolve_release(
     if event is None:
         event = Event(
             resolved_claim_id=identity.id,
-            event_type="earthquake",
+            event_type=str(resolved["event_type"].resolved_value["type"]),
             canonical_title=str(resolved["event_title"].resolved_value["title"]),
             summary="Official USGS catalog occurrence selected for the golden date.",
             data_status=DataStatus.REPORTED,

@@ -99,17 +99,21 @@ Migrations in order:
 7. `20260724_0007_usgs_vertical_slice.py`
 8. `20260724_0008_publication_governance.py`
 9. `20260724_0009_period_context.py`
+10. `20260724_0010_editorial_selection_history.py`
 
 All foundation tables are implemented. `0008` adds immutable
 `source_release_licenses`, `claim_review_decisions` and
 `editorial_selections`. `0009` adds `period_context` so annual aggregates are
-not mislabeled. Source releases, raw records, published manifests, statement
+not mislabeled. `0010` replaces one-shot editorial selections with versioned,
+append-only decision histories. Source releases, raw records, published manifests, statement
 snapshots and day profiles are immutable. Missing values remain distinct from
 zero. Historical geography uses non-overlapping versions.
 
 Known schema compromise: publisher-managed object storage and the database do
-not share one atomic transaction. A failed database commit can leave an
-unreferenced immutable object, though it cannot make that object publicly
+not share one atomic transaction. The local adapter registers each new object
+with the SQLAlchemy transaction and removes it on rollback or commit failure;
+an abrupt process crash can still leave an unreferenced object. The next
+publication may recover an unreferenced version, but cannot make it publicly
 discoverable without a committed manifest. Garbage collection and durable
 object-store finalization remain production work.
 
@@ -285,6 +289,7 @@ Foundation and pipelines:
 
 - `services/api/alembic/versions/20260724_0008_publication_governance.py`
 - `services/api/alembic/versions/20260724_0009_period_context.py`
+- `services/api/alembic/versions/20260724_0010_editorial_selection_history.py`
 - `services/api/app/adapters/base.py`
 - `services/api/app/governance.py`
 - `services/api/app/un_wpp.py`

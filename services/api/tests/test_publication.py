@@ -30,6 +30,7 @@ from app.models import (
     PublicationStatementEvidence,
     PublicationStatus,
     QualityAssessment,
+    ResolvedClaim,
     Source,
     SourceLineage,
     SourceLineageRelationship,
@@ -835,3 +836,58 @@ def test_local_profile_store_refuses_to_replace_an_existing_artifact(tmp_path: P
 
     with pytest.raises(RuntimeError, match="manifest hash"):
         store.write(date(1969, 7, 20), ProfileType.STANDARD_STATISTICAL, target_payload)
+
+
+def test_failed_commit_discards_staged_profile_and_retry_reuses_version(
+    session: Session, tmp_path: Path
+) -> None:
+    store = LocalFilesystemPublishedProfileStore(tmp_path)
+    provenance = statement_evidence(session)
+    session.commit()
+    first_payload = payload("Aborted publication.")
+    profile = publish_day_profile(
+        session,
+        store=store,
+        profile_date=date(1969, 7, 20),
+        profile_type=ProfileType.STANDARD_STATISTICAL,
+        payload=first_payload,
+        statement_evidence=provenance,
+    )
+    manifest = session.get(PublicationManifest, profile.publication_manifest_id)
+    assert manifest is not None
+    storage_uri = manifest.storage_uri
+    assert (tmp_path / storage_uri).exists()
+    session.add(
+        ResolvedClaim(
+            canonical_key="test:force-publication-rollback",
+            version=1,
+            resolved_value={"invalid": True},
+            resolution_method="editorial_review",
+            comparability_status="unknown",
+            rationale="Missing evidence forces commit failure.",
+        )
+    )
+
+    with pytest.raises(DBAPIError):
+        session.commit()
+    session.rollback()
+
+    assert not (tmp_path / storage_uri).exists()
+    replacement_payload = payload("Successful retry.")
+    replacement = publish_day_profile(
+        session,
+        store=store,
+        profile_date=date(1969, 7, 20),
+        profile_type=ProfileType.STANDARD_STATISTICAL,
+        payload=replacement_payload,
+        statement_evidence=provenance,
+    )
+    session.commit()
+    replacement_manifest = session.get(
+        PublicationManifest, replacement.publication_manifest_id
+    )
+    assert replacement_manifest is not None
+    assert replacement_manifest.version == 1
+    assert store.read(
+        replacement_manifest.storage_uri, replacement_manifest.content_hash
+    ) == replacement_payload

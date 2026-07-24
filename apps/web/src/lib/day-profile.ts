@@ -182,7 +182,6 @@ export function isPublishedProfileResponse(
   return (
     sections !== undefined &&
     isSectionStates(profile.section_states) &&
-    DAY_PROFILE_SECTION_KEYS.every((key) => Array.isArray(sections[key])) &&
     Object.entries(sections).every(
       ([key, statements]) =>
         isSectionKey(key) &&

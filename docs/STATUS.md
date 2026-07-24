@@ -1,6 +1,6 @@
 # Senior Takeover Status
 
-Status time: 2026-07-24 14:10 CDT
+Status time: 2026-07-24 18:20 CDT
 
 ## Current Phase
 
@@ -12,9 +12,8 @@ the contracted MVP and is not production-ready.
 - Branch: `agent/senior-takeover-mvp`
 - Baseline commit: `51bc1b0de577d861a5baa28fa4e857df9ddfc5c2`
 - Implementation commit: `c95b8db`
-- GitHub publication: blocked by an invalid HTTPS credential and unavailable
-  SSH key; no Ready PR was opened
-- Migration head: `20260724_0009`
+- GitHub publication: Ready PR #3 is under review
+- Migration head: `20260724_0010`
 - Public shell: `1900-01-01` through `2025-12-31`
 - Published coverage: only `1964-03-27`
 - Golden set: 100 selected candidates, zero manually reviewed, zero generated
@@ -65,6 +64,9 @@ the contracted MVP and is not production-ready.
 
 ## Verification Evidence
 
+- 2026-07-24 18:20 CDT: review-hardening `make check` passed with Ruff,
+  mypy, 100 Python tests, contracts checks and 9 frontend tests. The existing
+  Starlette TestClient deprecation warning remains.
 - `make clean-reset` through `make publish-golden`: passed at 13:50 CDT.
 - `make check`: 71 Python tests, 1 contracts test and 5 web tests passed after
   dependency upgrades.

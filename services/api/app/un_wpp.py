@@ -346,6 +346,10 @@ def ingest_un_wpp(
                 pipeline_run_id=run.id,
                 metadata_json={
                     "dataset": "World Population Prospects 2024",
+                    "quality_contract_version": "1",
+                    "required_quality_checks": [
+                        "un_wpp_schema_selected_world_rows"
+                    ],
                     "file_identity": "GEN/01/REV1",
                     "fixture": "official minimal excerpt",
                     "upstream_source_file_sha256": (

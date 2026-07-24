@@ -18,7 +18,6 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
-    UniqueConstraint,
     select,
 )
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
@@ -157,6 +156,7 @@ class EditorialSelection(Base):
         ForeignKey("derived_values.id", ondelete="RESTRICT"),
     )
     status: Mapped[str] = mapped_column(String(16))
+    decision_version: Mapped[int] = mapped_column(Integer)
     display_rank: Mapped[int | None] = mapped_column(Integer)
     rationale: Mapped[str] = mapped_column(Text)
     reviewed_by: Mapped[str] = mapped_column(Text)
@@ -176,12 +176,6 @@ class EditorialSelection(Base):
         CheckConstraint(
             "status IN ('selected','rejected','deferred')",
             name="editorial_selection_status",
-        ),
-        UniqueConstraint(
-            "profile_date",
-            "section_key",
-            "resolved_claim_id",
-            name="editorial_selection_resolved_key",
         ),
     )
 
@@ -308,8 +302,18 @@ def record_editorial_selection(
         if resolved_claim_id is not None
         else EditorialSelection.derived_value_id == derived_value_id
     )
-    existing = session.scalar(select(EditorialSelection).where(*conditions))
-    if existing is not None:
+    existing = session.scalar(
+        select(EditorialSelection)
+        .where(*conditions)
+        .order_by(EditorialSelection.decision_version.desc())
+    )
+    if (
+        existing is not None
+        and existing.status == status.value
+        and existing.display_rank == display_rank
+        and existing.rationale == rationale
+        and existing.reviewed_by == reviewed_by
+    ):
         return existing
     row = EditorialSelection(
         profile_date=profile_date,
@@ -317,6 +321,9 @@ def record_editorial_selection(
         resolved_claim_id=resolved_claim_id,
         derived_value_id=derived_value_id,
         status=status.value,
+        decision_version=(
+            1 if existing is None else existing.decision_version + 1
+        ),
         display_rank=display_rank,
         rationale=rationale,
         reviewed_by=reviewed_by,
@@ -327,6 +334,8 @@ def record_editorial_selection(
 
 
 def lineage_root_ids(session: Session, release_id: UUID) -> frozenset[UUID]:
+    if session.get(SourceRelease, release_id) is None:
+        raise ValueError("Source independence requires persisted source releases.")
     parents_by_child: dict[UUID, set[UUID]] = {}
     for edge in session.scalars(select(SourceLineage)):
         parents_by_child.setdefault(edge.child_release_id, set()).add(
@@ -431,24 +440,44 @@ def assert_release_publication_eligible(
     )
     if not checks or any(check.status != "passed" for check in checks):
         raise ValueError("Publication requires all recorded quality checks to pass.")
-    resolved_selections = set(
-        session.scalars(
-            select(EditorialSelection.resolved_claim_id).where(
-                EditorialSelection.profile_date == profile_date,
-                EditorialSelection.status == EditorialSelectionStatus.SELECTED.value,
-                EditorialSelection.resolved_claim_id.is_not(None),
-            )
+    declared_checks = release.metadata_json.get("required_quality_checks")
+    if (
+        not isinstance(declared_checks, list)
+        or not declared_checks
+        or not all(isinstance(name, str) and name for name in declared_checks)
+    ):
+        raise ValueError("Publication requires adapter-declared quality checks.")
+    missing_checks = set(declared_checks) - {check.check_name for check in checks}
+    if missing_checks:
+        raise ValueError(
+            "Publication is missing required quality checks: "
+            + ", ".join(sorted(missing_checks))
         )
-    )
-    derived_selections = set(
-        session.scalars(
-            select(EditorialSelection.derived_value_id).where(
-                EditorialSelection.profile_date == profile_date,
-                EditorialSelection.status == EditorialSelectionStatus.SELECTED.value,
-                EditorialSelection.derived_value_id.is_not(None),
-            )
+    latest_by_root: dict[tuple[str, UUID], EditorialSelection] = {}
+    for selection in session.scalars(
+        select(EditorialSelection)
+        .where(EditorialSelection.profile_date == profile_date)
+        .order_by(EditorialSelection.decision_version.desc())
+    ):
+        root = (
+            ("resolved", selection.resolved_claim_id)
+            if selection.resolved_claim_id is not None
+            else ("derived", selection.derived_value_id)
         )
-    )
+        if root[1] is not None:
+            latest_by_root.setdefault((root[0], root[1]), selection)
+    resolved_selections = {
+        root_id
+        for (root_type, root_id), selection in latest_by_root.items()
+        if root_type == "resolved"
+        and selection.status == EditorialSelectionStatus.SELECTED.value
+    }
+    derived_selections = {
+        root_id
+        for (root_type, root_id), selection in latest_by_root.items()
+        if root_type == "derived"
+        and selection.status == EditorialSelectionStatus.SELECTED.value
+    }
     if not resolved_root_ids <= resolved_selections or not (
         derived_root_ids or set()
     ) <= derived_selections:
