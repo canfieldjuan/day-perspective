@@ -92,6 +92,32 @@ def test_claim_creation_requires_source_release(session: Session) -> None:
     session.rollback()
 
 
+def test_multi_record_claim_requires_its_source_record_hash(
+    session: Session,
+) -> None:
+    source = Source(slug="multi-record-source", name="Multi-record source")
+    session.add(source)
+    session.flush()
+    release = create_source_release(
+        session,
+        source_id=source.id,
+        release_label="multi-record-v1",
+        source_url="https://example.invalid/multi-record",
+        raw_storage_uri="test://multi-record",
+        raw_bytes=b"two source records",
+        raw_record_count=2,
+    )
+
+    with pytest.raises(ValueError, match="multi-record releases require"):
+        create_claim(
+            session,
+            source_release_id=release.id,
+            source_record_locator="record:one",
+            claim_type="synthetic_assertion",
+            assertion_text="A claim that needs its actual record hash.",
+        )
+
+
 @pytest.mark.integration
 def test_claim_supersession_creates_a_new_versioned_assertion(session: Session) -> None:
     release = source_release(session)
@@ -156,6 +182,43 @@ def test_resolved_claim_retains_supporting_and_dissenting_claim_references(sessi
         (supporting.id, "supporting"),
         (dissenting.id, "dissenting"),
     }
+
+
+def test_resolved_claim_must_supersede_the_latest_same_key_version(
+    session: Session,
+) -> None:
+    release = source_release(session)
+    claim = create_claim(
+        session,
+        source_release_id=release.id,
+        source_record_locator="record:resolution-chain",
+        claim_type="synthetic_assertion",
+        assertion_text="Resolution-chain evidence.",
+    )
+    first = resolve_claim(
+        session,
+        canonical_key="test:linear-resolution",
+        resolved_value={"value": 1},
+        rationale="First version.",
+        supporting_claim_ids=[claim.id],
+    )
+    unrelated = resolve_claim(
+        session,
+        canonical_key="test:unrelated-resolution",
+        resolved_value={"value": 1},
+        rationale="Unrelated version.",
+        supporting_claim_ids=[claim.id],
+    )
+
+    with pytest.raises(ValueError, match="latest version of the same canonical key"):
+        resolve_claim(
+            session,
+            canonical_key=first.canonical_key,
+            resolved_value={"value": 2},
+            rationale="Invalid cross-key predecessor.",
+            supporting_claim_ids=[claim.id],
+            supersedes_resolved_claim_id=unrelated.id,
+        )
 
 
 @pytest.mark.integration

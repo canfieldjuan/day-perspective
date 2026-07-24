@@ -29,9 +29,14 @@ from app.models import (
     ResolvedClaim,
     ResolvedClaimEvidence,
     ReviewTask,
+    Source,
     SourceRelease,
 )
-from app.services import LocalFilesystemPublishedProfileStore, content_hash
+from app.services import (
+    LocalFilesystemPublishedProfileStore,
+    content_hash,
+    create_source_release,
+)
 from app.usgs import (
     GOLDEN_DATE,
     EvidenceCandidate,
@@ -228,7 +233,7 @@ def test_supporting_and_dissenting_claims_are_classified_without_hiding_disagree
         tolerance=0.05,
     )
 
-    assert decision.status == "accepted"
+    assert decision.status == "unresolved"
     assert decision.supporting_indexes == (0, 1)
     assert decision.dissenting_indexes == (2,)
 
@@ -390,6 +395,39 @@ def test_quality_grade_derivation_explains_single_source_consequence() -> None:
     assert "one validated official USGS" in explanation
     assert dimensions["source_independence"] == "single authoritative source"
     assert len(dimensions) == 8
+
+    incomplete_grade, incomplete_explanation, _ = derive_quality(
+        independent_sources=2, complete_predicates=7
+    )
+    assert incomplete_grade == "C"
+    assert incomplete_explanation.startswith("Grade C:")
+    assert "7/9" in incomplete_explanation
+    assert "2 independent sources" in incomplete_explanation
+
+
+def test_golden_resolver_rejects_a_non_usgs_release(
+    session: Session,
+) -> None:
+    other_source = Source(
+        slug="not-usgs",
+        name="A different source",
+    )
+    session.add(other_source)
+    session.flush()
+    release = create_source_release(
+        session,
+        source_id=other_source.id,
+        release_label="not-usgs-v1",
+        source_url="https://example.invalid/not-usgs",
+        raw_storage_uri="test://not-usgs",
+        raw_bytes=b"not USGS",
+        raw_record_count=1,
+    )
+
+    with pytest.raises(ValueError, match="requires a USGS source release"):
+        accept_and_resolve_release(session, release.id)
+
+    assert session.scalar(select(func.count()).select_from(ResolvedClaim)) == 0
 
 
 def test_missing_casualty_value_is_not_converted_to_zero(

@@ -196,6 +196,10 @@ def create_claim(
         release = session.get(SourceRelease, source_release_id)
         if release is None:
             raise ValueError("A claim requires an existing source release.")
+        if release.raw_record_count != 1:
+            raise ValueError(
+                "Claims from multi-record releases require a source-record hash."
+            )
         source_record_hash_sha256 = release.raw_checksum_sha256
     claim = Claim(
         source_release_id=source_release_id,
@@ -261,14 +265,24 @@ def resolve_claim(
         raise ValueError("A resolved claim requires at least one supporting claim.")
     if set(supporting) & set(dissenting):
         raise ValueError("Evidence cannot be both supporting and dissenting.")
-    next_version = (
-        session.scalar(
-            select(func.coalesce(func.max(ResolvedClaim.version), 0)).where(
-                ResolvedClaim.canonical_key == canonical_key
+    latest = session.scalar(
+        select(ResolvedClaim)
+        .where(ResolvedClaim.canonical_key == canonical_key)
+        .order_by(ResolvedClaim.version.desc())
+    )
+    if latest is None:
+        if supersedes_resolved_claim_id is not None:
+            raise ValueError(
+                "A first resolved-claim version cannot supersede a predecessor."
             )
-        )
-        or 0
-    ) + 1
+        next_version = 1
+    else:
+        if supersedes_resolved_claim_id != latest.id:
+            raise ValueError(
+                "A resolved claim must supersede the latest version of the same "
+                "canonical key."
+            )
+        next_version = latest.version + 1
     resolved = ResolvedClaim(
         canonical_key=canonical_key,
         version=next_version,

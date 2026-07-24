@@ -37,7 +37,7 @@ function isClaimEvidence(value: unknown): boolean {
   return (
     claim !== undefined &&
     typeof claim.predicate === "string" &&
-    asRecord(claim.value) !== undefined &&
+    (claim.value === null || asRecord(claim.value) !== undefined) &&
     typeof claim.source_record_locator === "string" &&
     typeof claim.source_record_hash_sha256 === "string"
   );

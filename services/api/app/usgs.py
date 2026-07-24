@@ -559,13 +559,13 @@ def deterministic_resolution(
             agrees = abs(float(candidate.value) - float(baseline)) <= tolerance
         (supporting if agrees else dissenting).append(index)
     independent = len({candidates[index].lineage_root for index in supporting})
-    if dissenting and tolerance is None:
+    if dissenting:
         return ResolutionDecision(
             "unresolved",
             tuple(supporting),
             tuple(dissenting),
             independent,
-            "Unresolved disagreement remains outside a declared tolerance.",
+            "Unresolved disagreement remains outside the declared agreement rule.",
         )
     return ResolutionDecision(
         "accepted",
@@ -596,13 +596,22 @@ def derive_quality(*, independent_sources: int, complete_predicates: int) -> tup
         "methodology_transparency": "deterministic rules and historical timezone conversion published",
     }
     grade = "B" if independent_sources == 1 and complete_predicates >= 9 else "C"
-    explanation = (
-        "Grade B: the occurrence, time, epicenter, magnitude, and depth come from one "
-        "validated official USGS catalog release with second-level and point-level detail. "
-        "The grade is limited because this is single-source acceptance with no independent "
-        "confirmation and "
-        "does not assert a casualty value."
-    )
+    if grade == "B":
+        explanation = (
+            "Grade B: the occurrence, time, epicenter, magnitude, and depth come "
+            "from one validated official USGS catalog release with second-level "
+            "and point-level detail. The grade is limited because this is "
+            "single-source acceptance with no independent confirmation and does "
+            "not assert a casualty value."
+        )
+    else:
+        explanation = (
+            f"Grade C: {complete_predicates}/9 required predicates are supported "
+            f"by {independent_sources} independent source"
+            f"{'' if independent_sources == 1 else 's'}. The evidence does not "
+            "meet the complete single-authoritative-source rule used for Grade B, "
+            "and no casualty value is asserted."
+        )
     return grade, explanation, dimensions
 
 
@@ -610,6 +619,19 @@ def accept_and_resolve_release(session: Session, source_release_id: UUID) -> dic
     release = session.get(SourceRelease, source_release_id)
     if release is None:
         raise ValueError("Unknown source release.")
+    source = session.get(Source, release.source_id)
+    if source is None or source.slug != USGS_SOURCE_SLUG:
+        raise ValueError("Golden earthquake resolution requires a USGS source release.")
+    raw_record = session.scalar(
+        select(RawSourceRecord).where(
+            RawSourceRecord.source_release_id == release.id,
+            RawSourceRecord.source_record_id == USGS_EVENT_ID,
+        )
+    )
+    if raw_record is None:
+        raise ValueError(
+            "Golden earthquake resolution requires the expected USGS raw record."
+        )
     claims = list(
         session.scalars(
             select(Claim)

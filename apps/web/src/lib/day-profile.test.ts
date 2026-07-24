@@ -31,7 +31,7 @@ describe("isPublishedProfileResponse", () => {
                     supporting_claims: [
                       {
                         predicate: "test",
-                        value: { answer: 1 },
+                        value: null,
                         source_record_locator: "record:test",
                         source_record_hash_sha256: "b".repeat(64)
                       }
