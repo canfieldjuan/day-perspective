@@ -100,6 +100,25 @@ function isSectionKey(value: string): value is DayProfileSectionKey {
   return (DAY_PROFILE_SECTION_KEYS as readonly string[]).includes(value);
 }
 
+function isSectionStates(value: unknown): boolean {
+  if (value === undefined) {
+    return true;
+  }
+  const states = asRecord(value);
+  return (
+    states !== undefined &&
+    Object.entries(states).every(([key, value]) => {
+      const state = asRecord(value);
+      return (
+        isSectionKey(key) &&
+        state !== undefined &&
+        (state.status === "available" || state.status === "not_yet_supported") &&
+        (state.reason === undefined || typeof state.reason === "string")
+      );
+    })
+  );
+}
+
 export function isProfileNotPublished(payload: unknown, expectedDate: string): payload is ProfileNotPublished {
   const response = asRecord(payload);
   const expectedProfileType = profileTypeForDate(expectedDate);
@@ -142,6 +161,7 @@ export function isPublishedProfileResponse(
   const sections = asRecord(profile.sections);
   return (
     sections !== undefined &&
+    isSectionStates(profile.section_states) &&
     Object.entries(sections).every(
       ([key, statements]) =>
         isSectionKey(key) &&
