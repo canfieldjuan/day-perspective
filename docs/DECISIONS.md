@@ -192,8 +192,10 @@ version at read time; keep a mutable current-version pointer.
 prevents ambiguous published versions, and preserves the append-only chain.
 
 **Consequences:** A later correction supersedes the latest successor rather
-than returning to an earlier version. Branching would require an explicit
-canonical-successor product rule before being enabled.
+than returning to an earlier version. An exact retry returns the existing
+correction, while the same pair with a different rationale is rejected.
+Branching would require an explicit canonical-successor product rule before
+being enabled.
 
 **Revisit trigger:** Revisit only if editorial policy requires intentional
 parallel correction branches and a public selection rule is approved.

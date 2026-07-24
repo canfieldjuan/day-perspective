@@ -176,6 +176,69 @@ describe("DayProfileClient", () => {
     expect(screen.getByText("None in this publication.")).toBeInTheDocument();
   });
 
+  it("hides the previous profile immediately when the requested date changes", async () => {
+    let resolveSecondRequest: (response: Response) => void = () => undefined;
+    const secondRequest = new Promise<Response>((resolve) => {
+      resolveSecondRequest = resolve;
+    });
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            status: "published",
+            date: "1969-07-20",
+            profile_type: "standard_statistical",
+            manifest_id: "manifest-first-date",
+            content_hash: "f".repeat(64),
+            profile: {
+              schema_version: "1",
+              date: "1969-07-20",
+              profile_type: "standard_statistical",
+              sections: {
+                recorded_on_this_date: [
+                  {
+                    statement_id: "first-date-statement",
+                    statement: "Statement belonging only to the first date."
+                  }
+                ]
+              }
+            }
+          }),
+          { headers: { "content-type": "application/json" }, status: 200 }
+        )
+      )
+      .mockReturnValueOnce(secondRequest);
+
+    const { rerender } = render(<DayProfileClient date="1969-07-20" />);
+    expect(
+      await screen.findByText("Statement belonging only to the first date.")
+    ).toBeInTheDocument();
+
+    rerender(<DayProfileClient date="1900-01-01" />);
+
+    expect(
+      screen.queryByText("Statement belonging only to the first date.")
+    ).not.toBeInTheDocument();
+    expect(screen.getByText("Checking publication status")).toBeInTheDocument();
+
+    resolveSecondRequest(
+      new Response(
+        JSON.stringify({
+          status: "profile_not_published",
+          date: "1900-01-01",
+          profile_type: "limited_historical",
+          detail: "No profile has been published for this date yet."
+        }),
+        { headers: { "content-type": "application/json" }, status: 404 }
+      )
+    );
+    expect(
+      await screen.findByRole("heading", {
+        name: "This day does not have a published profile yet."
+      })
+    ).toBeInTheDocument();
+  });
+
   it("rejects an unrecognized successful response instead of calling it published", async () => {
     vi.mocked(fetch).mockResolvedValue(
       new Response(JSON.stringify({ status: "published" }), { status: 200 })

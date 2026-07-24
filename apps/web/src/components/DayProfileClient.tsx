@@ -30,7 +30,10 @@ async function parseJson(response: Response): Promise<unknown> {
 }
 
 export function DayProfileClient({ date }: { date: string }) {
-  const [state, setState] = useState<ViewState>({ kind: "loading" });
+  const [state, setState] = useState<{ date: string; view: ViewState }>({
+    date,
+    view: { kind: "loading" }
+  });
   const [requestNumber, setRequestNumber] = useState(0);
 
   useEffect(() => {
@@ -55,19 +58,22 @@ export function DayProfileClient({ date }: { date: string }) {
         }
 
         if (isProfileNotPublished(payload, date)) {
-          setState({ kind: "unpublished" });
+          setState({ date, view: { kind: "unpublished" } });
           return;
         }
 
         if (!response.ok || !isPublishedProfileResponse(payload, date)) {
-          setState({ kind: "api-error" });
+          setState({ date, view: { kind: "api-error" } });
           return;
         }
 
-        setState({ kind: "published", profile: payload.profile });
+        setState({
+          date,
+          view: { kind: "published", profile: payload.profile }
+        });
       } catch {
         if (!controller.signal.aborted) {
-          setState({ kind: "api-error" });
+          setState({ date, view: { kind: "api-error" } });
         }
       }
     }
@@ -78,6 +84,9 @@ export function DayProfileClient({ date }: { date: string }) {
       controller.abort();
     };
   }, [date, requestNumber]);
+
+  const viewState: ViewState =
+    state.date === date ? state.view : { kind: "loading" };
 
   if (!isSupportedPublicDate(date)) {
     return (
@@ -92,7 +101,7 @@ export function DayProfileClient({ date }: { date: string }) {
     );
   }
 
-  if (state.kind === "unpublished") {
+  if (viewState.kind === "unpublished") {
     return (
       <>
         <section
@@ -111,7 +120,7 @@ export function DayProfileClient({ date }: { date: string }) {
     );
   }
 
-  if (state.kind === "api-error") {
+  if (viewState.kind === "api-error") {
     return (
       <>
         <section className="state-panel state-panel--error" aria-labelledby="api-error-title">
@@ -125,7 +134,7 @@ export function DayProfileClient({ date }: { date: string }) {
             className="action-button"
             type="button"
             onClick={() => {
-              setState({ kind: "loading" });
+              setState({ date, view: { kind: "loading" } });
               setRequestNumber((value) => value + 1);
             }}
           >
@@ -137,12 +146,12 @@ export function DayProfileClient({ date }: { date: string }) {
     );
   }
 
-  if (state.kind === "published") {
+  if (viewState.kind === "published") {
     return (
       <ProfileSections
         availability="published"
-        sections={state.profile.sections}
-        sectionStates={state.profile.section_states}
+        sections={viewState.profile.sections}
+        sectionStates={viewState.profile.section_states}
       />
     );
   }

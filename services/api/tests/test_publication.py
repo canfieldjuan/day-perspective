@@ -607,12 +607,26 @@ def test_correction_creates_a_new_version_without_overwriting_original(session: 
         supersedes_manifest_id=original_manifest.id,
         supersedes_day_profile_id=original.id,
     )
-    record_correction(
+    first_correction = record_correction(
         session,
         original_manifest_id=original_manifest.id,
         replacement_manifest_id=replacement.publication_manifest_id,
         rationale="Synthetic correction verifies append-only behavior.",
     )
+    repeated_correction = record_correction(
+        session,
+        original_manifest_id=original_manifest.id,
+        replacement_manifest_id=replacement.publication_manifest_id,
+        rationale="Synthetic correction verifies append-only behavior.",
+    )
+    assert repeated_correction.id == first_correction.id
+    with pytest.raises(ValueError, match="different rationale"):
+        record_correction(
+            session,
+            original_manifest_id=original_manifest.id,
+            replacement_manifest_id=replacement.publication_manifest_id,
+            rationale="A conflicting retry rationale.",
+        )
     session.commit()
     replacement_manifest = session.get(PublicationManifest, replacement.publication_manifest_id)
     assert replacement_manifest is not None

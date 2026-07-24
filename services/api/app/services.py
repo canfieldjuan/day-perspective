@@ -1061,6 +1061,18 @@ def record_correction(
     replacement_manifest_id: UUID,
     rationale: str,
 ) -> Correction:
+    existing = session.scalar(
+        select(Correction).where(
+            Correction.original_manifest_id == original_manifest_id,
+            Correction.replacement_manifest_id == replacement_manifest_id,
+        )
+    )
+    if existing is not None:
+        if existing.rationale != rationale:
+            raise ValueError(
+                "This correction pair is already recorded with a different rationale."
+            )
+        return existing
     original = session.get(PublicationManifest, original_manifest_id)
     replacement = session.get(PublicationManifest, replacement_manifest_id)
     if original is None or original.status != PublicationStatus.PUBLISHED:
