@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from collections.abc import Callable, Generator
 from pathlib import Path
 
@@ -12,9 +13,10 @@ from sqlalchemy.orm import Session
 
 from app import main
 from app.database import get_session
-from app.governance import ClaimReviewDecision
+from app.governance import ClaimReviewDecision, reviewed_resolutions_for_release
 from app.models import (
     Claim,
+    Event,
     EventLocation,
     EventTime,
     GeographyVersion,
@@ -24,6 +26,7 @@ from app.models import (
     QualityCheck,
     RawSourceRecord,
     ResolvedClaim,
+    ResolvedClaimEvidence,
     ReviewTask,
     SourceRelease,
 )
@@ -52,17 +55,17 @@ UCDP_ANNUAL_FIXTURE = (
 )
 
 
-def ingest(session: Session, tmp_path: Path):
+def ingest(session: Session, tmp_path: Path, fixture_path: Path = FIXTURE):
     return ingest_usgs(
         session,
         adapter=USGSEarthquakeAdapter(),
         raw_store=LocalFilesystemRawSourceStore(tmp_path / "raw"),
-        fixture_path=FIXTURE,
+        fixture_path=fixture_path,
     )
 
 
-def publish(session: Session, tmp_path: Path):
-    result = ingest(session, tmp_path)
+def publish(session: Session, tmp_path: Path, fixture_path: Path = FIXTURE):
+    result = ingest(session, tmp_path, fixture_path)
     assert result.source_release_id is not None
     accept_and_resolve_release(session, result.source_release_id)
     un_result = ingest_un_wpp(
@@ -301,6 +304,80 @@ def test_resolution_is_versioned_when_a_resolved_value_changes(
     assert second.supersedes_resolved_claim_id == first.id
 
 
+def test_new_usgs_release_attaches_every_current_claim_to_a_current_resolution(
+    session: Session, tmp_path: Path
+) -> None:
+    first = ingest(session, tmp_path)
+    assert first.source_release_id is not None
+    accept_and_resolve_release(session, first.source_release_id)
+
+    payload = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    payload["features"][0]["properties"]["mag"] = 9.1
+    revised_fixture = tmp_path / "revised-usgs.geojson"
+    revised_fixture.write_text(json.dumps(payload), encoding="utf-8")
+    second = ingest(session, tmp_path, revised_fixture)
+    assert second.source_release_id is not None
+    accept_and_resolve_release(session, second.source_release_id)
+
+    current_claims = list(
+        session.scalars(
+            select(Claim).where(
+                Claim.source_release_id == second.source_release_id
+            )
+        )
+    )
+    current_resolutions = reviewed_resolutions_for_release(
+        session, second.source_release_id
+    )
+    assert len(current_resolutions) == 9
+    for claim in current_claims:
+        assert session.scalar(
+            select(ResolvedClaimEvidence.claim_id).where(
+                ResolvedClaimEvidence.resolved_claim_id
+                == current_resolutions[claim.claim_type].id,
+                ResolvedClaimEvidence.claim_id == claim.id,
+                ResolvedClaimEvidence.stance == "supporting",
+            )
+        ) == claim.id
+    assert session.scalar(select(func.count()).select_from(Event)) == 1
+
+
+def test_usgs_public_statements_are_derived_from_reviewed_values(
+    session: Session, tmp_path: Path
+) -> None:
+    payload = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    feature = payload["features"][0]
+    feature["properties"]["mag"] = 9.1
+    feature["properties"]["title"] = "M 9.1 - Revised Alaska Earthquake"
+    feature["properties"]["place"] = "Revised Alaska Earthquake"
+    feature["properties"]["time"] += 1000
+    feature["geometry"]["coordinates"] = [-147.5, 60.8, 30]
+    revised_fixture = tmp_path / "revised-usgs.geojson"
+    revised_fixture.write_text(json.dumps(payload), encoding="utf-8")
+
+    _, profile = publish(session, tmp_path, revised_fixture)
+    manifest = session.get(PublicationManifest, profile.publication_manifest_id)
+    assert manifest is not None
+    artifact = LocalFilesystemPublishedProfileStore(
+        tmp_path / "published"
+    ).read(manifest.storage_uri, manifest.content_hash)
+    statements = {
+        item["statement_id"]: item["statement"]
+        for item in artifact["sections"]["recorded_on_this_date"]
+    }
+
+    assert statements["event-title"] == "M 9.1 - Revised Alaska Earthquake"
+    assert statements["event-time-utc"].endswith("03:36:17 UTC.")
+    assert statements["event-magnitude"] == "USGS reports a magnitude of 9.1 MW."
+    assert statements["event-depth"] == "USGS reports a depth of 30 km."
+    assert statements["event-geography"] == (
+        "USGS names the location as Revised Alaska Earthquake."
+    )
+    assert statements["event-coordinates"] == (
+        "USGS places the epicenter at 60.8 latitude, -147.5 longitude."
+    )
+
+
 def test_quality_grade_derivation_explains_single_source_consequence() -> None:
     grade, explanation, dimensions = derive_quality(
         independent_sources=1, complete_predicates=9
@@ -496,6 +573,16 @@ def test_admin_decision_records_ledger_and_resolution_requires_prior_acceptance(
         )
         assert response.status_code == 200
         assert response.json()["status"] == "accepted"
+        repeated = TestClient(main.app).post(
+            f"/api/v1/admin/claims/{claim.id}/decision",
+            headers=headers,
+            json={
+                "decision": "accepted",
+                "rationale": "Retried after the page became stale.",
+            },
+        )
+        assert repeated.status_code == 409
+        assert "candidate or in-review" in repeated.json()["detail"]
         decision = session.scalar(
             select(ClaimReviewDecision).where(
                 ClaimReviewDecision.claim_id == claim.id

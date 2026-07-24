@@ -660,10 +660,22 @@ def accept_and_resolve_release(
             .where(ResolvedClaim.canonical_key == f"usgs:{USGS_EVENT_ID}:{claim.claim_type}")
             .order_by(ResolvedClaim.version.desc())
         )
-        if prior is not None and prior.resolved_value == claim.assertion_json:
-            row = prior
+        current_claim_supports_prior = (
+            prior is not None
+            and session.scalar(
+                select(ResolvedClaimEvidence.claim_id).where(
+                    ResolvedClaimEvidence.resolved_claim_id == prior.id,
+                    ResolvedClaimEvidence.claim_id == claim.id,
+                    ResolvedClaimEvidence.stance == "supporting",
+                )
+            )
+            is not None
+        )
+        if current_claim_supports_prior:
+            assert prior is not None
+            selected_resolution = prior
         else:
-            row = resolve_claim(
+            selected_resolution = resolve_claim(
                 session,
                 canonical_key=f"usgs:{USGS_EVENT_ID}:{claim.claim_type}",
                 resolved_value=claim.assertion_json or {"text": claim.assertion_text},
@@ -680,13 +692,15 @@ def accept_and_resolve_release(
                 methodology_id=methodology.id,
                 supersedes_resolved_claim_id=prior.id if prior is not None else None,
             )
-            row.comparability_status = ComparabilityStatus.PARTIALLY_COMPARABLE
-        resolved[claim.claim_type] = row
+            selected_resolution.comparability_status = (
+                ComparabilityStatus.PARTIALLY_COMPARABLE
+            )
+        resolved[claim.claim_type] = selected_resolution
         record_editorial_selection(
             session,
             profile_date=GOLDEN_DATE,
             section_key="recorded_on_this_date",
-            resolved_claim_id=row.id,
+            resolved_claim_id=selected_resolution.id,
             status=EditorialSelectionStatus.SELECTED,
             display_rank=len(resolved),
             rationale="Selected for the reviewed USGS golden-date recorded event.",
@@ -705,7 +719,25 @@ def accept_and_resolve_release(
         task.completed_at = datetime.now(UTC)
 
     identity = resolved["event_identity"]
-    event = session.scalar(select(Event).where(Event.resolved_claim_id == identity.id))
+    event = session.scalar(
+        select(Event)
+        .join(ResolvedClaim, Event.resolved_claim_id == ResolvedClaim.id)
+        .where(ResolvedClaim.canonical_key == identity.canonical_key)
+    )
+    timestamp = datetime.fromisoformat(
+        str(resolved["occurrence_timestamp"].resolved_value["utc"]).replace(
+            "Z", "+00:00"
+        )
+    )
+    local_value = resolved["local_civil_date"].resolved_value
+    local_date = date.fromisoformat(str(local_value["date"]))
+    timezone_name = str(local_value["timezone"])
+    local_timestamp = timestamp.astimezone(ZoneInfo(timezone_name))
+    display_label = (
+        f"{local_date:%B} {local_date.day}, {local_date.year} at "
+        f"{local_timestamp.hour % 12 or 12}:{local_timestamp:%M:%S} "
+        f"{local_timestamp:%p} {timezone_name}"
+    )
     if event is None:
         event = Event(
             resolved_claim_id=identity.id,
@@ -716,42 +748,59 @@ def accept_and_resolve_release(
         )
         session.add(event)
         session.flush()
-        timestamp = datetime.fromisoformat(
-            str(resolved["occurrence_timestamp"].resolved_value["utc"]).replace("Z", "+00:00")
+    else:
+        event.resolved_claim_id = identity.id
+        event.event_type = str(resolved["event_type"].resolved_value["type"])
+        event.canonical_title = str(
+            resolved["event_title"].resolved_value["title"]
         )
-        local_value = resolved["local_civil_date"].resolved_value
-        session.add(
-            EventTime(
-                event_id=event.id,
-                provenance_resolved_claim_id=resolved["occurrence_timestamp"].id,
-                start_date=GOLDEN_DATE,
-                end_date=GOLDEN_DATE,
-                exact_timestamp=timestamp,
-                local_date=GOLDEN_DATE,
-                timezone_name=str(local_value["timezone"]),
-                utc_offset_minutes=int(local_value["utc_offset_minutes"]),
-                interpretation=(
-                    "The USGS UTC occurrence falls on March 27 under historical "
-                    "America/Anchorage civil-time rules (UTC-10 at this instant)."
-                ),
-                temporal_precision=TemporalPrecision.SECOND,
-                temporal_assignment=TemporalAssignment.DIRECT_RECORD,
-                date_role=DateRole.OCCURRED,
-                is_primary=True,
-                display_label="March 27, 1964 at 5:36:16 p.m. Alaska Standard Time",
-            )
+    event_time = session.scalar(
+        select(EventTime).where(
+            EventTime.event_id == event.id,
+            EventTime.is_primary.is_(True),
         )
-        geography = session.scalar(
-            select(Geography).where(Geography.stable_key == "us-ak")
+    )
+    if event_time is None:
+        event_time = EventTime(
+            event_id=event.id,
+            temporal_precision=TemporalPrecision.SECOND,
+            temporal_assignment=TemporalAssignment.DIRECT_RECORD,
+            date_role=DateRole.OCCURRED,
+            is_primary=True,
         )
-        if geography is None:
-            geography = Geography(stable_key="us-ak", geography_kind="state_or_territory")
-            session.add(geography)
-            session.flush()
+        session.add(event_time)
+    event_time.provenance_resolved_claim_id = resolved["occurrence_timestamp"].id
+    event_time.start_date = local_date
+    event_time.end_date = local_date
+    event_time.exact_timestamp = timestamp
+    event_time.local_date = local_date
+    event_time.timezone_name = timezone_name
+    event_time.utc_offset_minutes = int(local_value["utc_offset_minutes"])
+    event_time.interpretation = (
+        f"The USGS UTC occurrence is assigned to {local_date.isoformat()} under "
+        f"historical {timezone_name} civil-time rules."
+    )
+    event_time.display_label = display_label
+    geography = session.scalar(
+        select(Geography).where(Geography.stable_key == "us-ak")
+    )
+    if geography is None:
+        geography = Geography(
+            stable_key="us-ak", geography_kind="state_or_territory"
+        )
+        session.add(geography)
+        session.flush()
+    geography_version = session.scalar(
+        select(GeographyVersion).where(
+            GeographyVersion.geography_id == geography.id,
+            GeographyVersion.valid_from == date(1959, 1, 3),
+        )
+    )
+    if geography_version is None:
         geography_version = GeographyVersion(
             geography_id=geography.id,
             provenance_resolved_claim_id=resolved["epicenter_geography"].id,
-            name="Alaska",
+            name=str(resolved["epicenter_geography"].resolved_value["region"]),
             identifier_code="US-AK",
             valid_from=date(1959, 1, 3),
             valid_to=None,
@@ -759,20 +808,36 @@ def accept_and_resolve_release(
         )
         session.add(geography_version)
         session.flush()
-        coordinates = resolved["epicenter_coordinates"].resolved_value
-        session.add(
-            EventLocation(
-                event_id=event.id,
-                geography_version_id=geography_version.id,
-                provenance_resolved_claim_id=resolved["epicenter_coordinates"].id,
-                point_geometry=WKTElement(
-                    f"POINT({coordinates['longitude']} {coordinates['latitude']})",
-                    srid=4326,
-                ),
-                location_role="epicenter",
-                display_label=str(resolved["epicenter_geography"].resolved_value["display_name"]),
-            )
+    geography_version.provenance_resolved_claim_id = resolved[
+        "epicenter_geography"
+    ].id
+    geography_version.name = str(
+        resolved["epicenter_geography"].resolved_value["region"]
+    )
+    coordinates = resolved["epicenter_coordinates"].resolved_value
+    event_location = session.scalar(
+        select(EventLocation).where(
+            EventLocation.event_id == event.id,
+            EventLocation.location_role == "epicenter",
         )
+    )
+    if event_location is None:
+        event_location = EventLocation(
+            event_id=event.id,
+            location_role="epicenter",
+        )
+        session.add(event_location)
+    event_location.geography_version_id = geography_version.id
+    event_location.provenance_resolved_claim_id = resolved[
+        "epicenter_coordinates"
+    ].id
+    event_location.point_geometry = WKTElement(
+        f"POINT({coordinates['longitude']} {coordinates['latitude']})",
+        srid=4326,
+    )
+    event_location.display_label = str(
+        resolved["epicenter_geography"].resolved_value["display_name"]
+    )
     grade, explanation, dimensions = derive_quality(
         independent_sources=1, complete_predicates=len(claims)
     )
@@ -1021,63 +1086,95 @@ def publish_golden_profile(
         raise ValueError("A public quality assessment is required before publication.")
     un_context = build_un_wpp_profile_content(session)
     ucdp_context = build_ucdp_annual_profile_content(session)
+    resolved_values = {
+        predicate: row.resolved_value for predicate, row in resolved.items()
+    }
+    occurrence = datetime.fromisoformat(
+        str(resolved_values["occurrence_timestamp"]["utc"]).replace(
+            "Z", "+00:00"
+        )
+    ).astimezone(UTC)
+    local_value = resolved_values["local_civil_date"]
+    local_date = date.fromisoformat(str(local_value["date"]))
+    offset_minutes = int(local_value["utc_offset_minutes"])
+    offset_sign = "+" if offset_minutes >= 0 else "-"
+    offset_hours, offset_remainder = divmod(abs(offset_minutes), 60)
+    offset_text = f"UTC{offset_sign}{offset_hours}"
+    if offset_remainder:
+        offset_text += f":{offset_remainder:02d}"
+
+    def display_number(value: object) -> str:
+        rendered = format(Decimal(str(value)), "f").rstrip("0").rstrip(".")
+        return rendered or "0"
+
     definitions = [
         (
             "event-title",
             "event_title",
-            str(claims["event_title"].assertion_text),
-            claims["event_title"].assertion_json or {},
+            str(resolved_values["event_title"]["title"]),
+            resolved_values["event_title"],
         ),
         (
             "event-time-utc",
             "occurrence_timestamp",
-            "USGS records the occurrence at 1964-03-28 03:36:16 UTC.",
-            claims["occurrence_timestamp"].assertion_json or {},
+            f"USGS records the occurrence at {occurrence:%Y-%m-%d %H:%M:%S} UTC.",
+            resolved_values["occurrence_timestamp"],
         ),
         (
             "event-local-civil-date",
             "local_civil_date",
             (
-                "Historical America/Anchorage civil-time rules assign the occurrence "
-                "to March 27, 1964 locally."
+                f"Historical {local_value['timezone']} civil-time rules assign "
+                f"the occurrence to {local_date:%B} {local_date.day}, "
+                f"{local_date.year} locally."
             ),
             {
-                **(claims["local_civil_date"].assertion_json or {}),
+                **local_value,
                 "interpretation": (
-                    "Methodological derivation using the IANA historical timezone rule; "
-                    "UTC-10 at the event instant."
+                    "Methodological derivation using the IANA historical timezone "
+                    f"rule; {offset_text} at the event instant."
                 ),
             },
         ),
         (
             "event-magnitude",
             "magnitude",
-            "USGS reports a magnitude of 9.2 Mw.",
-            claims["magnitude"].assertion_json or {},
+            "USGS reports a magnitude of "
+            f"{display_number(resolved_values['magnitude']['value'])} "
+            f"{str(resolved_values['magnitude']['scale']).upper()}.",
+            resolved_values["magnitude"],
         ),
         (
             "event-depth",
             "depth",
-            "USGS reports a depth of 25 km.",
-            claims["depth"].assertion_json or {},
+            "USGS reports a depth of "
+            f"{display_number(resolved_values['depth']['value'])} "
+            f"{resolved_values['depth']['unit']}.",
+            resolved_values["depth"],
         ),
         (
             "event-geography",
             "epicenter_geography",
-            "USGS names the location as the 1964 Prince William Sound, Alaska Earthquake.",
-            claims["epicenter_geography"].assertion_json or {},
+            "USGS names the location as "
+            f"{resolved_values['epicenter_geography']['display_name']}.",
+            resolved_values["epicenter_geography"],
         ),
         (
             "event-coordinates",
             "epicenter_coordinates",
-            "USGS places the epicenter at 60.908 latitude, -147.339 longitude.",
-            claims["epicenter_coordinates"].assertion_json or {},
+            "USGS places the epicenter at "
+            f"{display_number(resolved_values['epicenter_coordinates']['latitude'])} "
+            "latitude, "
+            f"{display_number(resolved_values['epicenter_coordinates']['longitude'])} "
+            "longitude.",
+            resolved_values["epicenter_coordinates"],
         ),
         (
             "event-type",
             "event_type",
-            "USGS classifies the record as an earthquake.",
-            claims["event_type"].assertion_json or {},
+            f"USGS classifies the record as an "
+            f"{resolved_values['event_type']['type']}.",
+            resolved_values["event_type"],
         ),
     ]
     statements: list[dict[str, Any]] = []

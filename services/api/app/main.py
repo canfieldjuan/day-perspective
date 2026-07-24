@@ -445,13 +445,16 @@ def admin_claim_decision(
         claim = None
     if claim is None:
         raise HTTPException(status_code=404, detail="Claim not found.")
-    record_claim_review(
-        session,
-        claim=claim,
-        decision=ReviewDecisionValue(request.decision),
-        rationale=request.rationale,
-        reviewed_by="development-review-api",
-    )
+    try:
+        record_claim_review(
+            session,
+            claim=claim,
+            decision=ReviewDecisionValue(request.decision),
+            rationale=request.rationale,
+            reviewed_by="development-review-api",
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
     session.commit()
     return {"claim_id": str(claim.id), "status": claim.assertion_status.value}
 

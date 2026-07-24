@@ -41,11 +41,15 @@ def main() -> None:
     settings = get_settings()
     with SessionLocal() as session:
         if args.command == "ingest-un-wpp":
-            result = ingest_un_wpp(
-                session,
-                fixture_path=args.fixture,
-                raw_store=LocalFilesystemRawSourceStore(settings.raw_source_root),
-            )
+            try:
+                result = ingest_un_wpp(
+                    session,
+                    fixture_path=args.fixture,
+                    raw_store=LocalFilesystemRawSourceStore(settings.raw_source_root),
+                )
+            except Exception:
+                session.commit()
+                raise
             session.commit()
             print(
                 f"source_release_id={result.source_release_id} "
@@ -54,19 +58,23 @@ def main() -> None:
             return
         if args.command in {"ingest-ucdp-annual", "ingest-ucdp-ged"}:
             raw_store = LocalFilesystemRawSourceStore(settings.raw_source_root)
-            ucdp_result = (
-                ingest_ucdp_annual(
-                    session,
-                    fixture_path=args.fixture,
-                    raw_store=raw_store,
+            try:
+                ucdp_result = (
+                    ingest_ucdp_annual(
+                        session,
+                        fixture_path=args.fixture,
+                        raw_store=raw_store,
+                    )
+                    if args.command == "ingest-ucdp-annual"
+                    else ingest_ucdp_ged(
+                        session,
+                        fixture_path=args.fixture,
+                        raw_store=raw_store,
+                    )
                 )
-                if args.command == "ingest-ucdp-annual"
-                else ingest_ucdp_ged(
-                    session,
-                    fixture_path=args.fixture,
-                    raw_store=raw_store,
-                )
-            )
+            except Exception:
+                session.commit()
+                raise
             session.commit()
             print(
                 f"source_release_id={ucdp_result.source_release_id} "

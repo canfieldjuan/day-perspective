@@ -10,7 +10,9 @@ from sqlalchemy.orm import Session
 from app.governance import SourceReleaseLicense
 from app.models import (
     Claim,
+    ClaimAssertionStatus,
     DataStatus,
+    DerivedValue,
     DerivedValueInput,
     Event,
     EventImpact,
@@ -20,11 +22,14 @@ from app.models import (
     PipelineRun,
     QualityCheck,
     RawSourceRecord,
+    ResolvedClaim,
+    ResolvedClaimEvidence,
     SourceRelease,
     TemporalAssignment,
 )
 from app.ucdp import (
     LocalFilesystemRawSourceStore,
+    build_ucdp_annual_profile_content,
     ingest_ucdp_annual,
     ingest_ucdp_ged,
     review_ucdp_annual,
@@ -73,6 +78,98 @@ def test_ucdp_annual_fixture_is_idempotent_and_derives_period_context(
         )
         == 25
     )
+
+
+def test_rejected_ucdp_annual_claim_blocks_review_before_resolution(
+    session: Session, tmp_path: Path
+) -> None:
+    result = ingest_ucdp_annual(
+        session,
+        fixture_path=ANNUAL_FIXTURE,
+        raw_store=LocalFilesystemRawSourceStore(tmp_path / "raw"),
+    )
+    rejected = session.scalar(
+        select(Claim)
+        .where(
+            Claim.source_release_id == result.source_release_id,
+        )
+        .order_by(Claim.source_record_locator)
+    )
+    assert rejected is not None
+    rejected.assertion_status = ClaimAssertionStatus.REJECTED
+    session.flush()
+
+    with pytest.raises(
+        ValueError, match="Non-accepted UCDP annual claims block review"
+    ):
+        review_ucdp_annual(session, result.source_release_id)
+
+    assert rejected.assertion_status == ClaimAssertionStatus.REJECTED
+    assert session.scalar(select(func.count()).select_from(ResolvedClaim)) == 0
+
+
+def test_revised_ucdp_release_versions_resolutions_and_selects_current_context(
+    session: Session, tmp_path: Path
+) -> None:
+    store = LocalFilesystemRawSourceStore(tmp_path / "raw")
+    first = ingest_ucdp_annual(
+        session, fixture_path=ANNUAL_FIXTURE, raw_store=store
+    )
+    first_derived = review_ucdp_annual(session, first.source_release_id)
+    session.commit()
+
+    revised_fixture = tmp_path / "revised-annual.csv"
+    revised_fixture.write_text(
+        ANNUAL_FIXTURE.read_text(encoding="utf-8").replace(
+            '"India, Pakistan"', '"India and Pakistan"'
+        ),
+        encoding="utf-8",
+    )
+    second = ingest_ucdp_annual(
+        session, fixture_path=revised_fixture, raw_store=store
+    )
+    second_derived = review_ucdp_annual(session, second.source_release_id)
+
+    assert second_derived.id != first_derived.id
+    latest = session.scalar(
+        select(ResolvedClaim)
+        .where(ResolvedClaim.canonical_key == "ucdp-prio:conflict:218:1964")
+        .order_by(ResolvedClaim.version.desc())
+    )
+    assert latest is not None
+    assert latest.version == 2
+    assert latest.resolved_value["location"] == "India and Pakistan"
+    supporting_release = session.scalar(
+        select(Claim.source_release_id)
+        .join(
+            ResolvedClaimEvidence,
+            ResolvedClaimEvidence.claim_id == Claim.id,
+        )
+        .where(
+            ResolvedClaimEvidence.resolved_claim_id == latest.id,
+            ResolvedClaimEvidence.stance == "supporting",
+        )
+    )
+    assert supporting_release == second.source_release_id
+
+    content = build_ucdp_annual_profile_content(session)
+    assert content.source_release_id == second.source_release_id
+    selected_derived = session.scalar(
+        select(DerivedValue)
+        .join(
+            DerivedValueInput,
+            DerivedValueInput.derived_value_id == DerivedValue.id,
+        )
+        .where(
+            DerivedValueInput.resolved_claim_id.in_(
+                [row.id for row in content.resolved_claims]
+            ),
+            DerivedValue.value_kind == "active_state_based_conflict_count",
+        )
+        .order_by(DerivedValue.created_at.desc())
+    )
+    assert selected_derived is not None
+    assert selected_derived.id == second_derived.id
 
 
 def test_ucdp_ged_fixture_builds_bounded_direct_event_impact(

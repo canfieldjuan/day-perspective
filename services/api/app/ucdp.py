@@ -380,6 +380,15 @@ def review_ucdp_annual(session: Session, source_release_id: UUID) -> DerivedValu
     )
     if len(claims) != 25:
         raise ValueError("UCDP annual review requires 25 source claims.")
+    reviewable_statuses = {
+        ClaimAssertionStatus.CANDIDATE,
+        ClaimAssertionStatus.IN_REVIEW,
+        ClaimAssertionStatus.ACCEPTED,
+    }
+    if any(claim.assertion_status not in reviewable_statuses for claim in claims):
+        raise ValueError(
+            "Non-accepted UCDP annual claims block review before resolution."
+        )
     methodology = _methodology(session)
     resolved: list[ResolvedClaim] = []
     for claim in claims:
@@ -396,13 +405,27 @@ def review_ucdp_annual(session: Session, source_release_id: UUID) -> DerivedValu
             )
         conflict_id = str((claim.assertion_json or {})["conflict_id"])
         canonical_key = f"ucdp-prio:conflict:{conflict_id}:1964"
-        row = session.scalar(
+        prior = session.scalar(
             select(ResolvedClaim)
             .where(ResolvedClaim.canonical_key == canonical_key)
             .order_by(ResolvedClaim.version.desc())
         )
-        if row is None:
-            row = resolve_claim(
+        current_claim_supports_prior = (
+            prior is not None
+            and session.scalar(
+                select(ResolvedClaimEvidence.claim_id).where(
+                    ResolvedClaimEvidence.resolved_claim_id == prior.id,
+                    ResolvedClaimEvidence.claim_id == claim.id,
+                    ResolvedClaimEvidence.stance == "supporting",
+                )
+            )
+            is not None
+        )
+        if current_claim_supports_prior:
+            assert prior is not None
+            selected_resolution = prior
+        else:
+            selected_resolution = resolve_claim(
                 session,
                 canonical_key=canonical_key,
                 resolved_value=claim.assertion_json or {},
@@ -413,9 +436,12 @@ def review_ucdp_annual(session: Session, source_release_id: UUID) -> DerivedValu
                 supporting_claim_ids=[claim.id],
                 resolution_method=ResolutionMethod.SINGLE_SOURCE,
                 methodology_id=methodology.id,
+                supersedes_resolved_claim_id=prior.id if prior is not None else None,
             )
-            row.comparability_status = ComparabilityStatus.COMPARABLE
-        resolved.append(row)
+            selected_resolution.comparability_status = (
+                ComparabilityStatus.COMPARABLE
+            )
+        resolved.append(selected_resolution)
     for task in session.scalars(
         select(ReviewTask).where(
             ReviewTask.claim_id.in_([claim.id for claim in claims]),
@@ -558,10 +584,27 @@ def build_ucdp_annual_profile_content(session: Session) -> UCDPAnnualProfileCont
     if release is None:
         raise ValueError("UCDP annual release has not been ingested.")
     derived = session.scalar(
-        select(DerivedValue).where(
+        select(DerivedValue)
+        .join(
+            DerivedValueInput,
+            DerivedValueInput.derived_value_id == DerivedValue.id,
+        )
+        .join(
+            ResolvedClaim,
+            ResolvedClaim.id == DerivedValueInput.resolved_claim_id,
+        )
+        .join(
+            ResolvedClaimEvidence,
+            ResolvedClaimEvidence.resolved_claim_id == ResolvedClaim.id,
+        )
+        .join(Claim, Claim.id == ResolvedClaimEvidence.claim_id)
+        .where(
             DerivedValue.value_kind == "active_state_based_conflict_count",
             DerivedValue.period_start == date(1964, 1, 1),
+            Claim.source_release_id == release.id,
+            ResolvedClaimEvidence.stance == "supporting",
         )
+        .distinct()
     )
     if derived is None:
         raise ValueError("UCDP annual context has not been reviewed and derived.")
@@ -590,6 +633,7 @@ def build_ucdp_annual_profile_content(session: Session) -> UCDPAnnualProfileCont
                     [row.id for row in inputs]
                 ),
                 ResolvedClaimEvidence.stance == "supporting",
+                Claim.source_release_id == release.id,
             )
             .order_by(Claim.source_record_locator)
         )
@@ -604,8 +648,9 @@ def build_ucdp_annual_profile_content(session: Session) -> UCDPAnnualProfileCont
     statement: dict[str, object] = {
         "statement_id": "ucdp-1964-active-conflicts",
         "statement": (
-            "UCDP/PRIO records 25 state-based armed conflicts as active at some "
-            "point in 1964. This is annual context, not a March 27 count."
+            f"UCDP/PRIO records {int(derived.value_numeric or 0)} state-based "
+            "armed conflicts as active at some point in 1964. This is annual "
+            "context, not a March 27 count."
         ),
         "details": {
             "title": "State-based armed conflicts active in 1964",
