@@ -32,6 +32,49 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value as Record<string, unknown>;
 }
 
+function isClaimEvidence(value: unknown): boolean {
+  const claim = asRecord(value);
+  return (
+    claim !== undefined &&
+    typeof claim.predicate === "string" &&
+    asRecord(claim.value) !== undefined &&
+    typeof claim.source_record_locator === "string" &&
+    typeof claim.source_record_hash_sha256 === "string"
+  );
+}
+
+function isProvenance(value: unknown): boolean {
+  const provenance = asRecord(value);
+  if (provenance === undefined || typeof provenance.published_statement !== "string") {
+    return false;
+  }
+  const resolvedClaim = asRecord(provenance.resolved_claim);
+  const sourceRelease = asRecord(provenance.source_release);
+  const methodology = asRecord(provenance.methodology);
+  return (
+    resolvedClaim !== undefined &&
+    typeof resolvedClaim.canonical_key === "string" &&
+    typeof resolvedClaim.version === "number" &&
+    typeof resolvedClaim.method === "string" &&
+    typeof resolvedClaim.rationale === "string" &&
+    Array.isArray(provenance.supporting_claims) &&
+    provenance.supporting_claims.every(isClaimEvidence) &&
+    Array.isArray(provenance.dissenting_claims) &&
+    provenance.dissenting_claims.every(isClaimEvidence) &&
+    sourceRelease !== undefined &&
+    typeof sourceRelease.source === "string" &&
+    typeof sourceRelease.publisher === "string" &&
+    typeof sourceRelease.release === "string" &&
+    typeof sourceRelease.source_url === "string" &&
+    typeof sourceRelease.raw_checksum_sha256 === "string" &&
+    typeof sourceRelease.retrieved_at === "string" &&
+    methodology !== undefined &&
+    typeof methodology.name === "string" &&
+    typeof methodology.version === "string" &&
+    typeof methodology.description === "string"
+  );
+}
+
 function isProfileStatement(value: unknown): value is ProfileStatement {
   const statement = asRecord(value);
   return (
@@ -40,7 +83,7 @@ function isProfileStatement(value: unknown): value is ProfileStatement {
     typeof statement.statement === "string" &&
     (statement.provenance_note === undefined || typeof statement.provenance_note === "string") &&
     (statement.details === undefined || asRecord(statement.details) !== undefined) &&
-    (statement.provenance === undefined || asRecord(statement.provenance) !== undefined)
+    (statement.provenance === undefined || isProvenance(statement.provenance))
   );
 }
 

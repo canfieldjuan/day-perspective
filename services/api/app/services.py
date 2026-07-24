@@ -457,6 +457,8 @@ def _quality_assessment_snapshots(
                 "assessment_kind": assessment.assessment_kind,
                 "score": str(assessment.score) if assessment.score is not None else None,
                 "findings": assessment.findings,
+                "public_grade": assessment.public_grade,
+                "public_explanation": assessment.public_explanation,
                 "legal_review_status": assessment.legal_review_status.value,
                 "assessed_at": assessment.assessed_at.isoformat(),
                 "assessment_methodology": _methodology_core_snapshot(

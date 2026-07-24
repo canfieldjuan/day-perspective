@@ -183,4 +183,48 @@ describe("DayProfileClient", () => {
       await screen.findByRole("heading", { name: "The profile could not be loaded." })
     ).toBeInTheDocument();
   });
+
+  it("rejects incomplete provenance before the renderer dereferences it", async () => {
+    vi.mocked(fetch).mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          status: "published",
+          date: "1964-03-27",
+          profile_type: "standard_statistical",
+          manifest_id: "manifest-malformed",
+          content_hash: "e".repeat(64),
+          profile: {
+            schema_version: "1",
+            date: "1964-03-27",
+            profile_type: "standard_statistical",
+            sections: {
+              recorded_on_this_date: [
+                {
+                  statement_id: "unsafe",
+                  statement: "This must never reach the provenance renderer.",
+                  provenance: {}
+                }
+              ],
+              typical_day_in_this_year: [],
+              wider_historical_context: [],
+              curated_claims: [],
+              derived_comparisons: [],
+              wonder_and_progress: [],
+              evidence_notes: []
+            }
+          }
+        }),
+        { headers: { "content-type": "application/json" }, status: 200 }
+      )
+    );
+
+    render(<DayProfileClient date="1964-03-27" />);
+
+    expect(
+      await screen.findByRole("heading", { name: "The profile could not be loaded." })
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("This must never reach the provenance renderer.")
+    ).not.toBeInTheDocument();
+  });
 });

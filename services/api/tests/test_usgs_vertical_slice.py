@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from collections.abc import Callable, Generator
 from pathlib import Path
 
@@ -14,15 +15,19 @@ from app import main
 from app.database import get_session
 from app.models import (
     Claim,
+    ClaimAssertionStatus,
+    Event,
     EventLocation,
     EventTime,
     GeographyVersion,
     PipelineRun,
     PublicationManifest,
+    PublicationStatementEvidence,
     QualityAssessment,
     QualityCheck,
     RawSourceRecord,
     ResolvedClaim,
+    ResolvedClaimEvidence,
     ReviewTask,
     SourceRelease,
 )
@@ -32,6 +37,7 @@ from app.usgs import (
     EvidenceCandidate,
     LocalFilesystemRawSourceStore,
     USGSEarthquakeAdapter,
+    accept_and_resolve_release,
     derive_quality,
     deterministic_resolution,
     ingest_usgs,
@@ -253,6 +259,99 @@ def test_resolution_is_versioned_when_a_resolved_value_changes(
     assert second.supersedes_resolved_claim_id == first.id
 
 
+def test_unchanged_value_from_new_release_creates_current_evidence_version(
+    session: Session, tmp_path: Path
+) -> None:
+    first = ingest(session, tmp_path)
+    assert first.source_release_id is not None
+    accept_and_resolve_release(session, first.source_release_id)
+    revised_fixture = tmp_path / "same-record-new-release.geojson"
+    revised_fixture.write_bytes(FIXTURE.read_bytes() + b"\n")
+    second = ingest_usgs(
+        session,
+        adapter=USGSEarthquakeAdapter(),
+        raw_store=LocalFilesystemRawSourceStore(tmp_path / "raw"),
+        fixture_path=revised_fixture,
+    )
+    assert second.source_release_id is not None
+
+    resolved = accept_and_resolve_release(session, second.source_release_id)
+    supporting_release = session.scalar(
+        select(Claim.source_release_id)
+        .join(ResolvedClaimEvidence, ResolvedClaimEvidence.claim_id == Claim.id)
+        .where(
+            ResolvedClaimEvidence.resolved_claim_id == resolved["magnitude"].id,
+            ResolvedClaimEvidence.stance == "supporting",
+        )
+    )
+
+    assert resolved["magnitude"].version == 2
+    assert supporting_release == second.source_release_id
+
+
+def test_rejected_claim_blocks_resolution_without_reviving_it(
+    session: Session, tmp_path: Path
+) -> None:
+    result = ingest(session, tmp_path)
+    assert result.source_release_id is not None
+    rejected = session.scalar(
+        select(Claim).where(
+            Claim.source_release_id == result.source_release_id,
+            Claim.claim_type == "magnitude",
+        )
+    )
+    assert rejected is not None
+    rejected.assertion_status = ClaimAssertionStatus.REJECTED
+    session.flush()
+
+    with pytest.raises(ValueError, match="Rejected claims block resolution"):
+        accept_and_resolve_release(session, result.source_release_id)
+
+    assert rejected.assertion_status == ClaimAssertionStatus.REJECTED
+    assert session.scalar(select(func.count()).select_from(ResolvedClaim)) == 0
+
+
+def test_revised_release_refreshes_event_projections_and_public_prose(
+    session: Session, tmp_path: Path
+) -> None:
+    first = ingest(session, tmp_path)
+    assert first.source_release_id is not None
+    accept_and_resolve_release(session, first.source_release_id)
+    revised_payload = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    revised_payload["features"][0]["properties"]["title"] = "Revised Alaska earthquake title"
+    revised_payload["features"][0]["properties"]["mag"] = 9.1
+    revised_payload["features"][0]["geometry"]["coordinates"] = [-148.0, 61.0, 30.0]
+    revised_fixture = tmp_path / "revised.geojson"
+    revised_fixture.write_text(json.dumps(revised_payload), encoding="utf-8")
+    second = ingest_usgs(
+        session,
+        adapter=USGSEarthquakeAdapter(),
+        raw_store=LocalFilesystemRawSourceStore(tmp_path / "raw"),
+        fixture_path=revised_fixture,
+    )
+    assert second.source_release_id is not None
+    accept_and_resolve_release(session, second.source_release_id)
+
+    event = session.scalar(select(Event))
+    assert event is not None
+    assert event.canonical_title == "Revised Alaska earthquake title"
+    assert session.scalar(select(func.count()).select_from(Event)) == 1
+    location = session.scalar(select(EventLocation))
+    assert location is not None and location.provenance_resolved_claim_id is not None
+
+    profile = publish_golden_profile(
+        session,
+        store=LocalFilesystemPublishedProfileStore(tmp_path / "published"),
+    )
+    manifest = session.get(PublicationManifest, profile.publication_manifest_id)
+    assert manifest is not None
+    payload = LocalFilesystemPublishedProfileStore(tmp_path / "published").read(
+        manifest.storage_uri, manifest.content_hash
+    )
+    magnitude_statement = payload["sections"]["recorded_on_this_date"][3]
+    assert magnitude_statement["statement"] == "USGS reports a magnitude of 9.1 Mw."
+
+
 def test_quality_grade_derivation_explains_single_source_consequence() -> None:
     grade, explanation, dimensions = derive_quality(
         independent_sources=1, complete_predicates=9
@@ -402,6 +501,13 @@ def test_quality_assessment_is_published_with_grade_and_explanation(
     assert assessment is not None
     assert assessment.public_grade == "B"
     assert "single-source" in (assessment.public_explanation or "").lower()
+    evidence = session.scalar(select(PublicationStatementEvidence))
+    assert evidence is not None
+    quality_snapshots = evidence.evidence_snapshot["evidence"][0]["claim"][
+        "source_release"
+    ]["release"]["quality_assessments"]
+    assert quality_snapshots[0]["public_grade"] == "B"
+    assert "single-source" in quality_snapshots[0]["public_explanation"].lower()
 
 
 def test_development_review_guard_is_explicit_and_blocks_unguarded_access(
