@@ -11,6 +11,9 @@ the contracted MVP and is not production-ready.
 
 - Branch: `agent/senior-takeover-mvp`
 - Baseline commit: `51bc1b0de577d861a5baa28fa4e857df9ddfc5c2`
+- Implementation commit: `c95b8db`
+- GitHub publication: blocked by an invalid HTTPS credential and unavailable
+  SSH key; no Ready PR was opened
 - Migration head: `20260724_0009`
 - Public shell: `1900-01-01` through `2025-12-31`
 - Published coverage: only `1964-03-27`

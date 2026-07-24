@@ -3,9 +3,12 @@
 ## 1. Executive State
 
 - Current branch: `agent/senior-takeover-mvp`
-- Latest commit: `51bc1b0de577d861a5baa28fa4e857df9ddfc5c2`
-- Working tree: intentionally dirty with the senior takeover changes listed in
-  Section 10; no unrelated changes were observed
+- Latest implementation commit: `c95b8db` (`audit and harden evidence
+  publication slice`). The metadata-only commit containing this finalized
+  handoff follows it; use `git log -1 --oneline` for that self-referential SHA.
+- Working tree: expected clean after the handoff metadata commit. Publication to
+  GitHub is blocked locally because the HTTPS credential is invalid and no SSH
+  key is accepted.
 - Current phase: senior foundation repair plus a multi-source standard-profile
   proof
 - Genuinely working: migrations through `0009`; offline USGS, UN WPP, UCDP and
