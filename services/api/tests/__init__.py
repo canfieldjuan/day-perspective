@@ -1,0 +1,2 @@
+"""PostgreSQL/PostGIS foundation tests."""
+

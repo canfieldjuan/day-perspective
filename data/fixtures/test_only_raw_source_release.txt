@@ -1,0 +1,3 @@
+TEST_FIXTURE_ONLY_NOT_HISTORICAL_EVIDENCE
+Synthetic raw source artifact for local development checks only.
+It contains no historical claims, events, observations, or published profiles.

@@ -1,0 +1,58 @@
+[build-system]
+requires = ["setuptools==75.8.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "day-perspective-api"
+version = "0.1.0"
+description = "Evidence-resolved historical perspective API foundation."
+readme = "README.md"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+  "alembic==1.14.1",
+  "fastapi==0.115.8",
+  "geoalchemy2==0.16.0",
+  "pydantic==2.10.6",
+  "psycopg[binary]==3.2.4",
+  "pydantic-settings==2.7.1",
+  "sqlalchemy==2.0.37",
+  "uvicorn[standard]==0.34.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "httpx==0.28.1",
+  "mypy==1.14.1",
+  "pytest==8.3.4",
+  "ruff==0.9.1",
+]
+
+[tool.setuptools]
+packages = ["app"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+markers = [
+  "integration: requires a disposable PostgreSQL/PostGIS database"
+]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"alembic/env.py" = ["E402"]
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+files = ["app"]
+
+[[tool.mypy.overrides]]
+module = ["geoalchemy2.*"]
+ignore_missing_imports = true

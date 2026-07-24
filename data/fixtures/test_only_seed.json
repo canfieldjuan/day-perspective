@@ -1,0 +1,24 @@
+{
+  "fixture_marker": "TEST_FIXTURE_ONLY_NOT_HISTORICAL_EVIDENCE",
+  "source": {
+    "slug": "test-only-synthetic-source",
+    "name": "Synthetic test fixture source",
+    "publisher": "Day Perspective development fixtures",
+    "canonical_url": "https://example.invalid/day-perspective-test-fixture",
+    "legal_review_status": "not_required"
+  },
+  "release": {
+    "release_label": "test-fixture-v1",
+    "source_url": "https://example.invalid/day-perspective-test-fixture/v1",
+    "raw_storage_uri": "fixtures://test_only_raw_source_release.txt",
+    "raw_checksum_sha256": "b6996a08d79d1464786405447a40aff5fabae0f9d8f5d877ed18577cabb3fbfa",
+    "raw_record_count": 0
+  },
+  "methodology": {
+    "slug": "test-only-fixture-methodology",
+    "version": "1.0.0",
+    "name": "Synthetic fixture methodology",
+    "description": "Exists only to exercise local setup. It must never justify a public historical statement.",
+    "code_version": "test-fixture-only"
+  }
+}
