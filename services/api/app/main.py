@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
@@ -337,6 +337,15 @@ def admin_claim_decision(
         if request.decision == "accepted"
         else ClaimAssertionStatus.REJECTED
     )
+    if claim.assertion_status == ClaimAssertionStatus.REJECTED:
+        for task in session.scalars(
+            select(ReviewTask).where(
+                ReviewTask.claim_id == claim.id,
+                ReviewTask.status.in_(("open", "in_progress")),
+            )
+        ):
+            task.status = "resolved"
+            task.completed_at = datetime.now(UTC)
     session.commit()
     return {"claim_id": str(claim.id), "status": claim.assertion_status.value}
 

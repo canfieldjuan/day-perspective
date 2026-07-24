@@ -336,13 +336,6 @@ def ingest_usgs(
     fixture_path: Path | None = None,
     dry_run: bool = False,
 ) -> IngestionResult:
-    payload = adapter.retrieve(fixture_path=fixture_path)
-    checksum = hashlib.sha256(payload).hexdigest()
-    if dry_run:
-        record = adapter.validate(payload)
-        adapter.record_to_claims(record)
-        return IngestionResult(None, None, (), checksum, False, True)
-
     run = PipelineRun(
         pipeline_name="usgs-earthquake-adapter",
         code_version="0.2.0",
@@ -358,6 +351,26 @@ def ingest_usgs(
     session.add(run)
     session.flush()
     try:
+        payload = adapter.retrieve(fixture_path=fixture_path)
+        checksum = hashlib.sha256(payload).hexdigest()
+        if dry_run:
+            record = adapter.validate(payload)
+            adapter.record_to_claims(record)
+            run.status = "succeeded"
+            run.completed_at = datetime.now(UTC)
+            run.details = {**run.details, "dry_run": True, "checksum": checksum}
+            session.add(
+                QualityCheck(
+                    pipeline_run_id=run.id,
+                    check_name="usgs_schema_and_golden_record",
+                    status="passed",
+                    subject_type="pipeline_run",
+                    subject_id=run.id,
+                    details={"record_id": record.id, "dry_run": True},
+                )
+            )
+            return IngestionResult(run.id, None, (), checksum, False, True)
+
         with session.begin_nested():
             record = adapter.validate(payload)
             drafts = adapter.record_to_claims(record)
@@ -602,15 +615,25 @@ def accept_and_resolve_release(session: Session, source_release_id: UUID) -> dic
     )
     if len(claims) != 9:
         raise ValueError("The golden release must contain all nine predicate claims.")
-    rejected = [claim.claim_type for claim in claims if claim.assertion_status == ClaimAssertionStatus.REJECTED]
-    if rejected:
+    allowed_statuses = {
+        ClaimAssertionStatus.CANDIDATE,
+        ClaimAssertionStatus.IN_REVIEW,
+        ClaimAssertionStatus.ACCEPTED,
+    }
+    blocked = [
+        f"{claim.claim_type}={claim.assertion_status.value}"
+        for claim in claims
+        if claim.assertion_status not in allowed_statuses
+    ]
+    if blocked:
         raise ValueError(
-            "Rejected claims block resolution: " + ", ".join(sorted(rejected))
+            "Non-reviewable claims block resolution: " + ", ".join(sorted(blocked))
         )
     methodology = _methodology(session)
     resolved: dict[str, ResolvedClaim] = {}
     for claim in claims:
-        claim.assertion_status = ClaimAssertionStatus.ACCEPTED
+        if claim.assertion_status != ClaimAssertionStatus.ACCEPTED:
+            claim.assertion_status = ClaimAssertionStatus.ACCEPTED
         prior = session.scalar(
             select(ResolvedClaim)
             .where(ResolvedClaim.canonical_key == f"usgs:{USGS_EVENT_ID}:{claim.claim_type}")
@@ -881,7 +904,6 @@ def publish_golden_profile(
     local_date = date.fromisoformat(str(local["date"]))
     if local_date != GOLDEN_DATE:
         raise ValueError("The selected USGS release no longer belongs to the golden date.")
-    local_timestamp = occurrence_timestamp.astimezone(ZoneInfo(str(local["timezone"])))
     event_title = str(claims["event_title"].assertion_text)
     geography_display = str(claims["epicenter_geography"].assertion_text)
 
@@ -893,17 +915,29 @@ def publish_golden_profile(
             {"event_type": "earthquake", "title": event_title},
         ),
         (
-            "event-time",
+            "event-time-utc",
             "occurrence_timestamp",
-            (
-                f"It occurred at {occurrence_timestamp.strftime('%Y-%m-%d %H:%M:%S')} UTC, "
-                f"which was {local_timestamp.strftime('%B %d at %I:%M:%S %p %Z')}."
-            ),
+            f"USGS records the occurrence at "
+            f"{occurrence_timestamp.strftime('%Y-%m-%d %H:%M:%S')} UTC.",
             {
                 "utc": occurrence["utc"],
+            },
+        ),
+        (
+            "event-local-civil-date",
+            "local_civil_date",
+            (
+                f"Historical {local['timezone']} civil-time rules assign the "
+                f"occurrence to {local_date.strftime('%B %d, %Y')} locally "
+                f"(UTC offset {int(local['utc_offset_minutes'])} minutes)."
+            ),
+            {
+                **local,
                 "local_date": local_date.isoformat(),
-                "timezone": local["timezone"],
-                "interpretation": "Historical IANA civil-time conversion; UTC-10 at the event instant.",
+                "interpretation": (
+                    "Historical IANA civil-time assignment from the separately "
+                    "resolved local-date claim."
+                ),
             },
         ),
         (

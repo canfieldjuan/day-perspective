@@ -105,6 +105,19 @@ def upgrade() -> None:
 def downgrade() -> None:
     op.execute(
         """
+        DO $$
+        BEGIN
+          IF EXISTS (
+            SELECT 1 FROM claims WHERE temporal_precision::text = 'second'
+          ) OR EXISTS (
+            SELECT 1 FROM event_times WHERE temporal_precision::text = 'second'
+          ) THEN
+            RAISE EXCEPTION
+              'unsafe downgrade blocked: second-precision evidence exists';
+          END IF;
+        END;
+        $$;
+
         ALTER TABLE publication_manifests DROP COLUMN editorial_revision;
         ALTER TABLE quality_assessments
           DROP CONSTRAINT quality_assessments_public_pair,

@@ -96,6 +96,43 @@ describe("DayProfileClient", () => {
     expect(screen.getByText("Test-only provenance note.")).toBeInTheDocument();
   });
 
+  it("accepts a valid profile containing only the sections that were published", async () => {
+    vi.mocked(fetch).mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          status: "published",
+          date: "1969-07-20",
+          profile_type: "standard_statistical",
+          manifest_id: "manifest-partial",
+          content_hash: "f".repeat(64),
+          profile: {
+            schema_version: "1",
+            date: "1969-07-20",
+            profile_type: "standard_statistical",
+            sections: {
+              evidence_notes: [
+                {
+                  statement_id: "partial-profile-note",
+                  statement: "Only this evidence note was published."
+                }
+              ]
+            }
+          }
+        }),
+        { headers: { "content-type": "application/json" }, status: 200 }
+      )
+    );
+
+    render(<DayProfileClient date="1969-07-20" />);
+
+    expect(
+      await screen.findByText("Only this evidence note was published.")
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: "The profile could not be loaded." })
+    ).not.toBeInTheDocument();
+  });
+
   it("renders the golden earthquake and opens its public provenance chain", async () => {
     vi.mocked(fetch).mockResolvedValue(
       new Response(

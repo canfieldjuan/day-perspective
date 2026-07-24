@@ -304,7 +304,7 @@ def test_rejected_claim_blocks_resolution_without_reviving_it(
     rejected.assertion_status = ClaimAssertionStatus.REJECTED
     session.flush()
 
-    with pytest.raises(ValueError, match="Rejected claims block resolution"):
+    with pytest.raises(ValueError, match="Non-reviewable claims block resolution"):
         accept_and_resolve_release(session, result.source_release_id)
 
     assert rejected.assertion_status == ClaimAssertionStatus.REJECTED
@@ -348,7 +348,7 @@ def test_revised_release_refreshes_event_projections_and_public_prose(
     payload = LocalFilesystemPublishedProfileStore(tmp_path / "published").read(
         manifest.storage_uri, manifest.content_hash
     )
-    magnitude_statement = payload["sections"]["recorded_on_this_date"][3]
+    magnitude_statement = payload["sections"]["recorded_on_this_date"][4]
     assert magnitude_statement["statement"] == "USGS reports a magnitude of 9.1 Mw."
 
 
@@ -430,7 +430,7 @@ def test_api_returns_verified_golden_profile(
     body = response.json()
     assert body["status"] == "published"
     assert body["profile"]["quality"]["grade"] == "B"
-    assert body["profile"]["sections"]["recorded_on_this_date"][3]["details"]["value"] == 9.2
+    assert body["profile"]["sections"]["recorded_on_this_date"][4]["details"]["value"] == 9.2
 
 
 def test_api_distinguishes_invalid_outside_and_unpublished_dates(
@@ -493,6 +493,71 @@ def test_failed_validation_records_failure_and_cannot_publish(
         )
 
 
+def test_acquisition_failure_records_failed_run_and_quality_check(
+    session: Session, tmp_path: Path
+) -> None:
+    with pytest.raises(FileNotFoundError):
+        ingest_usgs(
+            session,
+            adapter=USGSEarthquakeAdapter(),
+            raw_store=LocalFilesystemRawSourceStore(tmp_path / "raw"),
+            fixture_path=tmp_path / "missing.geojson",
+        )
+
+    assert session.scalar(select(PipelineRun.status)) == "failed"
+    assert session.scalar(select(QualityCheck.status)) == "failed"
+    assert session.scalar(select(func.count()).select_from(SourceRelease)) == 0
+
+
+@pytest.mark.parametrize(
+    "terminal_status",
+    [ClaimAssertionStatus.RETRACTED, ClaimAssertionStatus.SUPERSEDED],
+)
+def test_terminal_nonaccepted_claim_states_block_resolution(
+    session: Session,
+    tmp_path: Path,
+    terminal_status: ClaimAssertionStatus,
+) -> None:
+    result = ingest(session, tmp_path)
+    assert result.source_release_id is not None
+    claim = session.scalar(
+        select(Claim).where(
+            Claim.source_release_id == result.source_release_id,
+            Claim.claim_type == "magnitude",
+        )
+    )
+    assert claim is not None
+    claim.assertion_status = terminal_status
+    session.flush()
+
+    with pytest.raises(ValueError, match="Non-reviewable claims block resolution"):
+        accept_and_resolve_release(session, result.source_release_id)
+
+    assert claim.assertion_status == terminal_status
+    assert session.scalar(select(func.count()).select_from(ResolvedClaim)) == 0
+
+
+def test_utc_and_local_date_statements_have_separate_provenance_roots(
+    session: Session, tmp_path: Path
+) -> None:
+    _, profile = publish(session, tmp_path)
+    manifest = session.get(PublicationManifest, profile.publication_manifest_id)
+    assert manifest is not None
+    payload = LocalFilesystemPublishedProfileStore(tmp_path / "published").read(
+        manifest.storage_uri, manifest.content_hash
+    )
+    statements = payload["sections"]["recorded_on_this_date"]
+
+    assert statements[1]["statement_id"] == "event-time-utc"
+    assert statements[1]["provenance"]["supporting_claims"][0]["predicate"] == (
+        "occurrence_timestamp"
+    )
+    assert statements[2]["statement_id"] == "event-local-civil-date"
+    assert statements[2]["provenance"]["supporting_claims"][0]["predicate"] == (
+        "local_civil_date"
+    )
+
+
 def test_quality_assessment_is_published_with_grade_and_explanation(
     session: Session, tmp_path: Path
 ) -> None:
@@ -508,6 +573,33 @@ def test_quality_assessment_is_published_with_grade_and_explanation(
     ]["release"]["quality_assessments"]
     assert quality_snapshots[0]["public_grade"] == "B"
     assert "single-source" in quality_snapshots[0]["public_explanation"].lower()
+
+
+def test_rejecting_claim_closes_its_review_task(
+    session: Session, tmp_path: Path
+) -> None:
+    result = ingest(session, tmp_path)
+    claim = session.scalar(
+        select(Claim).where(Claim.source_release_id == result.source_release_id)
+    )
+    assert claim is not None
+    main.app.dependency_overrides[get_session] = override_session(session)
+    try:
+        response = TestClient(main.app).post(
+            f"/api/v1/admin/claims/{claim.id}/decision",
+            headers={
+                "X-Development-Review-Token": main.settings.development_review_token
+            },
+            json={"decision": "rejected"},
+        )
+    finally:
+        main.app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    task = session.scalar(select(ReviewTask).where(ReviewTask.claim_id == claim.id))
+    assert task is not None
+    assert task.status == "resolved"
+    assert task.completed_at is not None
 
 
 def test_development_review_guard_is_explicit_and_blocks_unguarded_access(
