@@ -1,0 +1,12 @@
+{
+  "fixture_marker": "OFFICIAL_SOURCE_EXCERPT_FOR_NETWORK_INDEPENDENT_TESTS",
+  "source": "United Nations, Department of Economic and Social Affairs, Population Division",
+  "dataset": "World Population Prospects 2024",
+  "file_identity": "GEN/01/REV1",
+  "source_url": "https://population.un.org/wpp/assets/Excel%20Files/1_Indicator%20(Standard)/EXCEL_FILES/1_General/WPP2024_GEN_F01_DEMOGRAPHIC_INDICATORS_COMPACT.xlsx",
+  "source_file_sha256": "98e34d9b65b53858cd08a57a566e45050b08093ad85ba5714fe6fbd78055ae6d",
+  "retrieved_at": "2026-07-24T18:35:00Z",
+  "license": "CC-BY-3.0-IGO",
+  "terms_url": "https://creativecommons.org/licenses/by/3.0/igo/",
+  "extraction": "The committed CSV preserves the World rows and named columns for 1950, 1964, 1989, and 2023 from the Estimates worksheet. It is a minimal test fixture, not the complete WPP release."
+}

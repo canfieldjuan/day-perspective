@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgis/postgis:16-3.5
+        env:
+          POSTGRES_DB: day_perspective
+          POSTGRES_USER: day_perspective
+          POSTGRES_PASSWORD: day_perspective
+        ports:
+          - 54329:5432
+        options: >-
+          --health-cmd "pg_isready -U day_perspective -d day_perspective"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.14.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20.20.0
+          cache: pnpm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: make install
+      - run: corepack pnpm --filter @day-perspective/web exec playwright install --with-deps chromium
+      - run: make db-migrate
+      - run: make check
+      - run: make ingest-usgs-fixture
+      - run: make review-usgs-fixture
+      - run: make ingest-un-wpp-fixture
+      - run: make review-un-wpp-fixture
+      - run: make ingest-ucdp-annual-fixture
+      - run: make review-ucdp-annual-fixture
+      - run: make ingest-ucdp-ged-fixture
+      - run: make review-ucdp-ged-fixture
+      - run: make ingest-wikidata-fixture
+      - run: make publish-golden
+      - run: make web-build
+      - run: make web-e2e
+      - run: make web-e2e-full-stack
+      - run: make validate-golden-set
+      - run: make audit

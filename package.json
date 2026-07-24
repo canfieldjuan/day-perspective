@@ -10,5 +10,11 @@
     "test": "pnpm -r test",
     "lint": "pnpm -r lint",
     "typecheck": "pnpm -r typecheck"
+  },
+  "pnpm": {
+    "overrides": {
+      "postcss": "8.5.23",
+      "sharp": "0.35.3"
+    }
   }
 }

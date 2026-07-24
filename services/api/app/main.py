@@ -13,11 +13,11 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.database import get_session
+from app.governance import ReviewDecisionValue, record_claim_review
 from app.models import (
     PUBLIC_DATE_MAX,
     PUBLIC_DATE_MIN,
     Claim,
-    ClaimAssertionStatus,
     DayProfile,
     Methodology,
     ProfileType,
@@ -26,9 +26,10 @@ from app.models import (
     ResolvedClaimEvidence,
     ReviewTask,
     Source,
+    SourceRelease,
     profile_type_for_date,
 )
-from app.services import LocalFilesystemPublishedProfileStore
+from app.services import LocalFilesystemPublishedProfileStore, record_correction
 from app.usgs import accept_and_resolve_release, publish_golden_profile
 
 settings = get_settings()
@@ -258,12 +259,47 @@ def admin_claims(
         "claims": [
             {
                 "claim_id": str(row.id),
+                "source_release_id": str(row.source_release_id),
                 "predicate": row.claim_type,
                 "value": row.assertion_json,
                 "status": row.assertion_status.value,
                 "source_record_locator": row.source_record_locator,
             }
             for row in rows
+        ],
+    }
+
+
+@app.get(
+    "/api/v1/admin/releases",
+    dependencies=[Depends(development_review_guard)],
+)
+def admin_releases(
+    session: Annotated[Session, Depends(get_session)],
+) -> dict[str, Any]:
+    releases = session.scalars(
+        select(SourceRelease).order_by(SourceRelease.ingested_at)
+    ).all()
+    return {
+        "development_only": True,
+        "releases": [
+            {
+                "release_id": str(release.id),
+                "release_label": release.release_label,
+                "source_url": release.source_url,
+                "checksum": release.raw_checksum_sha256,
+                "claim_statuses": sorted(
+                    {
+                        claim.assertion_status.value
+                        for claim in session.scalars(
+                            select(Claim).where(
+                                Claim.source_release_id == release.id
+                            )
+                        )
+                    }
+                ),
+            }
+            for release in releases
         ],
     }
 
@@ -292,6 +328,70 @@ def admin_conflicts(
 
 
 @app.get(
+    "/api/v1/admin/manifests",
+    dependencies=[Depends(development_review_guard)],
+)
+def admin_manifests(
+    session: Annotated[Session, Depends(get_session)],
+) -> dict[str, Any]:
+    manifests = session.scalars(
+        select(PublicationManifest).order_by(
+            PublicationManifest.profile_date,
+            PublicationManifest.version,
+        )
+    ).all()
+    return {
+        "development_only": True,
+        "manifests": [
+            {
+                "manifest_id": str(manifest.id),
+                "date": manifest.profile_date.isoformat(),
+                "version": manifest.version,
+                "status": manifest.status.value,
+                "content_hash": manifest.content_hash,
+                "supersedes_manifest_id": (
+                    str(manifest.supersedes_manifest_id)
+                    if manifest.supersedes_manifest_id
+                    else None
+                ),
+            }
+            for manifest in manifests
+        ],
+    }
+
+
+class CorrectionRequest(APIModel):
+    original_manifest_id: UUID
+    replacement_manifest_id: UUID
+    rationale: str
+
+
+@app.post(
+    "/api/v1/admin/corrections",
+    dependencies=[Depends(development_review_guard)],
+)
+def admin_record_correction(
+    request: CorrectionRequest,
+    session: Annotated[Session, Depends(get_session)],
+) -> dict[str, Any]:
+    try:
+        correction = record_correction(
+            session,
+            original_manifest_id=request.original_manifest_id,
+            replacement_manifest_id=request.replacement_manifest_id,
+            rationale=request.rationale,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    session.commit()
+    return {
+        "correction_id": str(correction.id),
+        "original_manifest_id": str(correction.original_manifest_id),
+        "replacement_manifest_id": str(correction.replacement_manifest_id),
+    }
+
+
+@app.get(
     "/api/v1/admin/review-tasks",
     dependencies=[Depends(development_review_guard)],
 )
@@ -315,6 +415,7 @@ def admin_review_tasks(
 
 class ClaimDecisionRequest(APIModel):
     decision: Literal["accepted", "rejected"]
+    rationale: str
 
 
 @app.post(
@@ -332,10 +433,12 @@ def admin_claim_decision(
         claim = None
     if claim is None:
         raise HTTPException(status_code=404, detail="Claim not found.")
-    claim.assertion_status = (
-        ClaimAssertionStatus.ACCEPTED
-        if request.decision == "accepted"
-        else ClaimAssertionStatus.REJECTED
+    record_claim_review(
+        session,
+        claim=claim,
+        decision=ReviewDecisionValue(request.decision),
+        rationale=request.rationale,
+        reviewed_by="development-review-api",
     )
     session.commit()
     return {"claim_id": str(claim.id), "status": claim.assertion_status.value}
@@ -350,7 +453,11 @@ def admin_resolve_release(
     session: Annotated[Session, Depends(get_session)],
 ) -> dict[str, Any]:
     try:
-        resolved = accept_and_resolve_release(session, UUID(release_id))
+        resolved = accept_and_resolve_release(
+            session,
+            UUID(release_id),
+            review_candidates=False,
+        )
     except (TypeError, ValueError) as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     session.commit()

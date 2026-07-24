@@ -126,3 +126,43 @@ A local date requires the complete timestamp/timezone/offset/interpretation tupl
 ### New and changed constraints
 
 `source_releases(source_id, raw_checksum_sha256)` is unique for idempotent imports. Raw records are immutable. Claim hashes and raw checksums must be lowercase SHA-256. Stable profile locations are version-addressed and protected by the existing published-manifest/day-profile immutability triggers.
+
+## Senior Takeover Schema Additions
+
+### `source_release_licenses`
+
+One immutable license snapshot per source release. It stores the identifier,
+verbatim policy snapshot, terms URL, commercial-use, redistribution,
+derivatives, attribution, public-display and raw-download permissions,
+attribution text, terms-check date and legal-review status. The release foreign
+key is the primary key. Update and delete are rejected.
+
+### `claim_review_decisions`
+
+Append-only accept/reject/defer decisions for imported claims. Important
+columns are claim, decision, rationale, reviewer identity and decision time.
+Rows cannot be updated or deleted. Claim status is advanced through governance
+services that create this record.
+
+### `editorial_selections`
+
+Append-only selection decisions for exactly one resolved claim or derived value
+in one date/section. It stores status, display rank, rationale and reviewer.
+Publication eligibility checks selected roots against this table.
+
+### Temporal assignment addition
+
+`period_context` identifies an aggregate that describes a period without
+allocating it to individual dates. It is distinct from `direct_record`,
+`uniform_period_allocation`, `modeled_period_allocation` and
+`editorial_context`.
+
+### Current structured metric records
+
+UN WPP review materializes five metrics, annual observations and coverage for
+the selected fixture years. Average daily births and deaths are separate
+derived metrics with `uniform_period_allocation`. UCDP review materializes an
+active state-based-conflict count derived from 25 resolved conflict-year inputs
+using `period_context`. UCDP GED fatalities are stored in `event_impacts` with
+directness `direct`; low and high bounds remain on the source claim and resolved
+value rather than being collapsed into the event row.

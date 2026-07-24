@@ -11,7 +11,6 @@ import { ProfileSections } from "./ProfileSections";
 
 type ViewState =
   | { kind: "loading" }
-  | { kind: "invalid-date" }
   | { kind: "unpublished" }
   | { kind: "api-error" }
   | { kind: "published"; profile: PublishedDayProfile };
@@ -36,12 +35,10 @@ export function DayProfileClient({ date }: { date: string }) {
 
   useEffect(() => {
     if (!isSupportedPublicDate(date)) {
-      setState({ kind: "invalid-date" });
       return;
     }
 
     const controller = new AbortController();
-    setState({ kind: "loading" });
 
     async function loadProfile() {
       try {
@@ -82,7 +79,7 @@ export function DayProfileClient({ date }: { date: string }) {
     };
   }, [date, requestNumber]);
 
-  if (state.kind === "invalid-date") {
+  if (!isSupportedPublicDate(date)) {
     return (
       <>
         <section className="state-panel state-panel--error" aria-labelledby="invalid-date-title">
@@ -127,7 +124,10 @@ export function DayProfileClient({ date }: { date: string }) {
           <button
             className="action-button"
             type="button"
-            onClick={() => setRequestNumber((value) => value + 1)}
+            onClick={() => {
+              setState({ kind: "loading" });
+              setRequestNumber((value) => value + 1);
+            }}
           >
             Retry profile request
           </button>

@@ -20,6 +20,7 @@ def main() -> None:
     ingest = subparsers.add_parser("ingest")
     ingest.add_argument("--fixture", type=Path)
     ingest.add_argument("--dry-run", action="store_true")
+    subparsers.add_parser("review")
     subparsers.add_parser("publish")
     args = parser.parse_args()
     settings = get_settings()
@@ -37,6 +38,25 @@ def main() -> None:
                 f"checksum={result.checksum} idempotent={result.idempotent} "
                 f"dry_run={result.dry_run}"
             )
+        elif args.command == "review":
+            from sqlalchemy import select
+
+            from app.models import Source, SourceRelease
+            from app.usgs import USGS_SOURCE_SLUG, accept_and_resolve_release
+
+            source = session.scalar(select(Source).where(Source.slug == USGS_SOURCE_SLUG))
+            if source is None:
+                raise ValueError("USGS fixture has not been ingested.")
+            release = session.scalar(
+                select(SourceRelease)
+                .where(SourceRelease.source_id == source.id)
+                .order_by(SourceRelease.ingested_at.desc())
+            )
+            if release is None:
+                raise ValueError("USGS fixture has no source release.")
+            resolved = accept_and_resolve_release(session, release.id)
+            session.commit()
+            print(f"reviewed_resolved_claims={len(resolved)}")
         else:
             profile = publish_golden_profile(
                 session,

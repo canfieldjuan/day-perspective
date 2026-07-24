@@ -52,12 +52,25 @@ export function ProfileSections({
                     <details className="provenance-view">
                       <summary>Why can the app say this?</summary>
                       <dl>
-                        <dt>Resolved claim</dt>
-                        <dd>
-                          {statement.provenance.resolved_claim.canonical_key}, version{" "}
-                          {statement.provenance.resolved_claim.version}:{" "}
-                          {statement.provenance.resolved_claim.rationale}
-                        </dd>
+                        {statement.provenance.resolved_claim ? (
+                          <>
+                            <dt>Resolved claim</dt>
+                            <dd>
+                              {statement.provenance.resolved_claim.canonical_key}, version{" "}
+                              {statement.provenance.resolved_claim.version}:{" "}
+                              {statement.provenance.resolved_claim.rationale}
+                            </dd>
+                          </>
+                        ) : null}
+                        {statement.provenance.derived_value ? (
+                          <>
+                            <dt>Derived value</dt>
+                            <dd>
+                              {statement.provenance.derived_value.kind}, calculation version{" "}
+                              {statement.provenance.derived_value.calculation_version}
+                            </dd>
+                          </>
+                        ) : null}
                         <dt>Supporting claims</dt>
                         <dd>
                           {statement.provenance.supporting_claims.map((claim) => (

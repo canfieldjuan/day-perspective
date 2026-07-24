@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from app import main
 from app.database import get_session
+from app.governance import ClaimReviewDecision
 from app.models import (
     Claim,
     EventLocation,
@@ -27,11 +28,14 @@ from app.models import (
     SourceRelease,
 )
 from app.services import LocalFilesystemPublishedProfileStore, content_hash
+from app.ucdp import ingest_ucdp_annual, review_ucdp_annual
+from app.un_wpp import ingest_un_wpp, review_un_wpp
 from app.usgs import (
     GOLDEN_DATE,
     EvidenceCandidate,
     LocalFilesystemRawSourceStore,
     USGSEarthquakeAdapter,
+    accept_and_resolve_release,
     derive_quality,
     deterministic_resolution,
     ingest_usgs,
@@ -40,6 +44,12 @@ from app.usgs import (
 
 ROOT = Path(__file__).resolve().parents[3]
 FIXTURE = ROOT / "data/fixtures/usgs/1964-prince-william-sound.geojson"
+UN_WPP_FIXTURE = (
+    ROOT / "data/fixtures/un-wpp/wpp2024-world-selected-years.csv"
+)
+UCDP_ANNUAL_FIXTURE = (
+    ROOT / "data/fixtures/ucdp/ucdp-prio-26.1-conflicts-1964.csv"
+)
 
 
 def ingest(session: Session, tmp_path: Path):
@@ -53,6 +63,20 @@ def ingest(session: Session, tmp_path: Path):
 
 def publish(session: Session, tmp_path: Path):
     result = ingest(session, tmp_path)
+    assert result.source_release_id is not None
+    accept_and_resolve_release(session, result.source_release_id)
+    un_result = ingest_un_wpp(
+        session,
+        fixture_path=UN_WPP_FIXTURE,
+        raw_store=LocalFilesystemRawSourceStore(tmp_path / "raw"),
+    )
+    review_un_wpp(session, un_result.source_release_id)
+    ucdp_result = ingest_ucdp_annual(
+        session,
+        fixture_path=UCDP_ANNUAL_FIXTURE,
+        raw_store=LocalFilesystemRawSourceStore(tmp_path / "raw"),
+    )
+    review_ucdp_annual(session, ucdp_result.source_release_id)
     profile = publish_golden_profile(
         session,
         store=LocalFilesystemPublishedProfileStore(tmp_path / "published"),
@@ -152,7 +176,31 @@ def test_claim_transformation_preserves_predicates_hash_units_and_bounds(
     }
     assert claims["magnitude"].unit == "mw"
     assert claims["magnitude"].lower_bound == claims["magnitude"].upper_bound
-    assert all(row.source_record_hash_sha256 == result.checksum for row in claims.values())
+    assert all(
+        row.source_record_hash_sha256 == result.record_hash for row in claims.values()
+    )
+
+
+def test_dry_run_records_validation_without_importing_release_or_claims(
+    session: Session, tmp_path: Path
+) -> None:
+    result = ingest_usgs(
+        session,
+        adapter=USGSEarthquakeAdapter(),
+        raw_store=LocalFilesystemRawSourceStore(tmp_path / "raw"),
+        fixture_path=FIXTURE,
+        dry_run=True,
+    )
+
+    assert result.dry_run is True
+    assert result.pipeline_run_id is not None
+    assert result.source_release_id is None
+    assert result.claim_ids == ()
+    assert result.record_hash != result.checksum
+    assert session.scalar(select(PipelineRun.status)) == "succeeded"
+    assert session.scalar(select(QualityCheck.status)) == "passed"
+    assert session.scalar(select(func.count()).select_from(SourceRelease)) == 0
+    assert session.scalar(select(func.count()).select_from(Claim)) == 0
 
 
 def test_event_time_conversion_and_local_civil_date_assignment(
@@ -292,7 +340,10 @@ def test_manifest_and_object_hashes_match_and_include_required_snapshot_metadata
 
     assert manifest.content_hash == content_hash(payload)
     assert manifest.storage_uri == "day/1964-03-27/profile-v1.json"
-    assert manifest.metadata_json["source_release_ids"] == [str(result.source_release_id)]
+    assert manifest.metadata_json["source_release_ids"][0] == str(
+        result.source_release_id
+    )
+    assert len(manifest.metadata_json["source_release_ids"]) == 3
     assert manifest.metadata_json["resolved_claim_versions"]
 
 
@@ -414,3 +465,43 @@ def test_development_review_guard_is_explicit_and_blocks_unguarded_access(
         main.app.dependency_overrides.clear()
     assert response.status_code == 403
     assert "not production authentication" in response.json()["detail"]
+
+
+def test_admin_decision_records_ledger_and_resolution_requires_prior_acceptance(
+    session: Session, tmp_path: Path
+) -> None:
+    result = ingest(session, tmp_path)
+    assert result.source_release_id is not None
+    claim = session.scalar(select(Claim).order_by(Claim.claim_type))
+    assert claim is not None
+    main.app.dependency_overrides[get_session] = override_session(session)
+    headers = {
+        "X-Development-Review-Token": main.settings.development_review_token
+    }
+    try:
+        blocked = TestClient(main.app).post(
+            f"/api/v1/admin/releases/{result.source_release_id}/resolve",
+            headers=headers,
+        )
+        assert blocked.status_code == 400
+        assert "explicitly accepted" in blocked.json()["detail"]
+
+        response = TestClient(main.app).post(
+            f"/api/v1/admin/claims/{claim.id}/decision",
+            headers=headers,
+            json={
+                "decision": "accepted",
+                "rationale": "Matched the claim to the committed official fixture.",
+            },
+        )
+        assert response.status_code == 200
+        assert response.json()["status"] == "accepted"
+        decision = session.scalar(
+            select(ClaimReviewDecision).where(
+                ClaimReviewDecision.claim_id == claim.id
+            )
+        )
+        assert decision is not None
+        assert decision.rationale.startswith("Matched the claim")
+    finally:
+        main.app.dependency_overrides.clear()

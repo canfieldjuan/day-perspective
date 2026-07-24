@@ -288,3 +288,120 @@ JSONB unsuitable; never weaken historical reconstructability.
 **Consequences:** Admin endpoints must never be exposed as production-ready.
 
 **Revisit trigger:** Any deployment or multi-user review workflow.
+
+## D016: Gate publication with immutable release-level license records
+
+**Decision:** Every public source release must have an immutable
+`source_release_licenses` row that explicitly records commercial use,
+redistribution, derivatives, attribution, public display, raw download, terms
+date and legal status.
+
+**Context:** Source-level legal status was too coarse and could not prove the
+terms that applied to an immutable release.
+
+**Alternatives considered:** Free-text source notes; one license per source;
+publication-time configuration.
+
+**Reason:** Release-level snapshots make the publication decision reproducible
+when upstream terms later change.
+
+**Consequences:** Missing or restricted license records block publication.
+Machine-readable standard licenses do not replace human launch approval.
+
+**Revisit trigger:** Human counsel requires a separate approval workflow or
+license inheritance policy.
+
+## D017: Separate review decisions, resolution and editorial selection
+
+**Decision:** Record accept/reject actions in an append-only ledger; resolution
+requires already accepted claims; publication requires explicit editorial
+selection.
+
+**Context:** The inherited admin resolve action could accept candidates as a
+side effect and claim status could be mutated without a decision record.
+
+**Alternatives considered:** Direct claim status mutation; resolution as
+implicit acceptance; publication-time auto-review.
+
+**Reason:** Each epistemic transition must be explainable and attributable.
+
+**Consequences:** Development fixture commands perform an explicit review step
+before resolution. The admin resolution endpoint rejects candidates.
+
+**Revisit trigger:** Product defines multi-reviewer quorum or appeal workflows.
+
+## D018: Model annual conflict aggregates as period context
+
+**Decision:** Add `period_context` to temporal assignment and use it for the
+UCDP 1964 conflict-year count.
+
+**Context:** `direct_record`, `uniform_period_allocation` and
+`editorial_context` each misdescribe an aggregate count over a calendar year.
+
+**Alternatives considered:** Reuse an existing enum; store the distinction only
+in prose.
+
+**Reason:** The distinction must survive database, artifact and UI boundaries.
+
+**Consequences:** Public language states that the count describes the year, not
+the selected date.
+
+**Revisit trigger:** A broader typed derivation taxonomy replaces temporal
+assignment.
+
+## D019: Treat Wikidata as candidate discovery, not confirmation
+
+**Decision:** Pinned Wikidata entity JSON creates candidate claims and review
+tasks only.
+
+**Context:** Q749610 includes values without displayed references, including a
+fatality count. Import success is not evidence acceptance, and Wikipedia-derived
+claims are not independent of their republishers.
+
+**Alternatives considered:** Automatic event merge; use Wikidata as second
+source; exclude it entirely.
+
+**Reason:** Candidate discovery is useful while preserving the claim-first
+review contract.
+
+**Consequences:** The adapter creates no resolved claim, canonical event or
+public statement.
+
+**Revisit trigger:** Entity-resolution and reference-quality workflows are
+implemented.
+
+## D020: Separate Golden 100 selection from review and publication
+
+**Decision:** Store 100 candidate dates with selection rationale, manual-review
+status and publication status as separate fields.
+
+**Context:** A version-controlled list is required, but automated selection
+cannot honestly claim human editorial review.
+
+**Alternatives considered:** Mark generated candidates reviewed; defer the file;
+publish empty profiles.
+
+**Reason:** Release dashboards must remain red until the real gate is met.
+
+**Consequences:** The validator proves count, era and stress-category coverage
+while reporting zero reviewed and zero published.
+
+**Revisit trigger:** Editorial review begins.
+
+## D021: Resolve dependency advisories at framework and lockfile boundaries
+
+**Decision:** Upgrade maintained Next/FastAPI toolchains and pin vulnerable
+transitives through lockfiles rather than suppressing audits.
+
+**Context:** Playwright, Sharp/libvips, PostCSS, pytest and Starlette advisories
+were present in inherited pins.
+
+**Alternatives considered:** Audit ignores; direct incompatible transitive
+pins; document accepted risk.
+
+**Reason:** Vulnerability-free dependency resolution is a release gate.
+
+**Consequences:** Next 16 required native flat ESLint configuration and exposed
+an existing React effect issue that was corrected.
+
+**Revisit trigger:** A new audit finding or framework compatibility issue.
