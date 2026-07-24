@@ -101,7 +101,9 @@ Internal identifiers are generated UUIDs and intentionally excluded from the pub
 - Retrieval: fixture bytes or explicit official query using a named user agent and timeout; never used during page rendering.
 - Idempotency: unique source/checksum release; identical rerun records a successful idempotent pipeline run and reuses claims/raw record.
 - Raw storage: checksum-addressed local file plus immutable `raw_source_records` row and validated payload JSON.
-- Checksums: SHA-256 over exact retrieved bytes and repeated on release, raw record, and each source claim.
+- Checksums: the release SHA-256 covers exact retrieved bytes. The raw-record
+  and claim SHA-256 cover the canonical validated feature payload, so record
+  identity remains distinct from collection-file identity.
 - Failure: validation failure records failed run/check inside the caller transaction and creates no release, claims, manifest, or profile. Publication also rejects a failed release check.
 - Unsupported fields: casualties and other human impacts. They are public unavailable states, never zero.
 - Official references: `https://earthquake.usgs.gov/fdsnws/event/1/` and `https://earthquake.usgs.gov/earthquakes/eventpage/official19640328033616_30`.
@@ -163,7 +165,7 @@ make verify
 
 All timestamps below are 2026-07-24 CDT.
 
-- `make check`, 18:19: passed. Ruff and strict mypy passed; pytest 76 passed;
+- `make check`, 18:40: passed. Ruff and strict mypy passed; pytest 78 passed;
   contracts checks passed; web lint/typecheck and 8 Vitest tests passed. The
   existing Starlette TestClient deprecation warning remains.
 - `make check`, 13:03: passed. Ruff clean; strict mypy 19 files; pytest 55 passed; contracts checks and 1 Vitest passed; web checks and 4 Vitest passed. Earlier attempts found and resolved stopped DB, immutable-release construction, canonical review status, and nullability defects.

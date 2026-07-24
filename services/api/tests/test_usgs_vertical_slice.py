@@ -16,13 +16,16 @@ from app.database import get_session
 from app.models import (
     Claim,
     ClaimAssertionStatus,
+    DayProfile,
     Event,
     EventLocation,
     EventTime,
     GeographyVersion,
     PipelineRun,
+    ProfileType,
     PublicationManifest,
     PublicationStatementEvidence,
+    PublicationStatus,
     QualityAssessment,
     QualityCheck,
     RawSourceRecord,
@@ -34,6 +37,7 @@ from app.models import (
 )
 from app.services import (
     LocalFilesystemPublishedProfileStore,
+    canonical_json_bytes,
     content_hash,
     create_source_release,
 )
@@ -98,12 +102,18 @@ def test_raw_checksum_is_stable_and_matches_committed_fixture(
 ) -> None:
     result = ingest(session, tmp_path)
     expected = hashlib.sha256(FIXTURE.read_bytes()).hexdigest()
+    source_record = USGSEarthquakeAdapter().validate(FIXTURE.read_bytes())
+    expected_record = hashlib.sha256(
+        canonical_json_bytes(source_record.model_dump(mode="json"))
+    ).hexdigest()
     release = session.get(SourceRelease, result.source_release_id)
     raw_record = session.scalar(select(RawSourceRecord))
 
     assert result.checksum == expected
     assert release is not None and release.raw_checksum_sha256 == expected
-    assert raw_record is not None and raw_record.raw_checksum_sha256 == expected
+    assert raw_record is not None
+    assert raw_record.raw_checksum_sha256 == expected_record
+    assert raw_record.raw_checksum_sha256 != expected
 
 
 def test_raw_source_record_is_immutable(session: Session, tmp_path: Path) -> None:
@@ -131,6 +141,15 @@ def test_idempotent_pipeline_rerun_does_not_duplicate_release_or_claims(
     assert session.scalar(select(func.count()).select_from(SourceRelease)) == 1
     assert session.scalar(select(func.count()).select_from(Claim)) == 9
     assert session.scalar(select(func.count()).select_from(PipelineRun)) == 2
+    rerun_check = session.scalar(
+        select(QualityCheck).where(
+            QualityCheck.pipeline_run_id == second.pipeline_run_id
+        )
+    )
+    assert rerun_check is not None
+    assert rerun_check.status == "passed"
+    assert rerun_check.subject_id == first.source_release_id
+    assert rerun_check.details["idempotent"] is True
 
 
 def test_idempotent_rerun_refuses_corrupt_raw_storage(
@@ -192,7 +211,36 @@ def test_claim_transformation_preserves_predicates_hash_units_and_bounds(
     }
     assert claims["magnitude"].unit == "mw"
     assert claims["magnitude"].lower_bound == claims["magnitude"].upper_bound
-    assert all(row.source_record_hash_sha256 == result.checksum for row in claims.values())
+    raw_record = session.scalar(select(RawSourceRecord))
+    assert raw_record is not None
+    assert all(
+        row.source_record_hash_sha256 == raw_record.raw_checksum_sha256
+        for row in claims.values()
+    )
+    assert raw_record.raw_checksum_sha256 != result.checksum
+
+
+def test_usgs_release_rejects_extra_source_records_before_persistence(
+    session: Session, tmp_path: Path
+) -> None:
+    fixture = tmp_path / "extra-record.geojson"
+    payload = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    extra = dict(payload["features"][0])
+    extra["id"] = "unselected-extra-record"
+    payload["features"].append(extra)
+    fixture.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="exactly one source record"):
+        ingest_usgs(
+            session,
+            adapter=USGSEarthquakeAdapter(),
+            raw_store=LocalFilesystemRawSourceStore(tmp_path / "raw"),
+            fixture_path=fixture,
+        )
+
+    assert session.scalar(select(func.count()).select_from(SourceRelease)) == 0
+    assert session.scalar(select(PipelineRun.status)) == "failed"
+    assert session.scalar(select(QualityCheck.status)) == "failed"
 
 
 def test_event_time_conversion_and_local_civil_date_assignment(
@@ -480,6 +528,41 @@ def test_republish_creates_version_two_without_mutating_version_one(
     assert first_manifest.version == 1
     assert first_manifest.content_hash == original_hash
     assert second_manifest.supersedes_manifest_id == first_manifest.id
+
+
+def test_committed_draft_manifest_does_not_become_publication_predecessor(
+    session: Session, tmp_path: Path
+) -> None:
+    draft = PublicationManifest(
+        profile_date=GOLDEN_DATE,
+        profile_type=ProfileType.STANDARD_STATISTICAL,
+        version=1,
+        editorial_revision=1,
+        status=PublicationStatus.DRAFT,
+        content_hash="a" * 64,
+        source_snapshot_hash="b" * 64,
+        storage_uri="pending://draft-profile",
+        code_version="test",
+    )
+    session.add(draft)
+    session.commit()
+
+    _, published = publish(session, tmp_path)
+    manifest = session.get(
+        PublicationManifest, published.publication_manifest_id
+    )
+    assert manifest is not None
+    profile = session.scalar(
+        select(DayProfile).where(
+            DayProfile.publication_manifest_id == manifest.id
+        )
+    )
+
+    assert manifest.version == 2
+    assert manifest.status == PublicationStatus.PUBLISHED
+    assert manifest.supersedes_manifest_id is None
+    assert profile is not None
+    assert profile.supersedes_day_profile_id is None
 
 
 def test_api_returns_verified_golden_profile(

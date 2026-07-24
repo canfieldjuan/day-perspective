@@ -5,7 +5,7 @@ import uuid
 from decimal import Decimal
 
 import pytest
-from sqlalchemy import select, update
+from sqlalchemy import select, text, update
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.orm import Session
 
@@ -115,6 +115,27 @@ def test_multi_record_claim_requires_its_source_record_hash(
             source_record_locator="record:one",
             claim_type="synthetic_assertion",
             assertion_text="A claim that needs its actual record hash.",
+        )
+
+    with pytest.raises(
+        DBAPIError,
+        match="multi-record releases require a source-record hash",
+    ):
+        session.execute(
+            text(
+                """
+                INSERT INTO claims (
+                  id, source_release_id, source_record_locator,
+                  assertion_status, claim_type, temporal_precision,
+                  temporal_assignment, data_status
+                ) VALUES (
+                  :id, :release_id, 'record:direct-writer',
+                  'candidate', 'synthetic_assertion', 'unknown',
+                  'unknown', 'reported'
+                )
+                """
+            ),
+            {"id": uuid.uuid4(), "release_id": release.id},
         )
 
 

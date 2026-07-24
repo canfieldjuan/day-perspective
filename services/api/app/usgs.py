@@ -23,6 +23,7 @@ from app.models import (
     ComparabilityStatus,
     DataStatus,
     DateRole,
+    DayProfile,
     Event,
     EventLocation,
     EventTime,
@@ -33,6 +34,7 @@ from app.models import (
     PipelineRun,
     ProfileType,
     PublicationManifest,
+    PublicationStatus,
     QualityAssessment,
     QualityCheck,
     RawSourceRecord,
@@ -225,6 +227,10 @@ class USGSEarthquakeAdapter:
 
     def validate(self, payload: bytes) -> USGSFeature:
         parsed = USGSFeatureCollection.model_validate_json(payload)
+        if len(parsed.features) != 1:
+            raise ValueError(
+                "The USGS release must contain exactly one source record."
+            )
         matches = [feature for feature in parsed.features if feature.id == USGS_EVENT_ID]
         if len(matches) != 1:
             raise ValueError("The USGS release must contain exactly one golden source record.")
@@ -411,6 +417,20 @@ def ingest_usgs(
                 run.status = "succeeded"
                 run.completed_at = datetime.now(UTC)
                 run.details = {**run.details, "idempotent": True}
+                session.add(
+                    QualityCheck(
+                        pipeline_run_id=run.id,
+                        check_name="usgs_schema_and_golden_record",
+                        status="passed",
+                        subject_type="source_release",
+                        subject_id=existing_release.id,
+                        details={
+                            "record_id": record.id,
+                            "claim_count": len(existing_claim_ids),
+                            "idempotent": True,
+                        },
+                    )
+                )
                 return IngestionResult(
                     run.id,
                     existing_release.id,
@@ -438,14 +458,18 @@ def ingest_usgs(
                 },
                 legal_review_status=LegalReviewStatus.NOT_REQUIRED,
             )
+            record_payload = record.model_dump(mode="json")
+            record_hash = hashlib.sha256(
+                canonical_json_bytes(record_payload)
+            ).hexdigest()
             raw_record = RawSourceRecord(
                 source_release_id=release.id,
                 source_record_id=adapter.source_record_identity(record),
                 source_record_locator=record.properties.url,
                 raw_storage_uri=storage_uri,
-                raw_checksum_sha256=checksum,
+                raw_checksum_sha256=record_hash,
                 schema_version="usgs-fdsn-geojson-v1",
-                payload_json=record.model_dump(mode="json"),
+                payload_json=record_payload,
             )
             session.add(raw_record)
             session.flush()
@@ -455,7 +479,7 @@ def ingest_usgs(
                     session,
                     source_release_id=release.id,
                     source_record_locator=record.properties.url,
-                    source_record_hash_sha256=checksum,
+                    source_record_hash_sha256=record_hash,
                     claim_type=draft.predicate,
                     assertion_text=draft.text,
                     assertion_json=draft.value,
@@ -1103,11 +1127,18 @@ def publish_golden_profile(
     )
     previous_manifest = session.scalar(
         select(PublicationManifest)
-        .where(PublicationManifest.profile_date == GOLDEN_DATE)
+        .join(
+            DayProfile,
+            DayProfile.publication_manifest_id == PublicationManifest.id,
+        )
+        .where(
+            PublicationManifest.profile_date == GOLDEN_DATE,
+            PublicationManifest.profile_type
+            == ProfileType.STANDARD_STATISTICAL,
+            PublicationManifest.status == PublicationStatus.PUBLISHED,
+        )
         .order_by(PublicationManifest.version.desc())
     )
-    from app.models import DayProfile
-
     previous_profile = (
         session.scalar(
             select(DayProfile).where(

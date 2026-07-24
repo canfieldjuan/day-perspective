@@ -190,6 +190,11 @@ describe("DayProfileClient", () => {
               derived_comparisons: [],
               wonder_and_progress: [],
               evidence_notes: []
+            },
+            source_attribution: {
+              name: "USGS Earthquake Catalog",
+              publisher: "U.S. Geological Survey",
+              url: "https://earthquake.usgs.gov/earthquakes/eventpage/example"
             }
           }
         }),
@@ -205,7 +210,13 @@ describe("DayProfileClient", () => {
     expect(
       screen.getByText("Why can the app say this?")
     ).toBeInTheDocument();
-    expect(screen.getByText(/USGS Earthquake Catalog/)).toBeInTheDocument();
+    expect(screen.getByText("Published by U.S. Geological Survey.")).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: "USGS Earthquake Catalog" })
+    ).toHaveAttribute(
+      "href",
+      "https://earthquake.usgs.gov/earthquakes/eventpage/example"
+    );
     expect(screen.getByText("None in this publication.")).toBeInTheDocument();
   });
 

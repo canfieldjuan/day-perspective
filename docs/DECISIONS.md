@@ -310,3 +310,25 @@ remains recoverable on retry but is not fully transactional.
 
 **Revisit trigger:** Production storage provides a durable prepare/finalize
 protocol or transactional outbox.
+
+## D017: Keep release-file and source-record hashes distinct
+
+**Decision:** Hash exact retrieved bytes for the immutable source release and
+hash the canonical validated feature payload for its raw record and claims.
+Reject multi-record hash inference during migration and direct database writes.
+
+**Context:** Reusing one collection checksum for multiple source records would
+make every claim appear to identify a record that was never independently
+hashed.
+
+**Alternatives considered:** Reuse the release checksum; store only the
+selected feature; allow callers to omit hashes for multi-record releases.
+
+**Reason:** The provenance chain must identify both the immutable acquired file
+and the exact record supporting each claim.
+
+**Consequences:** The USGS slice accepts exactly one feature per release.
+Future multi-record adapters must compute and supply each record hash.
+
+**Revisit trigger:** Raw-record storage adopts a standardized byte-preserving
+record serialization shared by every adapter.

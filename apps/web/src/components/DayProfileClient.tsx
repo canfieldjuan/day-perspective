@@ -143,6 +143,7 @@ export function DayProfileClient({ date }: { date: string }) {
         availability="published"
         sections={state.profile.sections}
         sectionStates={state.profile.section_states}
+        sourceAttribution={state.profile.source_attribution}
       />
     );
   }
