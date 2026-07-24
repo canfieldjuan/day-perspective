@@ -163,6 +163,9 @@ make verify
 
 All timestamps below are 2026-07-24 CDT.
 
+- `make check`, 18:19: passed. Ruff and strict mypy passed; pytest 76 passed;
+  contracts checks passed; web lint/typecheck and 8 Vitest tests passed. The
+  existing Starlette TestClient deprecation warning remains.
 - `make check`, 13:03: passed. Ruff clean; strict mypy 19 files; pytest 55 passed; contracts checks and 1 Vitest passed; web checks and 4 Vitest passed. Earlier attempts found and resolved stopped DB, immutable-release construction, canonical review status, and nullability defects.
 - `make db-reset && make db-up && make db-migrate`, 13:04: passed from empty volume through migration `0007`.
 - `make ingest-usgs-fixture`, 13:04: passed, non-idempotent first import, checksum `32beb46b...10c8b`.
@@ -180,7 +183,9 @@ All timestamps below are 2026-07-24 CDT.
 - `services/api/alembic/versions/20260724_0007_usgs_vertical_slice.py`: evidence schema/constraints.
 - `services/api/app/config.py`: raw storage root and development review token.
 - `services/api/app/models.py`: raw record and new evidence/time/quality/manifest fields.
-- `services/api/app/services.py`: atomic release creation, richer claim/resolution inputs, snapshots, versioned profile paths.
+- `services/api/app/services.py`: atomic release creation, richer
+  claim/resolution inputs, snapshots, versioned profile paths and
+  transaction-owned rollback cleanup.
 - `services/api/app/usgs.py`: adapter, raw store, ingestion, resolution, quality, projections, publication.
 - `services/api/app/usgs_cli.py`: explicit offline command entry point.
 - `services/api/app/main.py`: verified golden API and minimal guarded review endpoints.

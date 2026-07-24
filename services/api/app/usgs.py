@@ -238,6 +238,11 @@ class USGSEarthquakeAdapter:
 
     def record_to_claims(self, record: USGSFeature) -> tuple[ClaimDraft, ...]:
         longitude, latitude, depth = record.geometry.coordinates
+        if record.properties.time % 1000 != 0:
+            raise ValueError(
+                "USGS timestamps with subsecond precision are not supported by "
+                "the current claim and publication schema"
+            )
         occurrence = datetime.fromtimestamp(record.properties.time / 1000, tz=UTC)
         local = occurrence.astimezone(ZoneInfo(ALASKA_TIMEZONE))
         offset = local.utcoffset()
@@ -713,7 +718,7 @@ def accept_and_resolve_release(session: Session, source_release_id: UUID) -> dic
     if event is None:
         event = Event(
             resolved_claim_id=identity.id,
-            event_type="earthquake",
+            event_type=str(resolved["event_type"].resolved_value["type"]),
             canonical_title=str(resolved["event_title"].resolved_value["title"]),
             summary="Official USGS catalog occurrence selected for the golden date.",
             data_status=DataStatus.REPORTED,
@@ -722,6 +727,7 @@ def accept_and_resolve_release(session: Session, source_release_id: UUID) -> dic
         session.flush()
     else:
         event.resolved_claim_id = identity.id
+        event.event_type = str(resolved["event_type"].resolved_value["type"])
         event.canonical_title = str(resolved["event_title"].resolved_value["title"])
         event.data_status = DataStatus.REPORTED
 

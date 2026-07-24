@@ -17,10 +17,6 @@ def upgrade() -> None:
     op.execute("ALTER TYPE temporal_precision ADD VALUE IF NOT EXISTS 'second' BEFORE 'day'")
     op.execute(
         """
-        ALTER TABLE source_releases
-          ADD CONSTRAINT source_releases_source_checksum_key
-          UNIQUE (source_id, raw_checksum_sha256);
-
         CREATE TABLE raw_source_records (
           id UUID PRIMARY KEY,
           source_release_id UUID NOT NULL REFERENCES source_releases(id) ON DELETE RESTRICT,
@@ -142,6 +138,5 @@ def downgrade() -> None:
         DROP TRIGGER raw_source_records_immutable_update ON raw_source_records;
         DROP FUNCTION reject_raw_source_record_mutation();
         DROP TABLE raw_source_records;
-        ALTER TABLE source_releases DROP CONSTRAINT source_releases_source_checksum_key;
         """
     )

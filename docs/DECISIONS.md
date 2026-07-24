@@ -288,3 +288,25 @@ JSONB unsuitable; never weaken historical reconstructability.
 **Consequences:** Admin endpoints must never be exposed as production-ready.
 
 **Revisit trigger:** Any deployment or multi-user review workflow.
+
+## D016: Couple local publication artifacts to transaction rollback
+
+**Decision:** Stage each versioned profile, finalize it for pre-commit
+inspection, and register the created artifact with the SQLAlchemy transaction
+so rollback or commit failure removes it.
+
+**Context:** A database commit failure after a filesystem write could leave an
+unreferenced `profile-v1.json` that blocked a corrected retry.
+
+**Alternatives considered:** Finalize only after commit; overwrite the object;
+store publication bytes in PostgreSQL.
+
+**Reason:** Existing callers inspect the artifact before commit, but failed
+transactions must not reserve publication versions.
+
+**Consequences:** Rollback and commit-failure paths remove only their newly
+created object, and the retry reuses version 1. A process crash in the gap
+remains recoverable on retry but is not fully transactional.
+
+**Revisit trigger:** Production storage provides a durable prepare/finalize
+protocol or transactional outbox.

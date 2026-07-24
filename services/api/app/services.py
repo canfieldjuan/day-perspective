@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Protocol
 from uuid import UUID
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import event, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
@@ -58,6 +58,10 @@ def content_hash(payload: dict[str, Any]) -> str:
 class PublishedProfileStore(Protocol):
     def write(self, profile_date: date, profile_type: ProfileType, payload: dict[str, Any]) -> str: ...
 
+    def stage_versioned(
+        self, profile_date: date, version: int, payload: dict[str, Any]
+    ) -> StagedProfileWrite: ...
+
     def read(self, storage_uri: str, expected_hash: str) -> dict[str, Any]: ...
 
 
@@ -73,6 +77,54 @@ class SnapshottedStatementEvidence:
     evidence: PublicationStatementEvidenceInput
     snapshot: dict[str, Any]
     snapshot_hash: str
+
+
+@dataclass
+class StagedProfileWrite:
+    storage_uri: str
+    temporary_path: Path | None
+    destination: Path
+    expected_hash: str
+    store: LocalFilesystemPublishedProfileStore
+    created_destination: bool = False
+
+    def finalize(self) -> None:
+        if self.temporary_path is None:
+            return
+        try:
+            try:
+                os.link(self.temporary_path, self.destination)
+                self.created_destination = True
+            except FileExistsError:
+                self.store.read(self.storage_uri, self.expected_hash)
+        finally:
+            self.temporary_path.unlink(missing_ok=True)
+            self.temporary_path = None
+
+    def discard(self) -> None:
+        if self.temporary_path is not None:
+            self.temporary_path.unlink(missing_ok=True)
+            self.temporary_path = None
+        if self.created_destination:
+            self.destination.unlink(missing_ok=True)
+            self.created_destination = False
+
+
+_PENDING_PROFILE_WRITES = "pending_profile_writes"
+
+
+@event.listens_for(Session, "after_commit")
+def _finalize_profile_writes(session: Session) -> None:
+    pending = session.info.pop(_PENDING_PROFILE_WRITES, [])
+    for staged in pending:
+        staged.finalize()
+
+
+@event.listens_for(Session, "after_rollback")
+def _discard_profile_writes(session: Session) -> None:
+    pending = session.info.pop(_PENDING_PROFILE_WRITES, [])
+    for staged in pending:
+        staged.discard()
 
 
 class LocalFilesystemPublishedProfileStore:
@@ -110,6 +162,16 @@ class LocalFilesystemPublishedProfileStore:
         version: int,
         payload: dict[str, Any],
     ) -> str:
+        staged = self.stage_versioned(profile_date, version, payload)
+        staged.finalize()
+        return staged.storage_uri
+
+    def stage_versioned(
+        self,
+        profile_date: date,
+        version: int,
+        payload: dict[str, Any],
+    ) -> StagedProfileWrite:
         digest = content_hash(payload)
         relative = Path("day") / profile_date.isoformat() / f"profile-v{version}.json"
         destination = (self.root / relative).resolve()
@@ -117,19 +179,21 @@ class LocalFilesystemPublishedProfileStore:
             raise RuntimeError("Refused profile write outside the configured storage root.")
         destination.parent.mkdir(parents=True, exist_ok=True)
         if destination.exists():
-            self.read(relative.as_posix(), digest)
-            return relative.as_posix()
+            try:
+                self.read(relative.as_posix(), digest)
+                return StagedProfileWrite(
+                    relative.as_posix(), None, destination, digest, self
+                )
+            except RuntimeError:
+                destination.unlink()
         descriptor, temporary_path = tempfile.mkstemp(prefix=".profile-", dir=destination.parent)
-        try:
-            with os.fdopen(descriptor, "wb") as handle:
-                handle.write(canonical_json_bytes(payload))
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.link(temporary_path, destination)
-        finally:
-            if os.path.exists(temporary_path):
-                os.unlink(temporary_path)
-        return relative.as_posix()
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(canonical_json_bytes(payload))
+            handle.flush()
+            os.fsync(handle.fileno())
+        return StagedProfileWrite(
+            relative.as_posix(), Path(temporary_path), destination, digest, self
+        )
 
     def read(self, storage_uri: str, expected_hash: str) -> dict[str, Any]:
         candidate = (self.root / storage_uri).resolve()
@@ -992,10 +1056,10 @@ def publish_day_profile(
         ]
     )
     session.flush()
-    if isinstance(store, LocalFilesystemPublishedProfileStore):
-        manifest.storage_uri = store.write_versioned(profile_date, version, payload)
-    else:
-        manifest.storage_uri = store.write(profile_date, profile_type, payload)
+    staged = store.stage_versioned(profile_date, version, payload)
+    staged.finalize()
+    manifest.storage_uri = staged.storage_uri
+    session.info.setdefault(_PENDING_PROFILE_WRITES, []).append(staged)
     manifest.status = PublicationStatus.PUBLISHED
     manifest.published_at = datetime.now(UTC)
     session.flush()

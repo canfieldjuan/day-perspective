@@ -754,3 +754,45 @@ def test_development_review_guard_is_explicit_and_blocks_unguarded_access(
         main.app.dependency_overrides.clear()
     assert response.status_code == 403
     assert "not production authentication" in response.json()["detail"]
+
+
+def test_subsecond_usgs_timestamp_fails_before_release_creation(
+    session: Session, tmp_path: Path
+) -> None:
+    fixture = tmp_path / "subsecond.geojson"
+    payload = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    payload["features"][0]["properties"]["time"] += 1
+    fixture.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="subsecond precision"):
+        ingest_usgs(
+            session,
+            adapter=USGSEarthquakeAdapter(),
+            raw_store=LocalFilesystemRawSourceStore(tmp_path / "raw"),
+            fixture_path=fixture,
+        )
+
+    assert session.scalar(select(PipelineRun.status)) == "failed"
+    assert session.scalar(select(QualityCheck.status)) == "failed"
+    assert session.scalar(select(func.count()).select_from(SourceRelease)) == 0
+
+
+def test_canonical_event_type_comes_from_resolved_source_claim(
+    session: Session, tmp_path: Path
+) -> None:
+    fixture = tmp_path / "retyped.geojson"
+    payload = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    payload["features"][0]["properties"]["type"] = "seismic-event"
+    fixture.write_text(json.dumps(payload), encoding="utf-8")
+    result = ingest_usgs(
+        session,
+        adapter=USGSEarthquakeAdapter(),
+        raw_store=LocalFilesystemRawSourceStore(tmp_path / "raw"),
+        fixture_path=fixture,
+    )
+    assert result.source_release_id is not None
+    accept_and_resolve_release(session, result.source_release_id)
+
+    event = session.scalar(select(Event))
+    assert event is not None
+    assert event.event_type == "seismic-event"
