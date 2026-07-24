@@ -27,6 +27,12 @@ describe("ProfileSections provenance", () => {
                 value: { value: "117292.2" },
                 source_record_locator: "https://population.un.org/wpp/",
                 source_record_hash_sha256: "a".repeat(64)
+              },
+              {
+                predicate: "annual_births",
+                value: { value: "117292.2" },
+                source_record_locator: "https://population.un.org/wpp/#second",
+                source_record_hash_sha256: "c".repeat(64)
               }
             ],
             dissenting_claims: [],
@@ -55,10 +61,14 @@ describe("ProfileSections provenance", () => {
 
     render(<ProfileSections availability="published" sections={sections} />);
 
-    expect(
-      screen.getByRole("link", {
+    const links = screen.getAllByRole("link", {
         name: "the UN World Population Prospects source record"
-      })
-    ).toHaveAttribute("href", "https://population.un.org/wpp/");
+      });
+    expect(links).toHaveLength(2);
+    expect(links[0]).toHaveAttribute("href", "https://population.un.org/wpp/");
+    expect(links[1]).toHaveAttribute(
+      "href",
+      "https://population.un.org/wpp/#second"
+    );
   });
 });

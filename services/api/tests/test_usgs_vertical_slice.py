@@ -16,6 +16,7 @@ from app.database import get_session
 from app.governance import ClaimReviewDecision, reviewed_resolutions_for_release
 from app.models import (
     Claim,
+    ClaimAssertionStatus,
     Event,
     EventLocation,
     EventTime,
@@ -234,7 +235,7 @@ def test_geography_assignment_retains_version_and_point(
     assert location.display_label is not None and "Alaska" in location.display_label
 
 
-def test_supporting_and_dissenting_claims_are_classified_without_hiding_disagreement() -> None:
+def test_out_of_tolerance_dissent_remains_unresolved() -> None:
     decision = deterministic_resolution(
         (
             EvidenceCandidate(9.2, True, "usgs"),
@@ -244,7 +245,7 @@ def test_supporting_and_dissenting_claims_are_classified_without_hiding_disagree
         tolerance=0.05,
     )
 
-    assert decision.status == "accepted"
+    assert decision.status == "unresolved"
     assert decision.supporting_indexes == (0, 1)
     assert decision.dissenting_indexes == (2,)
 
@@ -270,6 +271,15 @@ def test_unbounded_disagreement_remains_unresolved() -> None:
     )
     assert decision.status == "unresolved"
     assert decision.dissenting_indexes == (1,)
+
+
+def test_quality_explanation_matches_a_lower_grade() -> None:
+    grade, explanation, _ = derive_quality(
+        independent_sources=1, complete_predicates=8
+    )
+
+    assert grade == "C"
+    assert explanation.startswith("Grade C:")
 
 
 def test_resolution_is_versioned_when_a_resolved_value_changes(
@@ -562,6 +572,15 @@ def test_admin_decision_records_ledger_and_resolution_requires_prior_acceptance(
         )
         assert blocked.status_code == 400
         assert "explicitly accepted" in blocked.json()["detail"]
+
+        blank = TestClient(main.app).post(
+            f"/api/v1/admin/claims/{claim.id}/decision",
+            headers=headers,
+            json={"decision": "accepted", "rationale": "   "},
+        )
+        assert blank.status_code == 422
+        session.refresh(claim)
+        assert claim.assertion_status == ClaimAssertionStatus.CANDIDATE
 
         response = TestClient(main.app).post(
             f"/api/v1/admin/claims/{claim.id}/decision",

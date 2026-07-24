@@ -862,31 +862,71 @@ def build_un_wpp_profile_content(session: Session) -> WPPProfileContent:
             )
         )
     }
+    required_claims = {
+        "population_midyear",
+        "annual_births",
+        "annual_deaths",
+        "life_expectancy",
+        "under_five_mortality",
+    }
+    if set(claims) != required_claims:
+        raise ValueError("UN WPP selected-year claims are incomplete.")
+    if any(
+        claim.assertion_status != ClaimAssertionStatus.ACCEPTED
+        for claim in claims.values()
+    ):
+        raise ValueError("The latest UN WPP release has not completed review.")
+    if session.scalar(
+        select(ReviewTask.id).where(
+            ReviewTask.claim_id.in_([claim.id for claim in claims.values()]),
+            ReviewTask.status.in_(("open", "in_progress")),
+        )
+    ) is not None:
+        raise ValueError("The latest UN WPP release has pending review tasks.")
     resolved = {
         predicate: session.scalar(
             select(ResolvedClaim)
+            .join(
+                ResolvedClaimEvidence,
+                ResolvedClaimEvidence.resolved_claim_id == ResolvedClaim.id,
+            )
             .where(
-                ResolvedClaim.canonical_key
-                == f"un-wpp:world:{GOLDEN_YEAR}:{predicate}"
+                ResolvedClaimEvidence.claim_id == claim.id,
+                ResolvedClaimEvidence.stance == "supporting",
             )
             .order_by(ResolvedClaim.version.desc())
         )
-        for predicate in claims
+        for predicate, claim in claims.items()
     }
     if any(row is None for row in resolved.values()):
         raise ValueError("UN WPP selected claims have not all been resolved.")
     resolved_rows = {
         predicate: row for predicate, row in resolved.items() if row is not None
     }
-    derived = {
-        row.value_kind: row
-        for row in session.scalars(
-            select(DerivedValue).where(
-                DerivedValue.methodology_id == methodology.id,
-                DerivedValue.period_start == date(GOLDEN_YEAR, 1, 1),
+    derived: dict[str, DerivedValue] = {}
+    for row in session.scalars(
+        select(DerivedValue)
+        .where(
+            DerivedValue.methodology_id == methodology.id,
+            DerivedValue.period_start == date(GOLDEN_YEAR, 1, 1),
+        )
+        .order_by(DerivedValue.created_at.desc())
+    ):
+        predicate = {
+            "average_daily_births": "annual_births",
+            "average_daily_deaths": "annual_deaths",
+        }.get(row.value_kind)
+        if predicate is None or row.value_kind in derived:
+            continue
+        input_ids = set(
+            session.scalars(
+                select(DerivedValueInput.resolved_claim_id).where(
+                    DerivedValueInput.derived_value_id == row.id
+                )
             )
         )
-    }
+        if input_ids == {resolved_rows[predicate].id}:
+            derived[row.value_kind] = row
     required_derived = {"average_daily_births", "average_daily_deaths"}
     if not required_derived <= set(derived):
         raise ValueError("UN WPP daily equivalents have not been reviewed.")
@@ -939,23 +979,38 @@ def build_un_wpp_profile_content(session: Session) -> WPPProfileContent:
                 derived_value_id=value.id,
             )
         )
+    population_thousands = Decimal(
+        str(resolved_rows["population_midyear"].resolved_value["value"])
+    )
+    life_expectancy = Decimal(
+        str(resolved_rows["life_expectancy"].resolved_value["value"])
+    )
+    under_five_mortality = Decimal(
+        str(resolved_rows["under_five_mortality"].resolved_value["value"])
+    )
     context_specs = (
         (
             "population_midyear",
             "world-population",
-            "UN WPP estimates the mid-1964 world population at about 3.264 billion.",
+            (
+                "UN WPP estimates the mid-1964 world population at about "
+                f"{population_thousands / Decimal('1000000'):.3f} billion."
+            ),
         ),
         (
             "life_expectancy",
             "world-life-expectancy",
-            "UN WPP estimates global life expectancy at birth in 1964 at 54.26 years.",
+            (
+                "UN WPP estimates global life expectancy at birth in 1964 at "
+                f"{life_expectancy:.2f} years."
+            ),
         ),
         (
             "under_five_mortality",
             "world-under-five-mortality",
             (
-                "UN WPP estimates 1964 global under-five mortality at about 162 "
-                "deaths per 1,000 live births."
+                "UN WPP estimates 1964 global under-five mortality at about "
+                f"{under_five_mortality:.0f} deaths per 1,000 live births."
             ),
         ),
     )

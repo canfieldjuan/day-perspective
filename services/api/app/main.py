@@ -7,7 +7,7 @@ from uuid import UUID
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, StringConstraints
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -37,6 +37,9 @@ from app.usgs import (
 )
 
 settings = get_settings()
+NonBlankRationale = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1)
+]
 app = FastAPI(title="Day Perspective API", version=settings.service_version)
 app.add_middleware(
     CORSMiddleware,
@@ -375,7 +378,7 @@ def admin_manifests(
 class CorrectionRequest(APIModel):
     original_manifest_id: UUID
     replacement_manifest_id: UUID
-    rationale: str
+    rationale: NonBlankRationale
 
 
 @app.post(
@@ -427,7 +430,7 @@ def admin_review_tasks(
 
 class ClaimDecisionRequest(APIModel):
     decision: Literal["accepted", "rejected"]
-    rationale: str
+    rationale: NonBlankRationale
 
 
 @app.post(

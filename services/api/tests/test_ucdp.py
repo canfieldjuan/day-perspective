@@ -264,6 +264,69 @@ def test_ucdp_ged_materializes_reviewed_fatality_values(
     )
 
 
+def test_rejected_ucdp_ged_claim_blocks_review_before_resolution(
+    session: Session, tmp_path: Path
+) -> None:
+    result = ingest_ucdp_ged(
+        session,
+        fixture_path=GED_FIXTURE,
+        raw_store=LocalFilesystemRawSourceStore(tmp_path / "raw"),
+    )
+    rejected = session.scalar(
+        select(Claim).where(
+            Claim.source_release_id == result.source_release_id,
+            Claim.claim_type == "fatalities",
+        )
+    )
+    assert rejected is not None
+    rejected.assertion_status = ClaimAssertionStatus.REJECTED
+    session.flush()
+
+    with pytest.raises(ValueError, match="Non-accepted UCDP GED claims"):
+        review_ucdp_ged(session, result.source_release_id)
+
+    assert session.scalar(select(func.count()).select_from(ResolvedClaim)) == 0
+
+
+def test_revised_ucdp_ged_release_versions_and_refreshes_canonical_event(
+    session: Session, tmp_path: Path
+) -> None:
+    store = LocalFilesystemRawSourceStore(tmp_path / "raw")
+    first = ingest_ucdp_ged(session, fixture_path=GED_FIXTURE, raw_store=store)
+    first_event = review_ucdp_ged(session, first.source_release_id)
+    session.commit()
+
+    revised = tmp_path / "revised-release-ged.csv"
+    text = GED_FIXTURE.read_text(encoding="utf-8")
+    text = text.replace("1989-01-26 00:00:00.000", "1989-01-27 00:00:00.000")
+    text = text.replace(",100,100,1100,100,0,0,0", ",250,200,400,100,0,0,0")
+    revised.write_text(text, encoding="utf-8")
+    second = ingest_ucdp_ged(session, fixture_path=revised, raw_store=store)
+    second_event = review_ucdp_ged(session, second.source_release_id)
+
+    latest = session.scalar(
+        select(ResolvedClaim)
+        .where(ResolvedClaim.canonical_key == "ucdp-ged:6833:fatalities")
+        .order_by(ResolvedClaim.version.desc())
+    )
+    assert latest is not None
+    assert latest.version == 2
+    assert session.scalar(select(func.count()).select_from(Event)) == 1
+    assert second_event.id == first_event.id
+    event_time = session.scalar(
+        select(EventTime).where(EventTime.event_id == first_event.id)
+    )
+    impact = session.scalar(
+        select(EventImpact).where(EventImpact.event_id == first_event.id)
+    )
+    assert event_time is not None
+    assert event_time.start_date.isoformat() == "1989-01-27"
+    assert event_time.provenance_resolved_claim_id != first_event.resolved_claim_id
+    assert impact is not None
+    assert impact.value_numeric == Decimal("250")
+    assert impact.provenance_resolved_claim_id == latest.id
+
+
 def test_ucdp_ged_rejects_best_estimate_outside_bounds_before_release(
     session: Session, tmp_path: Path
 ) -> None:

@@ -24,6 +24,7 @@ from app.models import (
 )
 from app.un_wpp import (
     LocalFilesystemRawSourceStore,
+    build_un_wpp_profile_content,
     ingest_un_wpp,
     review_un_wpp,
 )
@@ -167,6 +168,62 @@ def test_revised_wpp_release_versions_resolution_and_daily_equivalent(
     )
     assert revised_daily is not None
     assert revised_daily.value_numeric == Decimal("321470")
+
+
+def test_latest_unreviewed_wpp_release_blocks_profile_content(
+    session: Session, tmp_path: Path
+) -> None:
+    first = ingest(session, tmp_path)
+    review_un_wpp(session, first.source_release_id)
+    session.commit()
+
+    revised = tmp_path / "unreviewed-wpp.csv"
+    revised.write_text(
+        FIXTURE.read_text(encoding="utf-8").replace("117292.2", "117293.2"),
+        encoding="utf-8",
+    )
+    ingest_un_wpp(
+        session,
+        fixture_path=revised,
+        raw_store=LocalFilesystemRawSourceStore(tmp_path / "raw"),
+    )
+
+    with pytest.raises(ValueError, match="has not completed review"):
+        build_un_wpp_profile_content(session)
+
+
+def test_wpp_context_prose_is_derived_from_current_reviewed_values(
+    session: Session, tmp_path: Path
+) -> None:
+    revised = tmp_path / "revised-context-wpp.csv"
+    with FIXTURE.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        fieldnames = reader.fieldnames
+        rows = list(reader)
+    assert fieldnames is not None
+    selected = next(row for row in rows if row["year"] == "1964")
+    selected["population_july_thousands"] = "4000000.0"
+    selected["life_expectancy_years"] = "60.00"
+    selected["under_five_mortality_per_1000"] = "150.0"
+    with revised.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+    result = ingest_un_wpp(
+        session,
+        fixture_path=revised,
+        raw_store=LocalFilesystemRawSourceStore(tmp_path / "raw"),
+    )
+    review_un_wpp(session, result.source_release_id)
+
+    statements = {
+        str(row["statement_id"]): str(row["statement"])
+        for row in build_un_wpp_profile_content(session).context_statements
+    }
+
+    assert "4.000 billion" in statements["world-population"]
+    assert "60.00 years" in statements["world-life-expectancy"]
+    assert "150 deaths" in statements["world-under-five-mortality"]
 
 
 def test_wpp_ingestion_rejects_a_fixture_missing_a_required_year(

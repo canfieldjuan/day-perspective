@@ -570,7 +570,7 @@ def deterministic_resolution(
             agrees = abs(float(candidate.value) - float(baseline)) <= tolerance
         (supporting if agrees else dissenting).append(index)
     independent = len({candidates[index].lineage_root for index in supporting})
-    if dissenting and tolerance is None:
+    if dissenting:
         return ResolutionDecision(
             "unresolved",
             tuple(supporting),
@@ -608,11 +608,19 @@ def derive_quality(*, independent_sources: int, complete_predicates: int) -> tup
     }
     grade = "B" if independent_sources == 1 and complete_predicates >= 9 else "C"
     explanation = (
-        "Grade B: the occurrence, time, epicenter, magnitude, and depth come from one "
-        "validated official USGS catalog release with second-level and point-level detail. "
-        "The grade is limited because this is single-source acceptance with no independent "
-        "confirmation and "
-        "does not assert a casualty value."
+        (
+            "Grade B: the occurrence, time, epicenter, magnitude, and depth come "
+            "from one validated official USGS catalog release with second-level "
+            "and point-level detail. The grade is limited because this is "
+            "single-source acceptance with no independent confirmation and does "
+            "not assert a casualty value."
+        )
+        if grade == "B"
+        else (
+            "Grade C: the available official USGS evidence is incomplete for the "
+            "required event predicates. The assessment retains the available "
+            "precision and single-source limitation without overstating coverage."
+        )
     )
     return grade, explanation, dimensions
 
@@ -626,6 +634,17 @@ def accept_and_resolve_release(
     release = session.get(SourceRelease, source_release_id)
     if release is None:
         raise ValueError("Unknown source release.")
+    source = session.get(Source, release.source_id)
+    raw_record = session.scalar(
+        select(RawSourceRecord).where(
+            RawSourceRecord.source_release_id == source_release_id,
+            RawSourceRecord.source_record_id == USGS_EVENT_ID,
+        )
+    )
+    if source is None or source.slug != USGS_SOURCE_SLUG or raw_record is None:
+        raise ValueError(
+            "The golden resolver requires the official USGS release and event record."
+        )
     claims = list(
         session.scalars(
             select(Claim)
@@ -1054,13 +1073,27 @@ def publish_golden_profile(
         raise ValueError("USGS fixture has no source release.")
     resolved = reviewed_resolutions_for_release(session, release.id)
     methodology = _methodology(session)
-    quality_derived = session.scalar(
-        select(DerivedValue).where(
+    current_resolution_ids = {row.id for row in resolved.values()}
+    quality_derived = None
+    for candidate in session.scalars(
+        select(DerivedValue)
+        .where(
             DerivedValue.methodology_id == methodology.id,
             DerivedValue.value_kind == "public_event_evidence_quality",
             DerivedValue.period_start == GOLDEN_DATE,
         )
-    )
+        .order_by(DerivedValue.created_at.desc())
+    ):
+        input_ids = set(
+            session.scalars(
+                select(DerivedValueInput.resolved_claim_id).where(
+                    DerivedValueInput.derived_value_id == candidate.id
+                )
+            )
+        )
+        if input_ids == current_resolution_ids:
+            quality_derived = candidate
+            break
     if quality_derived is None:
         raise ValueError("A derived public quality explanation is required.")
     assert_release_publication_eligible(

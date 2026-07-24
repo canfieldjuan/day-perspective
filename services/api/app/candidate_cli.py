@@ -16,12 +16,16 @@ def main() -> None:
     args = parser.parse_args()
     settings = get_settings()
     with SessionLocal() as session:
-        result = ingest_wikidata_candidate(
-            session,
-            fixture_path=args.fixture,
-            raw_store=LocalFilesystemRawSourceStore(settings.raw_source_root),
-            dry_run=args.dry_run,
-        )
+        try:
+            result = ingest_wikidata_candidate(
+                session,
+                fixture_path=args.fixture,
+                raw_store=LocalFilesystemRawSourceStore(settings.raw_source_root),
+                dry_run=args.dry_run,
+            )
+        except Exception:
+            session.commit()
+            raise
         session.commit()
         print(
             f"source_release_id={result.source_release_id} "

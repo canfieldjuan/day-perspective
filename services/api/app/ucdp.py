@@ -761,6 +761,14 @@ def ingest_ucdp_ged(
             if len(rows) != 1 or rows[0]["id"] != "6833":
                 raise ValueError("The GED fixture must contain event 6833 only.")
             row = rows[0]
+            interval_start = datetime.fromisoformat(row["date_start"]).date()
+            interval_end = datetime.fromisoformat(row["date_end"]).date()
+            source_date_precision = int(row["date_prec"])
+            temporal_precision = (
+                TemporalPrecision.DAY
+                if source_date_precision == 1
+                else TemporalPrecision.UNKNOWN
+            )
             low = int(row["low"])
             best = int(row["best"])
             high = int(row["high"])
@@ -814,7 +822,11 @@ def ingest_ucdp_ged(
                 ("event_type", {"type_of_violence": int(row["type_of_violence"])}),
                 (
                     "occurrence_interval",
-                    {"start": row["date_start"], "end": row["date_end"], "precision": 1},
+                    {
+                        "start": row["date_start"],
+                        "end": row["date_end"],
+                        "precision": source_date_precision,
+                    },
                 ),
                 (
                     "epicenter_geography",
@@ -865,9 +877,9 @@ def ingest_ucdp_ged(
                     lower_bound=Decimal(row["low"]) if predicate == "fatalities" else None,
                     upper_bound=Decimal(row["high"]) if predicate == "fatalities" else None,
                 )
-                claim.temporal_start = GED_FIXTURE_DATE
-                claim.temporal_end = GED_FIXTURE_DATE
-                claim.temporal_precision = TemporalPrecision.DAY
+                claim.temporal_start = interval_start
+                claim.temporal_end = interval_end
+                claim.temporal_precision = temporal_precision
                 claim.temporal_assignment = TemporalAssignment.DIRECT_RECORD
                 claim.date_role = DateRole.OCCURRED
                 claim.data_status = (
@@ -938,6 +950,15 @@ def review_ucdp_ged(session: Session, source_release_id: UUID) -> Event:
         "name",
     }:
         raise ValueError("UCDP GED review requires the complete seven-claim record.")
+    reviewable_statuses = {
+        ClaimAssertionStatus.CANDIDATE,
+        ClaimAssertionStatus.IN_REVIEW,
+        ClaimAssertionStatus.ACCEPTED,
+    }
+    if any(claim.assertion_status not in reviewable_statuses for claim in claims):
+        raise ValueError(
+            "Non-accepted UCDP GED claims block review before resolution."
+        )
     methodology = _methodology(session)
     identity_claim = next(
         claim for claim in claims if claim.claim_type == "event_identity"
@@ -956,12 +977,26 @@ def review_ucdp_ged(session: Session, source_release_id: UUID) -> Event:
                 reviewed_by="development-fixture-review",
             )
         canonical_key = f"ucdp-ged:6833:{claim.claim_type}"
-        row = session.scalar(
+        prior = session.scalar(
             select(ResolvedClaim)
             .where(ResolvedClaim.canonical_key == canonical_key)
             .order_by(ResolvedClaim.version.desc())
         )
-        if row is None:
+        prior_supports_current = (
+            prior is not None
+            and session.scalar(
+                select(ResolvedClaimEvidence.claim_id).where(
+                    ResolvedClaimEvidence.resolved_claim_id == prior.id,
+                    ResolvedClaimEvidence.claim_id == claim.id,
+                    ResolvedClaimEvidence.stance == "supporting",
+                )
+            )
+            is not None
+        )
+        if prior_supports_current:
+            assert prior is not None
+            row = prior
+        else:
             row = resolve_claim(
                 session,
                 canonical_key=canonical_key,
@@ -973,6 +1008,7 @@ def review_ucdp_ged(session: Session, source_release_id: UUID) -> Event:
                 supporting_claim_ids=[claim.id],
                 resolution_method=ResolutionMethod.SINGLE_SOURCE,
                 methodology_id=methodology.id,
+                supersedes_resolved_claim_id=prior.id if prior is not None else None,
             )
             row.comparability_status = ComparabilityStatus.COMPARABLE
         resolved[claim.claim_type] = row
@@ -985,10 +1021,12 @@ def review_ucdp_ged(session: Session, source_release_id: UUID) -> Event:
         task.status = "resolved"
         task.completed_at = datetime.now(UTC)
     event = session.scalar(
-        select(Event).where(Event.resolved_claim_id == resolved["event_identity"].id)
+        select(Event)
+        .join(ResolvedClaim, Event.resolved_claim_id == ResolvedClaim.id)
+        .where(ResolvedClaim.canonical_key == "ucdp-ged:6833:event_identity")
     )
+    title = str(resolved["name"].resolved_value["title"])
     if event is None:
-        title = str(resolved["name"].resolved_value["title"])
         event = Event(
             resolved_claim_id=resolved["event_identity"].id,
             event_type="organized_violence",
@@ -1000,100 +1038,151 @@ def review_ucdp_ged(session: Session, source_release_id: UUID) -> Event:
         )
         session.add(event)
         session.flush()
-        session.add(
-            EventTime(
-                event_id=event.id,
-                provenance_resolved_claim_id=resolved["occurrence_interval"].id,
-                start_date=GED_FIXTURE_DATE,
-                end_date=GED_FIXTURE_DATE,
-                temporal_precision=TemporalPrecision.DAY,
-                temporal_assignment=TemporalAssignment.DIRECT_RECORD,
-                date_role=DateRole.OCCURRED,
-                is_primary=True,
-                display_label="UCDP source-record date: January 26, 1989",
-                interpretation=(
-                    "A day-precision source date; no exact timestamp or timezone "
-                    "conversion is asserted."
-                ),
-            )
+    event.resolved_claim_id = resolved["event_identity"].id
+    event.event_type = "organized_violence"
+    event.canonical_title = title
+    event.summary = "UCDP GED event-level record with bounded direct fatality estimate."
+    event.data_status = DataStatus.FINAL
+
+    occurrence = resolved["occurrence_interval"].resolved_value
+    interval_start = datetime.fromisoformat(str(occurrence["start"])).date()
+    interval_end = datetime.fromisoformat(str(occurrence["end"])).date()
+    temporal_precision = (
+        TemporalPrecision.DAY
+        if int(occurrence["precision"]) == 1
+        else TemporalPrecision.UNKNOWN
+    )
+    event_time = session.scalar(
+        select(EventTime).where(EventTime.event_id == event.id, EventTime.is_primary)
+    )
+    if event_time is None:
+        event_time = EventTime(
+            event_id=event.id,
+            provenance_resolved_claim_id=resolved["occurrence_interval"].id,
+            start_date=interval_start,
+            temporal_precision=temporal_precision,
+            temporal_assignment=TemporalAssignment.DIRECT_RECORD,
+            date_role=DateRole.OCCURRED,
+            is_primary=True,
         )
-        geography = session.scalar(
-            select(Geography).where(Geography.stable_key == "ucdp-country:625")
+        session.add(event_time)
+    event_time.provenance_resolved_claim_id = resolved["occurrence_interval"].id
+    event_time.start_date = interval_start
+    event_time.end_date = interval_end
+    event_time.temporal_precision = temporal_precision
+    event_time.display_label = (
+        f"UCDP source-record date: {interval_start.strftime('%B %-d, %Y')}"
+        if interval_start == interval_end
+        else (
+            "UCDP source-record interval: "
+            f"{interval_start.isoformat()} to {interval_end.isoformat()}"
         )
-        if geography is None:
-            geography = Geography(
-                stable_key="ucdp-country:625", geography_kind="historical_country"
-            )
-            session.add(geography)
-            session.flush()
-        geography_version = session.scalar(
-            select(GeographyVersion).where(
-                GeographyVersion.geography_id == geography.id,
-                GeographyVersion.valid_from == date(1985, 4, 6),
-            )
+    )
+    event_time.interpretation = (
+        "A source-reported date or interval; no exact timestamp or timezone "
+        "conversion is asserted."
+    )
+
+    geography_value = resolved["epicenter_geography"].resolved_value
+    geography = session.scalar(
+        select(Geography).where(
+            Geography.stable_key == f"ucdp-country:{geography_value['country_id']}"
         )
-        if geography_version is None:
-            geography_version = GeographyVersion(
-                geography_id=geography.id,
-                provenance_resolved_claim_id=resolved["epicenter_geography"].id,
-                name="Sudan (1985-2011 boundaries)",
-                identifier_code="UCDP-625",
-                valid_from=date(1985, 4, 6),
-                valid_to=date(2011, 7, 8),
-            )
-            session.add(geography_version)
-            session.flush()
-        coordinates = resolved["coordinates"].resolved_value
-        session.add(
-            EventLocation(
-                event_id=event.id,
-                geography_version_id=geography_version.id,
-                provenance_resolved_claim_id=resolved["coordinates"].id,
-                point_geometry=WKTElement(
-                    f"POINT({coordinates['longitude']} {coordinates['latitude']})",
-                    srid=4326,
-                ),
-                location_role="reported_event_location",
-                display_label="Nasir town, Sudan",
-            )
+    )
+    if geography is None:
+        geography = Geography(
+            stable_key=f"ucdp-country:{geography_value['country_id']}",
+            geography_kind="historical_country",
         )
-        fatality_metric = session.scalar(
-            select(Metric).where(Metric.metric_key == "ucdp:direct_event_deaths")
+        session.add(geography)
+        session.flush()
+    geography_version = session.scalar(
+        select(GeographyVersion).where(
+            GeographyVersion.geography_id == geography.id,
+            GeographyVersion.valid_from == date(1985, 4, 6),
         )
-        if fatality_metric is None:
-            fatality_metric = Metric(
-                metric_key="ucdp:direct_event_deaths",
-                display_name="Direct deaths in organized-violence event",
-                unit="persons",
-                definition=(
-                    "UCDP GED best estimate of direct deaths for an event, with "
-                    "low and high bounds preserved in the supporting claim."
-                ),
-                data_status=DataStatus.ESTIMATED,
-                provenance_resolved_claim_id=resolved["fatalities"].id,
-                methodology_id=methodology.id,
-            )
-            session.add(fatality_metric)
-            session.flush()
-        fatalities = resolved["fatalities"].resolved_value
-        fatality_best = int(fatalities["best"])
-        fatality_low = int(fatalities["low"])
-        fatality_high = int(fatalities["high"])
-        session.add(
-            EventImpact(
-                event_id=event.id,
-                metric_id=fatality_metric.id,
-                provenance_resolved_claim_id=resolved["fatalities"].id,
-                methodology_id=methodology.id,
-                impact_directness=ImpactDirectness.DIRECT,
-                narrative=(
-                    f"UCDP GED best estimate {fatality_best:,} direct deaths; "
-                    f"low {fatality_low:,}, high {fatality_high:,}."
-                ),
-                value_numeric=Decimal(fatality_best),
-                data_status=DataStatus.ESTIMATED,
-            )
+    )
+    if geography_version is None:
+        geography_version = GeographyVersion(
+            geography_id=geography.id,
+            provenance_resolved_claim_id=resolved["epicenter_geography"].id,
+            name=f"{geography_value['country']} (1985-2011 boundaries)",
+            identifier_code=f"UCDP-{geography_value['country_id']}",
+            valid_from=date(1985, 4, 6),
+            valid_to=date(2011, 7, 8),
         )
+        session.add(geography_version)
+        session.flush()
+    geography_version.provenance_resolved_claim_id = resolved["epicenter_geography"].id
+    geography_version.name = (
+        f"{geography_value['country']} (1985-2011 boundaries)"
+    )
+
+    coordinates = resolved["coordinates"].resolved_value
+    event_location = session.scalar(
+        select(EventLocation).where(EventLocation.event_id == event.id)
+    )
+    if event_location is None:
+        event_location = EventLocation(
+            event_id=event.id,
+            provenance_resolved_claim_id=resolved["coordinates"].id,
+            location_role="reported_event_location",
+        )
+        session.add(event_location)
+    event_location.geography_version_id = geography_version.id
+    event_location.provenance_resolved_claim_id = resolved["coordinates"].id
+    event_location.point_geometry = WKTElement(
+        f"POINT({coordinates['longitude']} {coordinates['latitude']})", srid=4326
+    )
+    event_location.display_label = (
+        f"{geography_value['place']}, {geography_value['country']}"
+    )
+
+    fatality_metric = session.scalar(
+        select(Metric).where(Metric.metric_key == "ucdp:direct_event_deaths")
+    )
+    if fatality_metric is None:
+        fatality_metric = Metric(
+            metric_key="ucdp:direct_event_deaths",
+            display_name="Direct deaths in organized-violence event",
+            unit="persons",
+            definition=(
+                "UCDP GED best estimate of direct deaths for an event, with "
+                "low and high bounds preserved in the supporting claim."
+            ),
+            data_status=DataStatus.ESTIMATED,
+            provenance_resolved_claim_id=resolved["fatalities"].id,
+            methodology_id=methodology.id,
+        )
+        session.add(fatality_metric)
+        session.flush()
+    fatality_metric.provenance_resolved_claim_id = resolved["fatalities"].id
+    fatalities = resolved["fatalities"].resolved_value
+    fatality_best = int(fatalities["best"])
+    fatality_low = int(fatalities["low"])
+    fatality_high = int(fatalities["high"])
+    impact = session.scalar(
+        select(EventImpact).where(
+            EventImpact.event_id == event.id,
+            EventImpact.metric_id == fatality_metric.id,
+        )
+    )
+    if impact is None:
+        impact = EventImpact(
+            event_id=event.id,
+            metric_id=fatality_metric.id,
+            provenance_resolved_claim_id=resolved["fatalities"].id,
+            methodology_id=methodology.id,
+            impact_directness=ImpactDirectness.DIRECT,
+            data_status=DataStatus.ESTIMATED,
+        )
+        session.add(impact)
+    impact.provenance_resolved_claim_id = resolved["fatalities"].id
+    impact.narrative = (
+        f"UCDP GED best estimate {fatality_best:,} direct deaths; "
+        f"low {fatality_low:,}, high {fatality_high:,}."
+    )
+    impact.value_numeric = Decimal(fatality_best)
     existing_quality = session.scalar(
         select(QualityAssessment).where(
             QualityAssessment.claim_id == identity_claim.id,

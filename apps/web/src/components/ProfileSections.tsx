@@ -73,8 +73,10 @@ export function ProfileSections({
                         ) : null}
                         <dt>Supporting claims</dt>
                         <dd>
-                          {statement.provenance.supporting_claims.map((claim) => (
-                            <span key={claim.predicate}>
+                          {statement.provenance.supporting_claims.map((claim, claimIndex) => (
+                            <span
+                              key={`${claim.predicate}:${claim.source_record_hash_sha256}:${claimIndex}`}
+                            >
                               {claim.predicate} from{" "}
                               <a href={claim.source_record_locator}>
                                 the {statement.provenance?.source_release.source} source record
