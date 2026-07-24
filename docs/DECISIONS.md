@@ -197,3 +197,34 @@ canonical-successor product rule before being enabled.
 
 **Revisit trigger:** Revisit only if editorial policy requires intentional
 parallel correction branches and a public selection rule is approved.
+
+## D011: Snapshot publication evidence instead of freezing the working graph
+
+**Decision:** Each publication-statement mapping captures canonical JSON for
+its complete resolved-claim or derived-value evidence root and stores its
+SHA-256 hash. The manifest source-snapshot hash is calculated from ordered
+statement paths and evidence hashes.
+
+**Context:** Source releases, manifests, profile artifacts, and statement
+mappings were immutable, but imported and resolved claims remained editable.
+A mapping could therefore keep the same identifier while its live evidence
+changed, making an earlier publication impossible to reconstruct exactly.
+
+**Alternatives considered:** Freeze every transitively referenced claim,
+resolution, evidence edge, observation, and methodology after publication;
+trust mutable rows plus identifiers; copy only the final resolved value; allow
+callers to provide an opaque source-snapshot hash.
+
+**Reason:** A canonical snapshot preserves what was published without making
+the working evidence graph unusable for review and correction. Capturing the
+complete root preserves dissent, missingness, source checksums, record locators,
+method versions, and derived inputs rather than only the final sentence.
+
+**Consequences:** Publication fails if any evidence root is incomplete. Snapshot
+JSON is intentionally redundant with normalized tables. Schema changes require
+explicit snapshot-schema versioning. Migration `20260723_0005` refuses silent
+backfill when publication evidence already exists.
+
+**Revisit trigger:** Introduce a separately versioned archival snapshot store
+only when measured profile volume or retention requirements make relational
+JSONB unsuitable; never weaken historical reconstructability.

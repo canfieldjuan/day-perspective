@@ -6,12 +6,12 @@ This handoff begins during the foundation phase. `docs/STATUS.md` is the source
 of truth for the current implementation and verification state. The repository
 root is `/home/juan-canfield/Desktop/day-perspective`.
 
-Current Alembic head: `20260723_0004` in
-`services/api/alembic/versions/20260723_0004_lifecycle_integrity.py`. The
-earlier exploratory file with that revision number was never applied; the live
-database advanced directly from `20260723_0003` to this final revision.
+Current branch: `agent/usgs-readiness`, based on foundation commit `3f42f9c`
+on `main`. Current Alembic head after readiness implementation:
+`20260723_0005` in
+`services/api/alembic/versions/20260723_0005_publication_evidence_snapshots.py`.
 
-The foundation is claim-first and offline-only. It intentionally contains no
+The readiness-hardened foundation is claim-first and offline-only. It intentionally contains no
 production historical dataset and must return an honest unpublished state when
 no immutable profile artifact exists.
 
@@ -65,9 +65,11 @@ cross-date/type manifest supersession and successor forks. They never overwrite
 published history.
 
 Each published JSON statement path also has one immutable
-`publication_statement_evidence` mapping to a resolved claim or derived value.
-The publication service rejects a profile whose mappings do not cover every
-statement path.
+`publication_statement_evidence` mapping to a resolved claim or derived value,
+plus canonical evidence-snapshot JSON and its SHA-256 hash. The manifest
+source-snapshot hash is calculated from the ordered statement mappings rather
+than accepted from a caller. The publication service rejects a profile whose
+mappings do not cover every statement path or whose evidence root is incomplete.
 
 ## Runtime behavior
 
@@ -100,7 +102,7 @@ make api-run
 corepack pnpm --filter @day-perspective/web dev
 ```
 
-Expected checks are:
+Required checks are:
 
 ```bash
 make check
@@ -108,8 +110,12 @@ make web-e2e
 make web-build
 ```
 
-Do not claim any command passed unless current results are recorded in
-`docs/STATUS.md`.
+Current clean-environment evidence is recorded in `docs/STATUS.md`. On
+2026-07-23, install, zero-state migration through `20260723_0005`, fixture seed,
+the combined quality gate, Playwright, the Next.js `15.5.21` build, and an
+isolated Uvicorn health request all passed. The first database attempt exposed
+a startup race; `make db-up` now waits for Docker health and the complete rerun
+passed.
 
 ## Decisions and deliberate deferrals
 
@@ -133,11 +139,10 @@ AI-generated facts; runtime third-party queries; production deployment; all
 - Typed target references for aliases, identifiers, quality, and review need
   continued referential-integrity scrutiny as entity types grow.
 - Profile bands are product contracts, not a coverage audit.
-- Before the first real published profile, senior engineering should decide
-  whether post-publication provenance roots are frozen transitively or captured
-  as immutable root snapshots; this foundation freezes releases, manifests,
-  statement mappings, and profile artifacts but intentionally does not yet
-  choose one of those broader lifecycle policies.
+- Publication evidence now uses immutable root snapshots under D011. Senior
+  engineering should review snapshot-schema evolution and storage volume after
+  exercising the first real USGS profile, but should not reopen historical
+  mutability as a shortcut.
 - Do not fill sparse pages with fixture data, AI-generated facts, or silent
   runtime source queries.
 

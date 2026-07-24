@@ -21,7 +21,7 @@ api-install:
 	$(API_PYTHON) -m pip install -e "$(PROJECT_ROOT)/services/api[dev]"
 
 db-up:
-	docker compose up -d db
+	docker compose up -d --wait db
 
 db-down:
 	docker compose down

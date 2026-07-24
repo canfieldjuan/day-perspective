@@ -46,7 +46,11 @@ The API uses a small storage interface: write a pre-publication artifact, read
 by immutable storage key, and verify a content hash. The manifest owns the
 storage key and SHA-256 hash. Every profile statement has an immutable
 `publication_statement_evidence` row that points to one resolved claim or
-derived value. The first implementation is local filesystem
+derived value and captures canonical JSON plus a SHA-256 hash of that root's
+complete evidence state. The manifest source-snapshot hash is calculated from
+the ordered statement paths and evidence hashes; callers cannot supply it.
+This permits working claims to evolve while retaining exactly what a published
+version asserted. The first implementation is local filesystem
 storage configured by environment variable. It is deliberately not a production
 durability, access-control, backup, or concurrent-writer design. Any later
 object-store implementation must preserve the key/hash/manifest contract.
@@ -58,7 +62,8 @@ All third-party acquisition occurs in an explicit offline pipeline:
 ```text
 acquire artifact -> checksum/register release -> retain raw locator
 -> normalize claims/observations -> quality checks and review tasks
--> resolve -> derive -> map every profile statement to evidence -> write profile JSON -> hash/publish manifest
+-> resolve -> derive -> snapshot and map every profile statement to evidence
+-> write profile JSON -> hash/publish manifest
 ```
 
 Pipelines record a run, code version, methodology, inputs, and quality results.

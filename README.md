@@ -4,6 +4,8 @@ Day Perspective is a provenance-first historical perspective web-app foundation.
 It is deliberately not an "on this day" trivia app: every eventual public
 statement must be traceable through a resolved or derived claim, immutable source
 release, raw record, methodology/code version, and publication manifest.
+Publication captures a canonical, hashed evidence snapshot for every statement,
+so later working-graph corrections cannot rewrite what an earlier version meant.
 
 See [docs/PRODUCT_CONTRACT.md](docs/PRODUCT_CONTRACT.md) for the product scope,
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the data/runtime boundary, and
@@ -56,6 +58,8 @@ make db-down
 
 `make db-down` stops the local database and preserves its volume. `make db-reset`
 is the explicit destructive command that removes all local PostgreSQL data.
+`make db-up` waits for the declared PostgreSQL health check before returning, so
+the next migration command does not race database initialization.
 
 The fixture command requires its explicit CLI confirmation plus the Makefile's
 test-fixture opt-in environment flag, and reads only

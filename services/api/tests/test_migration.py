@@ -17,6 +17,11 @@ def test_migration_from_empty_state_creates_every_required_foundational_table(mi
             "quality_checks", "review_tasks", "corrections",
         }
         assert required <= set(inspect(engine).get_table_names())
+        statement_evidence_columns = {
+            column["name"]
+            for column in inspect(engine).get_columns("publication_statement_evidence")
+        }
+        assert {"evidence_snapshot", "evidence_snapshot_hash"} <= statement_evidence_columns
         with engine.connect() as connection:
             assert connection.scalar(text("SELECT postgis_version()"))
     finally:

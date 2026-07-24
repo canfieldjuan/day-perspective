@@ -103,6 +103,128 @@ def test_publication_manifest_hash_is_canonical_and_input_sensitive() -> None:
 
 
 @pytest.mark.integration
+def test_publication_snapshots_resolved_evidence_and_derives_manifest_hash(
+    session: Session, tmp_path: Path
+) -> None:
+    release = source_release(session)
+    supporting = create_claim(
+        session,
+        source_release_id=release.id,
+        source_record_locator="record:snapshot-support",
+        claim_type="synthetic_assertion",
+        assertion_text="Original supporting assertion.",
+    )
+    dissenting = create_claim(
+        session,
+        source_release_id=release.id,
+        source_record_locator="record:snapshot-dissent",
+        claim_type="synthetic_assertion",
+        assertion_text="Original dissenting assertion.",
+    )
+    resolved = resolve_claim(
+        session,
+        canonical_key="test:snapshot-resolution",
+        resolved_value={"statement": "Original resolved value."},
+        rationale="Snapshot test resolution.",
+        supporting_claim_ids=[supporting.id],
+        dissenting_claim_ids=[dissenting.id],
+    )
+    profile = publish_day_profile(
+        session,
+        store=LocalFilesystemPublishedProfileStore(tmp_path),
+        profile_date=date(1969, 7, 20),
+        profile_type=ProfileType.STANDARD_STATISTICAL,
+        payload=payload("Snapshot test profile."),
+        statement_evidence=[
+            PublicationStatementEvidenceInput(
+                statement_path="/sections/evidence_notes/0",
+                resolved_claim_id=resolved.id,
+            )
+        ],
+    )
+    session.commit()
+    evidence = session.scalar(
+        select(PublicationStatementEvidence).where(
+            PublicationStatementEvidence.publication_manifest_id
+            == profile.publication_manifest_id
+        )
+    )
+    manifest = session.get(PublicationManifest, profile.publication_manifest_id)
+    assert evidence is not None and manifest is not None
+    original_snapshot = evidence.evidence_snapshot
+    original_snapshot_hash = evidence.evidence_snapshot_hash
+    assert original_snapshot_hash == content_hash(original_snapshot)
+    assert [item["stance"] for item in original_snapshot["evidence"]] == [
+        "supporting",
+        "dissenting",
+    ]
+    assert (
+        original_snapshot["evidence"][0]["claim"]["source_release"]["release"][
+            "raw_checksum_sha256"
+        ]
+        == release.raw_checksum_sha256
+    )
+    expected_source_hash = content_hash(
+        {
+            "schema_version": "1",
+            "statements": [
+                {
+                    "statement_path": "/sections/evidence_notes/0",
+                    "evidence_snapshot_hash": original_snapshot_hash,
+                }
+            ],
+        }
+    )
+    assert manifest.source_snapshot_hash == expected_source_hash
+
+    supporting.assertion_text = "Later working-graph edit."
+    resolved.resolved_value = {"statement": "Later resolved working value."}
+    session.commit()
+    session.refresh(evidence)
+    assert evidence.evidence_snapshot == original_snapshot
+    assert evidence.evidence_snapshot_hash == original_snapshot_hash
+
+
+@pytest.mark.integration
+def test_publication_snapshots_derived_value_lineage(session: Session, tmp_path: Path) -> None:
+    provenance = statement_evidence(session)
+    resolved_claim_id = provenance[0].resolved_claim_id
+    assert resolved_claim_id is not None
+    derived_value = untraceable_derived_value(session)
+    session.add(
+        DerivedValueInput(
+            derived_value_id=derived_value.id,
+            resolved_claim_id=resolved_claim_id,
+            input_role="primary",
+        )
+    )
+    profile = publish_day_profile(
+        session,
+        store=LocalFilesystemPublishedProfileStore(tmp_path),
+        profile_date=date(1969, 7, 20),
+        profile_type=ProfileType.STANDARD_STATISTICAL,
+        payload=payload("Derived snapshot profile."),
+        statement_evidence=[
+            PublicationStatementEvidenceInput(
+                statement_path="/sections/evidence_notes/0",
+                derived_value_id=derived_value.id,
+            )
+        ],
+    )
+    session.commit()
+    evidence = session.scalar(
+        select(PublicationStatementEvidence).where(
+            PublicationStatementEvidence.publication_manifest_id
+            == profile.publication_manifest_id
+        )
+    )
+    assert evidence is not None
+    assert evidence.evidence_snapshot["root_type"] == "derived_value"
+    assert evidence.evidence_snapshot["inputs"][0]["root"]["root_type"] == "resolved_claim"
+    assert evidence.evidence_snapshot_hash == content_hash(evidence.evidence_snapshot)
+
+
+@pytest.mark.integration
 def test_published_profile_is_immutable(session: Session, tmp_path: Path) -> None:
     profile = publish_day_profile(
         session,
@@ -110,7 +232,6 @@ def test_published_profile_is_immutable(session: Session, tmp_path: Path) -> Non
         profile_date=date(1969, 7, 20),
         profile_type=ProfileType.STANDARD_STATISTICAL,
         payload=payload("Immutable test profile."),
-        source_snapshot_hash="a" * 64,
         statement_evidence=statement_evidence(session),
     )
     session.commit()
@@ -138,7 +259,6 @@ def test_published_statement_evidence_cannot_move_to_a_draft_manifest(
         profile_date=date(1969, 7, 20),
         profile_type=ProfileType.STANDARD_STATISTICAL,
         payload=payload("Evidence immutability test profile."),
-        source_snapshot_hash="a" * 64,
         statement_evidence=statement_evidence(session),
     )
     session.commit()
@@ -208,7 +328,6 @@ def test_correction_creates_a_new_version_without_overwriting_original(session: 
         profile_date=date(1969, 7, 20),
         profile_type=ProfileType.STANDARD_STATISTICAL,
         payload=payload("Original test profile."),
-        source_snapshot_hash="a" * 64,
         statement_evidence=provenance,
     )
     session.commit()
@@ -221,7 +340,6 @@ def test_correction_creates_a_new_version_without_overwriting_original(session: 
         profile_date=date(1969, 7, 20),
         profile_type=ProfileType.STANDARD_STATISTICAL,
         payload=payload("Corrected test profile."),
-        source_snapshot_hash="a" * 64,
         statement_evidence=provenance,
         supersedes_manifest_id=original_manifest.id,
         supersedes_day_profile_id=original.id,
@@ -251,7 +369,6 @@ def test_publishing_requires_a_provenance_mapping_for_each_statement(
             profile_date=date(1969, 7, 20),
             profile_type=ProfileType.STANDARD_STATISTICAL,
             payload=payload("Unmapped test profile."),
-            source_snapshot_hash="a" * 64,
             statement_evidence=[],
         )
 
@@ -266,7 +383,6 @@ def test_publishing_rejects_an_untraceable_derived_statement(session: Session, t
             profile_date=date(1969, 7, 20),
             profile_type=ProfileType.STANDARD_STATISTICAL,
             payload=payload("Untraceable derived statement."),
-            source_snapshot_hash="a" * 64,
             statement_evidence=[
                 PublicationStatementEvidenceInput(
                     statement_path="/sections/evidence_notes/0",
@@ -356,7 +472,6 @@ def test_manifest_supersession_rejects_a_different_profile_date(session: Session
         profile_date=date(1969, 7, 20),
         profile_type=ProfileType.STANDARD_STATISTICAL,
         payload=payload("Original manifest identity test."),
-        source_snapshot_hash="a" * 64,
         statement_evidence=statement_evidence(session),
     )
     session.commit()
@@ -389,7 +504,6 @@ def test_publishing_rejects_a_second_successor_for_the_same_manifest(
         profile_date=date(1969, 7, 20),
         profile_type=ProfileType.STANDARD_STATISTICAL,
         payload=payload("Original linear-history profile."),
-        source_snapshot_hash="a" * 64,
         statement_evidence=provenance,
     )
     session.commit()
@@ -399,7 +513,6 @@ def test_publishing_rejects_a_second_successor_for_the_same_manifest(
         profile_date=date(1969, 7, 20),
         profile_type=ProfileType.STANDARD_STATISTICAL,
         payload=payload("First successor profile."),
-        source_snapshot_hash="a" * 64,
         statement_evidence=provenance,
         supersedes_manifest_id=original.publication_manifest_id,
         supersedes_day_profile_id=original.id,
@@ -412,7 +525,6 @@ def test_publishing_rejects_a_second_successor_for_the_same_manifest(
             profile_date=date(1969, 7, 20),
             profile_type=ProfileType.STANDARD_STATISTICAL,
             payload=payload("Invalid second successor profile."),
-            source_snapshot_hash="a" * 64,
             statement_evidence=provenance,
             supersedes_manifest_id=original.publication_manifest_id,
             supersedes_day_profile_id=original.id,
@@ -429,7 +541,6 @@ def test_publishing_rejects_cross_date_profile_supersession(session: Session, tm
         profile_date=date(1969, 7, 20),
         profile_type=ProfileType.STANDARD_STATISTICAL,
         payload=payload("Original test profile."),
-        source_snapshot_hash="a" * 64,
         statement_evidence=provenance,
     )
     session.commit()
@@ -442,7 +553,6 @@ def test_publishing_rejects_cross_date_profile_supersession(session: Session, tm
             profile_date=date(1970, 7, 20),
             profile_type=ProfileType.STANDARD_STATISTICAL,
             payload=replacement_payload,
-            source_snapshot_hash="a" * 64,
             statement_evidence=provenance,
             supersedes_manifest_id=original.publication_manifest_id,
             supersedes_day_profile_id=original.id,
