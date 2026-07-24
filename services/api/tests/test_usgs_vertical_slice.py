@@ -128,6 +128,35 @@ def test_idempotent_pipeline_rerun_does_not_duplicate_release_or_claims(
     assert session.scalar(select(func.count()).select_from(PipelineRun)) == 2
 
 
+def test_idempotent_rerun_refuses_corrupt_raw_storage(
+    session: Session, tmp_path: Path
+) -> None:
+    store = LocalFilesystemRawSourceStore(tmp_path / "raw")
+    first = ingest_usgs(
+        session,
+        adapter=USGSEarthquakeAdapter(),
+        raw_store=store,
+        fixture_path=FIXTURE,
+    )
+    release = session.get(SourceRelease, first.source_release_id)
+    assert release is not None
+    (tmp_path / "raw" / release.raw_storage_uri).write_bytes(b"corrupt")
+
+    with pytest.raises(RuntimeError, match="did not match"):
+        ingest_usgs(
+            session,
+            adapter=USGSEarthquakeAdapter(),
+            raw_store=store,
+            fixture_path=FIXTURE,
+        )
+
+    runs = list(
+        session.scalars(select(PipelineRun).order_by(PipelineRun.started_at))
+    )
+    assert [run.status for run in runs] == ["succeeded", "failed"]
+    assert session.scalar(select(func.count()).select_from(SourceRelease)) == 1
+
+
 def test_duplicate_source_record_handling_reuses_the_release(
     session: Session, tmp_path: Path
 ) -> None:
@@ -348,7 +377,7 @@ def test_revised_release_refreshes_event_projections_and_public_prose(
     payload = LocalFilesystemPublishedProfileStore(tmp_path / "published").read(
         manifest.storage_uri, manifest.content_hash
     )
-    magnitude_statement = payload["sections"]["recorded_on_this_date"][4]
+    magnitude_statement = payload["sections"]["recorded_on_this_date"][7]
     assert magnitude_statement["statement"] == "USGS reports a magnitude of 9.1 Mw."
 
 
@@ -430,7 +459,7 @@ def test_api_returns_verified_golden_profile(
     body = response.json()
     assert body["status"] == "published"
     assert body["profile"]["quality"]["grade"] == "B"
-    assert body["profile"]["sections"]["recorded_on_this_date"][4]["details"]["value"] == 9.2
+    assert body["profile"]["sections"]["recorded_on_this_date"][7]["details"]["value"] == 9.2
 
 
 def test_api_distinguishes_invalid_outside_and_unpublished_dates(
@@ -548,14 +577,89 @@ def test_utc_and_local_date_statements_have_separate_provenance_roots(
     )
     statements = payload["sections"]["recorded_on_this_date"]
 
-    assert statements[1]["statement_id"] == "event-time-utc"
-    assert statements[1]["provenance"]["supporting_claims"][0]["predicate"] == (
+    assert statements[3]["statement_id"] == "event-time-utc"
+    assert statements[3]["provenance"]["supporting_claims"][0]["predicate"] == (
         "occurrence_timestamp"
     )
-    assert statements[2]["statement_id"] == "event-local-civil-date"
-    assert statements[2]["provenance"]["supporting_claims"][0]["predicate"] == (
+    assert statements[4]["statement_id"] == "event-local-civil-date"
+    assert statements[4]["provenance"]["supporting_claims"][0]["predicate"] == (
         "local_civil_date"
     )
+
+
+def test_identity_title_type_and_location_statements_have_atomic_provenance(
+    session: Session, tmp_path: Path
+) -> None:
+    _, profile = publish(session, tmp_path)
+    manifest = session.get(PublicationManifest, profile.publication_manifest_id)
+    assert manifest is not None
+    payload = LocalFilesystemPublishedProfileStore(tmp_path / "published").read(
+        manifest.storage_uri, manifest.content_hash
+    )
+    statements = {
+        statement["statement_id"]: statement
+        for statement in payload["sections"]["recorded_on_this_date"]
+    }
+
+    expected_predicates = {
+        "event-identity": "event_identity",
+        "event-title": "event_title",
+        "event-type": "event_type",
+        "event-geography": "epicenter_geography",
+        "event-coordinates": "epicenter_coordinates",
+    }
+    for statement_id, predicate in expected_predicates.items():
+        assert statements[statement_id]["provenance"]["supporting_claims"][0][
+            "predicate"
+        ] == predicate
+
+
+def test_acceptance_resolves_in_progress_review_tasks(
+    session: Session, tmp_path: Path
+) -> None:
+    result = ingest(session, tmp_path)
+    task = session.scalar(select(ReviewTask))
+    assert task is not None
+    task.status = "in_progress"
+    session.flush()
+
+    assert result.source_release_id is not None
+    accept_and_resolve_release(session, result.source_release_id)
+
+    assert task.status == "resolved"
+    assert task.completed_at is not None
+
+
+@pytest.mark.parametrize(
+    "terminal_status",
+    [ClaimAssertionStatus.RETRACTED, ClaimAssertionStatus.SUPERSEDED],
+)
+def test_admin_decision_cannot_revive_terminal_claims(
+    session: Session,
+    tmp_path: Path,
+    terminal_status: ClaimAssertionStatus,
+) -> None:
+    result = ingest(session, tmp_path)
+    claim = session.scalar(
+        select(Claim).where(Claim.source_release_id == result.source_release_id)
+    )
+    assert claim is not None
+    claim.assertion_status = terminal_status
+    session.flush()
+    main.app.dependency_overrides[get_session] = override_session(session)
+    try:
+        response = TestClient(main.app).post(
+            f"/api/v1/admin/claims/{claim.id}/decision",
+            headers={
+                "X-Development-Review-Token": main.settings.development_review_token
+            },
+            json={"decision": "accepted"},
+        )
+    finally:
+        main.app.dependency_overrides.clear()
+
+    assert response.status_code == 409
+    assert claim.assertion_status == terminal_status
 
 
 def test_quality_assessment_is_published_with_grade_and_explanation(

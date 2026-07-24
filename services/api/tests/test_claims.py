@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import uuid
+from decimal import Decimal
 
 import pytest
 from sqlalchemy import select, update
@@ -100,16 +101,26 @@ def test_claim_supersession_creates_a_new_versioned_assertion(session: Session) 
         source_record_locator="record:2",
         claim_type="synthetic_assertion",
         assertion_text="Earlier test assertion.",
+        unit="old-unit",
+        lower_bound=Decimal("9.2"),
+        upper_bound=Decimal("9.2"),
     )
     replacement = supersede_claim(
         session,
         prior_claim=prior,
         assertion_text="Corrected test assertion.",
+        assertion_json={"value": 9.1},
+        unit="new-unit",
+        lower_bound=Decimal("9.1"),
+        upper_bound=Decimal("9.1"),
     )
     session.commit()
     assert prior.assertion_status == ClaimAssertionStatus.SUPERSEDED
     assert replacement.supersedes_claim_id == prior.id
     assert replacement.assertion_status == ClaimAssertionStatus.CANDIDATE
+    assert replacement.unit == "new-unit"
+    assert replacement.lower_bound == Decimal("9.1")
+    assert replacement.upper_bound == Decimal("9.1")
 
 
 @pytest.mark.integration

@@ -25,13 +25,19 @@ def main() -> None:
     settings = get_settings()
     with SessionLocal() as session:
         if args.command == "ingest":
-            result = ingest_usgs(
-                session,
-                adapter=USGSEarthquakeAdapter(),
-                raw_store=LocalFilesystemRawSourceStore(settings.raw_source_root),
-                fixture_path=args.fixture,
-                dry_run=args.dry_run,
-            )
+            try:
+                result = ingest_usgs(
+                    session,
+                    adapter=USGSEarthquakeAdapter(),
+                    raw_store=LocalFilesystemRawSourceStore(
+                        settings.raw_source_root
+                    ),
+                    fixture_path=args.fixture,
+                    dry_run=args.dry_run,
+                )
+            except Exception:
+                session.commit()
+                raise
             session.commit()
             print(
                 f"checksum={result.checksum} idempotent={result.idempotent} "

@@ -118,6 +118,24 @@ def test_publication_manifest_hash_is_canonical_and_input_sensitive() -> None:
 
 
 @pytest.mark.integration
+def test_publisher_evidence_metadata_keys_cannot_be_overridden(
+    session: Session, tmp_path: Path
+) -> None:
+    with pytest.raises(ValueError, match="publisher-reserved"):
+        publish_day_profile(
+            session,
+            store=LocalFilesystemPublishedProfileStore(tmp_path),
+            profile_date=date(1969, 7, 20),
+            profile_type=ProfileType.STANDARD_STATISTICAL,
+            payload=payload("Reserved metadata test."),
+            statement_evidence=statement_evidence(session),
+            manifest_metadata={"statement_evidence_hashes": []},
+        )
+
+    assert session.scalar(select(PublicationManifest)) is None
+
+
+@pytest.mark.integration
 def test_publication_snapshots_resolved_evidence_and_derives_manifest_hash(
     session: Session, tmp_path: Path
 ) -> None:

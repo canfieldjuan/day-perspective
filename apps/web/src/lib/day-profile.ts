@@ -43,6 +43,15 @@ function isClaimEvidence(value: unknown): boolean {
   );
 }
 
+function isDissentingClaimEvidence(value: unknown): boolean {
+  const claim = asRecord(value);
+  return (
+    claim !== undefined &&
+    (claim.predicate === undefined || typeof claim.predicate === "string") &&
+    (claim.value === undefined || claim.value === null || asRecord(claim.value) !== undefined)
+  );
+}
+
 function isProvenance(value: unknown): boolean {
   const provenance = asRecord(value);
   if (provenance === undefined || typeof provenance.published_statement !== "string") {
@@ -60,10 +69,10 @@ function isProvenance(value: unknown): boolean {
     Array.isArray(provenance.supporting_claims) &&
     provenance.supporting_claims.every(isClaimEvidence) &&
     Array.isArray(provenance.dissenting_claims) &&
-    provenance.dissenting_claims.every(isClaimEvidence) &&
+    provenance.dissenting_claims.every(isDissentingClaimEvidence) &&
     sourceRelease !== undefined &&
     typeof sourceRelease.source === "string" &&
-    typeof sourceRelease.publisher === "string" &&
+    (sourceRelease.publisher === null || typeof sourceRelease.publisher === "string") &&
     typeof sourceRelease.release === "string" &&
     typeof sourceRelease.source_url === "string" &&
     typeof sourceRelease.raw_checksum_sha256 === "string" &&

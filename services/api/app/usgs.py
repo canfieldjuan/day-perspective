@@ -392,6 +392,10 @@ def ingest_usgs(
                 )
             )
             if existing_release is not None:
+                raw_store.read(
+                    existing_release.raw_storage_uri,
+                    existing_release.raw_checksum_sha256,
+                )
                 existing_claim_ids = tuple(
                     session.scalars(
                         select(Claim.id)
@@ -669,7 +673,7 @@ def accept_and_resolve_release(session: Session, source_release_id: UUID) -> dic
         session.scalars(
             select(ReviewTask).where(
                 ReviewTask.claim_id.in_([claim.id for claim in claims]),
-                ReviewTask.status == "open",
+                ReviewTask.status.in_(("open", "in_progress")),
             )
         )
     )
@@ -911,8 +915,21 @@ def publish_golden_profile(
         (
             "event-identity",
             "event_identity",
-            f"{event_title} is recorded by the official USGS catalog.",
-            {"event_type": "earthquake", "title": event_title},
+            f"USGS catalog record {claims['event_identity'].assertion_text} "
+            "identifies this event.",
+            claims["event_identity"].assertion_json or {},
+        ),
+        (
+            "event-title",
+            "event_title",
+            f"USGS names the event {event_title}.",
+            claims["event_title"].assertion_json or {},
+        ),
+        (
+            "event-type",
+            "event_type",
+            f"USGS classifies the record as {claims['event_type'].assertion_text}.",
+            claims["event_type"].assertion_json or {},
         ),
         (
             "event-time-utc",
@@ -941,13 +958,19 @@ def publish_golden_profile(
             },
         ),
         (
-            "event-location",
-            "epicenter_coordinates",
+            "event-geography",
+            "epicenter_geography",
             f"USGS locates the epicenter at {geography_display}.",
-            {
-                **(claims["epicenter_coordinates"].assertion_json or {}),
-                "display_name": geography_display,
-            },
+            claims["epicenter_geography"].assertion_json or {},
+        ),
+        (
+            "event-coordinates",
+            "epicenter_coordinates",
+            (
+                "USGS records the epicenter coordinates as "
+                f"{claims['epicenter_coordinates'].assertion_text}."
+            ),
+            claims["epicenter_coordinates"].assertion_json or {},
         ),
         (
             "event-magnitude",

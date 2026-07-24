@@ -220,6 +220,9 @@ def supersede_claim(
     prior_claim: Claim,
     assertion_text: str | None,
     assertion_json: dict[str, Any] | None = None,
+    unit: str | None = None,
+    lower_bound: Decimal | None = None,
+    upper_bound: Decimal | None = None,
 ) -> Claim:
     prior_claim.assertion_status = ClaimAssertionStatus.SUPERSEDED
     replacement = Claim(
@@ -231,9 +234,9 @@ def supersede_claim(
         assertion_status=ClaimAssertionStatus.CANDIDATE,
         supersedes_claim_id=prior_claim.id,
         source_record_hash_sha256=prior_claim.source_record_hash_sha256,
-        unit=prior_claim.unit,
-        lower_bound=prior_claim.lower_bound,
-        upper_bound=prior_claim.upper_bound,
+        unit=unit,
+        lower_bound=lower_bound,
+        upper_bound=upper_bound,
     )
     session.add(replacement)
     session.flush()
@@ -898,6 +901,18 @@ def publish_day_profile(
 ) -> DayProfile:
     if profile_type_for_date(profile_date) != profile_type:
         raise ValueError("The profile type does not match the public date band.")
+    reserved_metadata_keys = {
+        "evidence_snapshot_schema_version",
+        "statement_evidence_hashes",
+    }
+    conflicting_metadata_keys = reserved_metadata_keys.intersection(
+        manifest_metadata or {}
+    )
+    if conflicting_metadata_keys:
+        raise ValueError(
+            "Manifest metadata contains publisher-reserved keys: "
+            + ", ".join(sorted(conflicting_metadata_keys))
+        )
     evidence = _validate_statement_evidence(
         session,
         payload,
@@ -936,6 +951,7 @@ def publish_day_profile(
         methodology_id=methodology_id,
         supersedes_manifest_id=supersedes_manifest_id,
         metadata_json={
+            **(manifest_metadata or {}),
             "evidence_snapshot_schema_version": "1",
             "statement_evidence_hashes": [
                 {
@@ -944,7 +960,6 @@ def publish_day_profile(
                 }
                 for item in snapshotted_evidence
             ],
-            **(manifest_metadata or {}),
         },
     )
     session.add(manifest)

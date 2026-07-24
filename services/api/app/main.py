@@ -332,6 +332,14 @@ def admin_claim_decision(
         claim = None
     if claim is None:
         raise HTTPException(status_code=404, detail="Claim not found.")
+    if claim.assertion_status not in {
+        ClaimAssertionStatus.CANDIDATE,
+        ClaimAssertionStatus.IN_REVIEW,
+    }:
+        raise HTTPException(
+            status_code=409,
+            detail="Only candidate or in-review claims can receive a decision.",
+        )
     claim.assertion_status = (
         ClaimAssertionStatus.ACCEPTED
         if request.decision == "accepted"
