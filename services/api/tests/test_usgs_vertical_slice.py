@@ -673,6 +673,22 @@ def test_subsecond_usgs_timestamp_fails_before_release_creation(
     assert session.scalar(select(func.count()).select_from(SourceRelease)) == 0
 
 
+def test_acceptance_resolves_in_progress_review_tasks(
+    session: Session, tmp_path: Path
+) -> None:
+    result = ingest(session, tmp_path)
+    task = session.scalar(select(ReviewTask))
+    assert task is not None
+    task.status = "in_progress"
+    session.flush()
+
+    assert result.source_release_id is not None
+    accept_and_resolve_release(session, result.source_release_id)
+
+    assert task.status == "resolved"
+    assert task.completed_at is not None
+
+
 def test_canonical_event_type_comes_from_resolved_source_claim(
     session: Session, tmp_path: Path
 ) -> None:
