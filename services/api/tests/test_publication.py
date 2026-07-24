@@ -5,22 +5,37 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from geoalchemy2.elements import WKTElement
 from sqlalchemy import select, update
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models import (
+    Claim,
     ComparabilityStatus,
     DataStatus,
+    DateRole,
     DayProfile,
     DerivedValue,
     DerivedValueInput,
+    Geography,
+    GeographyVersion,
+    LegalReviewStatus,
     Methodology,
+    Metric,
+    Observation,
+    PipelineRun,
     ProfileType,
     PublicationManifest,
     PublicationStatementEvidence,
     PublicationStatus,
+    QualityAssessment,
+    Source,
+    SourceLineage,
+    SourceLineageRelationship,
+    SourceRelease,
     TemporalAssignment,
+    TemporalPrecision,
 )
 from app.services import (
     LocalFilesystemPublishedProfileStore,
@@ -222,6 +237,253 @@ def test_publication_snapshots_derived_value_lineage(session: Session, tmp_path:
     assert evidence.evidence_snapshot["root_type"] == "derived_value"
     assert evidence.evidence_snapshot["inputs"][0]["root"]["root_type"] == "resolved_claim"
     assert evidence.evidence_snapshot_hash == content_hash(evidence.evidence_snapshot)
+
+
+@pytest.mark.integration
+def test_publication_snapshot_closes_over_mutable_transitive_dependencies(
+    session: Session, tmp_path: Path
+) -> None:
+    pipeline = PipelineRun(
+        pipeline_name="test-transitive-pipeline",
+        code_version="test-code-v1",
+        configuration_hash="1" * 64,
+        status="succeeded",
+        started_at=datetime(2026, 1, 1, tzinfo=UTC),
+        completed_at=datetime(2026, 1, 1, 0, 1, tzinfo=UTC),
+        details={"fixture_mode": True},
+    )
+    methodology = Methodology(
+        slug="test-transitive-methodology",
+        version="1",
+        name="Test transitive methodology",
+        description="Defines the test-only transitive publication value.",
+        method_kind="calculation",
+        formula="input",
+        code_version="test-code-v1",
+        definition_hash="2" * 64,
+    )
+    parent_source = Source(
+        slug="test-parent-source",
+        name="Test parent source",
+        publisher="Test suite",
+        canonical_url="https://example.invalid/parent",
+        legal_review_status=LegalReviewStatus.NOT_REQUIRED,
+    )
+    child_source = Source(
+        slug="test-child-source",
+        name="Test child source",
+        publisher="Test suite",
+        canonical_url="https://example.invalid/child",
+        legal_review_status=LegalReviewStatus.NOT_REQUIRED,
+    )
+    session.add_all([pipeline, methodology, parent_source, child_source])
+    session.flush()
+    parent_release = SourceRelease(
+        source_id=parent_source.id,
+        release_label="parent-v1",
+        source_url="https://example.invalid/parent/v1",
+        raw_storage_uri="test://raw/parent-v1",
+        raw_checksum_sha256="3" * 64,
+        raw_record_count=1,
+        pipeline_run_id=pipeline.id,
+        legal_review_status=LegalReviewStatus.NOT_REQUIRED,
+    )
+    child_release = SourceRelease(
+        source_id=child_source.id,
+        release_label="child-v1",
+        source_url="https://example.invalid/child/v1",
+        raw_storage_uri="test://raw/child-v1",
+        raw_checksum_sha256="4" * 64,
+        raw_record_count=1,
+        pipeline_run_id=pipeline.id,
+        legal_review_status=LegalReviewStatus.NOT_REQUIRED,
+    )
+    session.add_all([parent_release, child_release])
+    session.flush()
+    session.add(
+        SourceLineage(
+            child_release_id=child_release.id,
+            parent_release_id=parent_release.id,
+            relationship=SourceLineageRelationship.DERIVED,
+            methodology_id=methodology.id,
+            note="Test-only derived lineage.",
+        )
+    )
+    claim = Claim(
+        source_release_id=child_release.id,
+        source_record_locator="record:transitive",
+        claim_type="synthetic_assertion",
+        assertion_text="Test-only transitive assertion.",
+        pipeline_run_id=pipeline.id,
+    )
+    session.add(claim)
+    session.flush()
+    resolved = resolve_claim(
+        session,
+        canonical_key="test:transitive-resolution",
+        resolved_value={"statement": "Test transitive resolution."},
+        rationale="Test-only transitive dependency resolution.",
+        supporting_claim_ids=[claim.id],
+    )
+    geography = Geography(
+        stable_key="test-transitive-geography",
+        geography_kind="synthetic",
+    )
+    session.add(geography)
+    session.flush()
+    geography_version = GeographyVersion(
+        geography_id=geography.id,
+        provenance_resolved_claim_id=resolved.id,
+        name="Test historical geography",
+        identifier_code="TEST-1969",
+        valid_from=date(1960, 1, 1),
+        valid_to=date(1970, 12, 31),
+        boundary_geometry=WKTElement(
+            "MULTIPOLYGON(((-150 60,-149 60,-149 61,-150 61,-150 60)))",
+            srid=4326,
+        ),
+    )
+    metric = Metric(
+        metric_key="test-transitive-metric",
+        display_name="Test transitive metric",
+        unit="test-unit",
+        definition="The complete meaning of the test-only value.",
+        provenance_resolved_claim_id=resolved.id,
+        methodology_id=methodology.id,
+    )
+    session.add_all([geography_version, metric])
+    session.flush()
+    observation = Observation(
+        metric_id=metric.id,
+        geography_version_id=geography_version.id,
+        source_release_id=child_release.id,
+        provenance_resolved_claim_id=resolved.id,
+        period_start=date(1969, 7, 20),
+        temporal_precision=TemporalPrecision.DAY,
+        temporal_assignment=TemporalAssignment.DIRECT_RECORD,
+        date_role=DateRole.OCCURRED,
+        value_numeric=Decimal("7"),
+        data_status=DataStatus.FINAL,
+    )
+    session.add(observation)
+    session.flush()
+    derived = DerivedValue(
+        metric_id=metric.id,
+        geography_version_id=geography_version.id,
+        methodology_id=methodology.id,
+        value_kind="test-derived-value",
+        period_start=date(1969, 7, 20),
+        temporal_assignment=TemporalAssignment.UNIFORM_PERIOD_ALLOCATION,
+        value_numeric=Decimal("7"),
+        data_status=DataStatus.FINAL,
+        comparability_status=ComparabilityStatus.COMPARABLE,
+        input_fingerprint="5" * 64,
+        calculation_version="test-code-v1",
+    )
+    session.add(derived)
+    session.flush()
+    session.add(
+        DerivedValueInput(
+            derived_value_id=derived.id,
+            observation_id=observation.id,
+            input_role="primary",
+        )
+    )
+    session.add_all(
+        [
+            QualityAssessment(
+                source_release_id=child_release.id,
+                methodology_id=methodology.id,
+                assessment_kind="release_quality",
+                score=Decimal("0.80"),
+                findings={"note": "release assessment"},
+            ),
+            QualityAssessment(
+                claim_id=claim.id,
+                methodology_id=methodology.id,
+                assessment_kind="claim_quality",
+                score=Decimal("0.81"),
+                findings={"note": "claim assessment"},
+            ),
+            QualityAssessment(
+                observation_id=observation.id,
+                methodology_id=methodology.id,
+                assessment_kind="observation_quality",
+                score=Decimal("0.82"),
+                findings={"note": "observation assessment"},
+            ),
+            QualityAssessment(
+                derived_value_id=derived.id,
+                methodology_id=methodology.id,
+                assessment_kind="derived_quality",
+                score=Decimal("0.83"),
+                findings={"note": "derived assessment"},
+            ),
+            QualityAssessment(
+                target_methodology_id=methodology.id,
+                assessment_kind="methodology_quality",
+                score=Decimal("0.84"),
+                findings={"note": "methodology assessment"},
+            ),
+        ]
+    )
+    session.flush()
+    profile = publish_day_profile(
+        session,
+        store=LocalFilesystemPublishedProfileStore(tmp_path),
+        profile_date=date(1969, 7, 20),
+        profile_type=ProfileType.STANDARD_STATISTICAL,
+        payload=payload("Transitive dependency snapshot profile."),
+        statement_evidence=[
+            PublicationStatementEvidenceInput(
+                statement_path="/sections/evidence_notes/0",
+                derived_value_id=derived.id,
+            )
+        ],
+    )
+    session.commit()
+    evidence = session.scalar(
+        select(PublicationStatementEvidence).where(
+            PublicationStatementEvidence.publication_manifest_id
+            == profile.publication_manifest_id
+        )
+    )
+    assert evidence is not None
+    snapshot = evidence.evidence_snapshot
+    derived_snapshot = snapshot["derived_value"]
+    assert derived_snapshot["metric"]["metric_key"] == "test-transitive-metric"
+    assert derived_snapshot["metric"]["unit"] == "test-unit"
+    geography_snapshot = derived_snapshot["geography_version"]
+    assert geography_snapshot["name"] == "Test historical geography"
+    assert geography_snapshot["boundary_geojson"]["type"] == "MultiPolygon"
+    observation_snapshot = snapshot["inputs"][0]["root"]["observation"]
+    release_snapshot = observation_snapshot["source_release"]["release"]
+    assert release_snapshot["pipeline_run"]["configuration_hash"] == "1" * 64
+    assert release_snapshot["lineage"][0]["parent_release"]["release"][
+        "raw_checksum_sha256"
+    ] == "3" * 64
+    assert {
+        item["assessment_kind"]
+        for item in derived_snapshot["quality_assessments"]
+    } == {"derived_quality"}
+    assert {
+        item["assessment_kind"]
+        for item in observation_snapshot["quality_assessments"]
+    } == {"observation_quality"}
+    claim_snapshot = derived_snapshot["metric"]["provenance_resolved_claim"]["evidence"][0][
+        "claim"
+    ]
+    assert {
+        item["assessment_kind"] for item in claim_snapshot["quality_assessments"]
+    } == {"claim_quality"}
+    assert {
+        item["assessment_kind"] for item in release_snapshot["quality_assessments"]
+    } == {"release_quality"}
+    assert {
+        item["assessment_kind"]
+        for item in derived_snapshot["methodology"]["quality_assessments"]
+    } == {"methodology_quality"}
+    assert evidence.evidence_snapshot_hash == content_hash(snapshot)
 
 
 @pytest.mark.integration

@@ -39,7 +39,7 @@ cascade-deleted.
 | `source_lineage` | Child and parent release FKs, relationship enum, optional methodology, note. | Self-lineage is forbidden; the edge is unique. It records republished and derived source material. |
 | `pipeline_runs` | Pipeline name, code/configuration hash, running/terminal status, timestamps, details. | Status is `running`/`succeeded`/`failed`/`cancelled`; configuration hash is required; terminal time cannot precede start. |
 | `quality_checks` | Required pipeline-run FK, check/status, subject type/ID, detail, time. | Status is `passed`/`failed`/`warning`/`skipped`. |
-| `quality_assessments` | One or more target FKs among release/claim/observation/derived value, optional methodology, legal status, kind, score, findings. | At least one target is required; score is 0 through 1. |
+| `quality_assessments` | One or more target FKs among release/claim/observation/derived value/`target_methodology_id`, optional assessment `methodology_id`, legal status, kind, score, findings. | At least one target is required; score is 0 through 1. Target methodology is distinct from the methodology used to perform the assessment. |
 | `review_tasks` | Exactly one claim or resolved-claim target, status, priority, rationale, assignee, timestamps. | Status is `open`/`in_progress`/`resolved`/`dismissed`; priority is `low`/`normal`/`high`/`blocking`; target exclusivity and completion-time ordering are checked. |
 | `methodologies` | Versioned slug/name/description, method kind, formula, code version, definition hash, legal status. | `(slug, version)` is unique; downstream calculations and manifests retain their method FK. |
 

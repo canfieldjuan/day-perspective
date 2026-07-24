@@ -14,7 +14,8 @@ publish the Alaska earthquake.
 - The local repository is a Git repository on `agent/usgs-readiness`; `main`
   tracks `origin/main` at foundation commit `3f42f9c`.
 - Alembic migrations form one forward chain from `20260723_0001` through
-  `20260723_0004` (`services/api/alembic/versions/20260723_0004_lifecycle_integrity.py:10`).
+  `20260724_0006`
+  (`services/api/alembic/versions/20260724_0006_methodology_quality_targets.py:10`).
 - The schema contains every foundation table plus the three provenance joins.
   `publication_statement_evidence` maps one statement path to exactly one
   resolved claim or derived value
@@ -239,6 +240,11 @@ below and in `docs/HANDOFF.md`.
 - Reinstalled from empty dependency directories, recreated PostGIS from zero,
   applied all migrations, seeded test-only metadata, ran every automated gate,
   and completed an isolated API health request.
+- Closed the PR review's five transitive evidence gaps: metric definitions,
+  historical geography versions, applicable quality assessments, source
+  lineage parents, and pipeline-run configuration. Added migration
+  `20260724_0006` so methodologies can be quality-assessment targets without
+  overloading the assessment-methodology relationship.
 
 ## In-progress work
 
@@ -288,3 +294,12 @@ below and in `docs/HANDOFF.md`.
   through `23:32:05`; Alembic reported `20260723_0005 (head)` and
   `GET /health` returned `{"status":"ok"}`.
 - Known unresolved verification failures: none.
+- Review-fix gate at `2026-07-24T00:05:47-05:00`: stopped on Ruff import
+  ordering before backend tests. Ruff's deterministic fix resolved it.
+- Review-fix gate at `2026-07-24T00:06:01-05:00`: lint and types passed, then
+  the new integration fixture correctly violated pipeline timestamp ordering
+  because its generated start followed its explicit completion. Explicit,
+  ordered fixture timestamps resolved it; production code was not implicated.
+- Final review-fix `make check`: passed from `2026-07-24T00:06:33-05:00`
+  through `00:06:52`. Ruff and strict mypy passed; pytest passed 33 tests;
+  contracts and web lint, type checks, and Vitest suites passed.

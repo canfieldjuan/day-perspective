@@ -696,6 +696,9 @@ class QualityAssessment(Base):
     methodology_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("methodologies.id", ondelete="RESTRICT")
     )
+    target_methodology_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("methodologies.id", ondelete="RESTRICT")
+    )
     legal_review_status: Mapped[LegalReviewStatus] = mapped_column(
         enum_type(LegalReviewStatus, "legal_review_status"), default=LegalReviewStatus.NOT_REQUIRED
     )

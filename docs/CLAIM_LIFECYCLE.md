@@ -95,7 +95,9 @@ manifest, immutable statement-evidence rows with canonical evidence snapshots,
 and a profile version. Every JSON statement path must map to exactly one
 resolved claim or derived value before the manifest can be published. Snapshot
 construction must find every referenced claim, release, methodology, and
-derived input or publication fails. `publication_status` is `draft`, `published`,
+derived input, including transitive metric definitions, geography versions,
+quality assessments, pipeline runs, and source lineage, or publication fails.
+`publication_status` is `draft`, `published`,
 `superseded`, or `withdrawn`; it is distinct from data status. A day profile
 references a publication manifest, and a published manifest is immutable.
 

@@ -50,7 +50,11 @@ derived value and captures canonical JSON plus a SHA-256 hash of that root's
 complete evidence state. The manifest source-snapshot hash is calculated from
 the ordered statement paths and evidence hashes; callers cannot supply it.
 This permits working claims to evolve while retaining exactly what a published
-version asserted. The first implementation is local filesystem
+version asserted. Evidence closure includes metric definitions, historical
+geography versions and geometry, applicable quality assessments, pipeline
+execution details, and recursive source-lineage parents. Missing or cyclic
+dependencies fail publication instead of producing a partial snapshot. The
+first implementation is local filesystem
 storage configured by environment variable. It is deliberately not a production
 durability, access-control, backup, or concurrent-writer design. Any later
 object-store implementation must preserve the key/hash/manifest contract.

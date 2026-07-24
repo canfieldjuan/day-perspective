@@ -8,8 +8,8 @@ root is `/home/juan-canfield/Desktop/day-perspective`.
 
 Current branch: `agent/usgs-readiness`, based on foundation commit `3f42f9c`
 on `main`. Current Alembic head after readiness implementation:
-`20260723_0005` in
-`services/api/alembic/versions/20260723_0005_publication_evidence_snapshots.py`.
+`20260724_0006` in
+`services/api/alembic/versions/20260724_0006_methodology_quality_targets.py`.
 
 The readiness-hardened foundation is claim-first and offline-only. It intentionally contains no
 production historical dataset and must return an honest unpublished state when
@@ -115,7 +115,9 @@ Current clean-environment evidence is recorded in `docs/STATUS.md`. On
 the combined quality gate, Playwright, the Next.js `15.5.21` build, and an
 isolated Uvicorn health request all passed. The first database attempt exposed
 a startup race; `make db-up` now waits for Docker health and the complete rerun
-passed.
+passed. On 2026-07-24, PR review hardening added migration `20260724_0006` and
+closed the snapshot over metrics, geography versions, quality assessments,
+pipeline runs, and source lineage; the full gate passed with 33 Python tests.
 
 ## Decisions and deliberate deferrals
 

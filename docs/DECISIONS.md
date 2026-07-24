@@ -218,12 +218,16 @@ callers to provide an opaque source-snapshot hash.
 **Reason:** A canonical snapshot preserves what was published without making
 the working evidence graph unusable for review and correction. Capturing the
 complete root preserves dissent, missingness, source checksums, record locators,
-method versions, and derived inputs rather than only the final sentence.
+method versions, derived inputs, metric definitions, historical geography,
+quality assessments, pipeline configuration, and recursive source lineage
+rather than only the final sentence.
 
 **Consequences:** Publication fails if any evidence root is incomplete. Snapshot
 JSON is intentionally redundant with normalized tables. Schema changes require
 explicit snapshot-schema versioning. Migration `20260723_0005` refuses silent
-backfill when publication evidence already exists.
+backfill when publication evidence already exists. Methodology quality targets
+use a dedicated `target_methodology_id`; the existing `methodology_id` continues
+to identify the method used to perform an assessment.
 
 **Revisit trigger:** Introduce a separately versioned archival snapshot store
 only when measured profile volume or retention requirements make relational
