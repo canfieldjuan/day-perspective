@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 
 from app.adapters.base import LocalFilesystemRawSourceStore, RawSourceStore
 from app.governance import (
+    EditorialSelection,
     EditorialSelectionStatus,
     LicenseInput,
     ReviewDecisionValue,
@@ -43,6 +44,9 @@ from app.models import (
     MetricCoverage,
     Observation,
     PipelineRun,
+    PublicationManifest,
+    PublicationStatus,
+    PublicationTier,
     QualityAssessment,
     QualityCheck,
     RawSourceRecord,
@@ -1463,6 +1467,21 @@ def ensure_annual_context_selections(
     for item in evidence:
         section = _section_of(item.statement_path)
         ranks[section] = ranks.get(section, 0) + 1
+        # A standing rule must never reverse a human decision. If any prior
+        # decision exists for this date and root — selected, rejected, or
+        # deferred — it stands, and publication fails closed if it is not a
+        # selection.
+        conditions = [
+            EditorialSelection.profile_date == profile_date,
+            EditorialSelection.section_key == section,
+        ]
+        conditions.append(
+            EditorialSelection.resolved_claim_id == item.resolved_claim_id
+            if item.resolved_claim_id is not None
+            else EditorialSelection.derived_value_id == item.derived_value_id
+        )
+        if session.scalar(select(EditorialSelection.id).where(*conditions)) is not None:
+            continue
         record_editorial_selection(
             session,
             profile_date=profile_date,
@@ -1475,6 +1494,27 @@ def ensure_annual_context_selections(
             reviewed_by=STANDING_ANNUAL_CONTEXT_RULE,
         )
     return len(list(evidence))
+
+
+def richer_published_profile(
+    session: Session, *, profile_date: date
+) -> DayProfile | None:
+    """The published profile for this date, if it already offers more than
+    annual context. Publishing context over it would hide evidence."""
+    latest = session.scalar(
+        select(PublicationManifest)
+        .where(
+            PublicationManifest.profile_date == profile_date,
+            PublicationManifest.status == PublicationStatus.PUBLISHED,
+        )
+        .order_by(PublicationManifest.version.desc())
+        .limit(1)
+    )
+    if latest is None or latest.publication_tier.rank <= PublicationTier.CONTEXT_ONLY.rank:
+        return None
+    return session.scalar(
+        select(DayProfile).where(DayProfile.publication_manifest_id == latest.id)
+    )
 
 
 def publish_context_profile(
@@ -1493,6 +1533,11 @@ def publish_context_profile(
     profile_type = profile_type_for_date(profile_date)
     if profile_type is None:
         raise ValueError("Context profiles require a date inside the public shell.")
+    existing_profile = richer_published_profile(session, profile_date=profile_date)
+    if existing_profile is not None:
+        # Publishing annual context over an enriched date would bury its
+        # recorded events behind a higher, sparser version.
+        return existing_profile
     content = build_un_wpp_profile_content(
         session, profile_date=profile_date, require_editorial_selection=False
     )

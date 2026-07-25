@@ -217,3 +217,161 @@ def test_a_dry_run_ledgers_intent_without_publishing(
         )
     )
     assert outstanding_dates(session, batch_run=run) == []
+
+
+def test_a_stray_end_date_is_rejected_not_ignored() -> None:
+    """Silently ignoring it would publish a different selection than asked."""
+    with pytest.raises(BatchPlanError, match="only valid with --from-date"):
+        plan_context_dates(single_date=date(1971, 1, 1), to_date=date(1971, 12, 31))
+    with pytest.raises(BatchPlanError, match="only valid with --from-date"):
+        plan_context_dates(year=1971, to_date=date(1972, 1, 31))
+
+
+@pytest.mark.integration
+def test_a_batch_never_buries_a_richer_published_profile(
+    session: Session, tmp_path: Path, reviewed_un_wpp: None
+) -> None:
+    """Publishing annual context across a year must not hide an enriched
+    date's recorded events behind a sparser, higher version."""
+    from app.models import PublicationTier
+    from app.services import (
+        PublicationStatementEvidenceInput,
+        create_claim,
+        publish_day_profile,
+        resolve_claim,
+    )
+    from tests.helpers import source_release
+
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+    enriched_date = date(1976, 8, 4)
+    release = source_release(session)
+    claim = create_claim(
+        session,
+        source_release_id=release.id,
+        source_record_locator="record:enriched-event",
+        claim_type="synthetic_assertion",
+        assertion_text="A recorded event for the enriched date.",
+    )
+    resolved = resolve_claim(
+        session,
+        canonical_key="test:enriched-event",
+        resolved_value={"statement": "A recorded event."},
+        rationale="Test-only recorded event.",
+        supporting_claim_ids=[claim.id],
+    )
+    enriched = publish_day_profile(
+        session,
+        store=store,
+        profile_date=enriched_date,
+        profile_type=__import__("app.models", fromlist=["ProfileType"]).ProfileType.STANDARD_STATISTICAL,
+        payload={
+            "schema_version": "1",
+            "date": enriched_date.isoformat(),
+            "profile_type": "standard_statistical",
+            "sections": {
+                "recorded_on_this_date": [
+                    {"statement_id": "event", "statement": "A recorded event."}
+                ]
+            },
+        },
+        statement_evidence=[
+            PublicationStatementEvidenceInput(
+                statement_path="/sections/recorded_on_this_date/0",
+                resolved_claim_id=resolved.id,
+            )
+        ],
+    )
+    enriched_manifest_id = enriched.publication_manifest_id
+
+    dates = [date(1976, 8, 3), enriched_date, date(1976, 8, 5)]
+    run = start_batch_run(
+        session,
+        kind=CONTEXT_BATCH_KIND,
+        requested={"dates": [value.isoformat() for value in dates]},
+    )
+    report = run_context_batch(session, store=store, dates=dates, batch_run=run)
+
+    assert report.published == 2
+    assert report.skipped == 1
+    preserved = session.scalar(
+        select(PublicationManifest)
+        .where(PublicationManifest.profile_date == enriched_date)
+        .order_by(PublicationManifest.version.desc())
+        .limit(1)
+    )
+    assert preserved is not None
+    assert preserved.id == enriched_manifest_id, (
+        "The enriched date was superseded by a context-only version."
+    )
+    assert preserved.publication_tier is PublicationTier.REVIEWED_ENRICHED
+
+
+@pytest.mark.integration
+def test_the_standing_rule_never_reverses_a_reviewer_decision(
+    session: Session, tmp_path: Path, reviewed_un_wpp: None
+) -> None:
+    """A human rejection must survive the context publisher, and publication
+    must then fail closed rather than quietly re-selecting the root."""
+    from app.governance import EditorialSelection, EditorialSelectionStatus
+    from app.un_wpp import build_un_wpp_profile_content, publish_context_profile
+
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+    profile_date = date(1977, 9, 9)
+    content = build_un_wpp_profile_content(
+        session, profile_date=profile_date, require_editorial_selection=False
+    )
+    rejected = content.evidence[0]
+    section = rejected.statement_path.split("/")[2]
+    from app.governance import record_editorial_selection
+
+    record_editorial_selection(
+        session,
+        profile_date=profile_date,
+        section_key=section,
+        resolved_claim_id=rejected.resolved_claim_id,
+        derived_value_id=rejected.derived_value_id,
+        status=EditorialSelectionStatus.REJECTED,
+        display_rank=None,
+        rationale="A reviewer excluded this root for this date.",
+        reviewed_by="human-reviewer",
+    )
+    session.commit()
+
+    with pytest.raises(ValueError):
+        publish_context_profile(session, store=store, profile_date=profile_date)
+    session.rollback()
+
+    latest = session.scalar(
+        select(EditorialSelection)
+        .where(
+            EditorialSelection.profile_date == profile_date,
+            EditorialSelection.section_key == section,
+        )
+        .order_by(EditorialSelection.decision_version.desc())
+    )
+    assert latest is not None
+    assert latest.reviewed_by == "human-reviewer"
+    assert latest.status == EditorialSelectionStatus.REJECTED.value
+
+
+@pytest.mark.integration
+def test_retry_failed_leaves_a_run_open_while_dates_remain_unattempted(
+    session: Session, tmp_path: Path, reviewed_un_wpp: None
+) -> None:
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+    dates = [date(1949, 8, 1), date(1978, 4, 1), date(1978, 4, 2)]
+    run = start_batch_run(
+        session,
+        kind=CONTEXT_BATCH_KIND,
+        requested={"dates": [value.isoformat() for value in dates]},
+    )
+    # Attempt only the first two: one fails, one succeeds, one never runs.
+    run_context_batch(session, store=store, dates=dates[:2], batch_run=run)
+    assert run.status is BatchRunStatus.INTERRUPTED
+
+    # A retry of just the failures cannot close a run that still owes work.
+    failed_only = outstanding_dates(session, batch_run=run, only_failed=True)
+    assert failed_only == [date(1949, 8, 1)]
+    run_context_batch(session, store=store, dates=failed_only, batch_run=run)
+    assert run.status is BatchRunStatus.INTERRUPTED
+    assert date(1978, 4, 2) in outstanding_dates(session, batch_run=run)

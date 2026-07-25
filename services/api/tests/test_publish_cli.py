@@ -154,3 +154,47 @@ def test_publish_context_rejects_unsupported_years_before_publishing(
     with pytest.raises(SystemExit) as exit_info:
         publish_cli.main()
     assert "unsupported years: 1901" in str(exit_info.value)
+
+
+@pytest.mark.integration
+def test_resuming_a_killed_dry_run_does_not_publish_for_real(
+    session: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The documented resume command must honour the mode the run was
+    started in, or a killed rehearsal becomes a real publication."""
+    from app.batch_publication import CONTEXT_BATCH_KIND, start_batch_run
+    from app.models import PublicationManifest
+
+    class _Settings:
+        published_profile_root = tmp_path / "published"
+
+    monkeypatch.setattr(publish_cli, "SessionLocal", lambda: nullcontext(session))
+    monkeypatch.setattr(publish_cli, "get_settings", lambda: _Settings())
+
+    planned = [date(1979, 2, 1), date(1979, 2, 2)]
+    start_batch_run(
+        session,
+        kind=CONTEXT_BATCH_KIND,
+        requested={
+            "dates": [value.isoformat() for value in planned],
+            "dry_run": True,
+            "force_new_version": False,
+        },
+    )
+
+    monkeypatch.setattr(sys, "argv", ["publish_cli", "publish-context", "--resume"])
+    publish_cli.main()
+    output = capsys.readouterr().out
+
+    assert "skipped=2" in output
+    assert "published=0" in output
+    assert not list(
+        session.scalars(
+            select(PublicationManifest).where(
+                PublicationManifest.profile_date.in_(planned)
+            )
+        )
+    ), "Resuming a dry run published real profiles."

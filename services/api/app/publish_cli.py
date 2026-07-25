@@ -102,6 +102,14 @@ def main() -> None:
                 dates = outstanding_dates(
                     session, batch_run=run, only_failed=args.retry_failed
                 )
+                # Resume the run as it was requested: a killed dry run must
+                # not become a real publication because the resuming
+                # invocation omitted the flag.
+                recorded = run.requested or {}
+                dry_run = bool(recorded.get("dry_run", args.dry_run))
+                force_new_version = bool(
+                    recorded.get("force_new_version", args.force_new_version)
+                )
                 run.status = BatchRunStatus.RUNNING
                 run.completed_at = None
                 session.commit()
@@ -115,13 +123,15 @@ def main() -> None:
                     )
                 except BatchPlanError as error:
                     raise SystemExit(str(error)) from error
+                dry_run = args.dry_run
+                force_new_version = args.force_new_version
                 run = start_batch_run(
                     session,
                     kind=CONTEXT_BATCH_KIND,
                     requested={
                         "dates": [value.isoformat() for value in dates],
-                        "dry_run": args.dry_run,
-                        "force_new_version": args.force_new_version,
+                        "dry_run": dry_run,
+                        "force_new_version": force_new_version,
                     },
                 )
             batch_report = run_context_batch(
@@ -129,8 +139,8 @@ def main() -> None:
                 store=store,
                 dates=dates,
                 batch_run=run,
-                dry_run=args.dry_run,
-                force_new_version=args.force_new_version,
+                dry_run=dry_run,
+                force_new_version=force_new_version,
             )
             print(
                 f"batch_run_id={batch_report.batch_run_id} "

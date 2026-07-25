@@ -25,7 +25,11 @@ from app.models import (
     PublicationManifest,
 )
 from app.services import LocalFilesystemPublishedProfileStore
-from app.un_wpp import SUPPORTED_YEARS, publish_context_profile
+from app.un_wpp import (
+    SUPPORTED_YEARS,
+    publish_context_profile,
+    richer_published_profile,
+)
 
 CONTEXT_BATCH_KIND = "context-profiles"
 
@@ -76,6 +80,10 @@ def plan_context_dates(
         raise BatchPlanError(
             "Choose exactly one of --date, --year, or --from-date/--to-date."
         )
+    if to_date is not None and from_date is None:
+        # Silently ignoring it would publish a different selection than the
+        # operator asked for.
+        raise BatchPlanError("--to-date is only valid with --from-date.")
     if single_date is not None:
         dates = [single_date]
     elif year is not None:
@@ -203,6 +211,18 @@ def run_context_batch(
                 detail="dry run",
             )
             continue
+        preserved = richer_published_profile(session, profile_date=profile_date)
+        if preserved is not None:
+            report.skipped += 1
+            _record_entry(
+                session,
+                batch_run_id=batch_run.id,
+                profile_date=profile_date,
+                status=BatchEntryStatus.SKIPPED,
+                detail="preserved a richer published profile",
+                manifest_id=preserved.publication_manifest_id,
+            )
+            continue
         previous = session.scalar(
             select(PublicationManifest.id)
             .where(PublicationManifest.profile_date == profile_date)
@@ -242,9 +262,16 @@ def run_context_batch(
             ),
             manifest_id=profile.publication_manifest_id,
         )
-    batch_run.status = (
-        BatchRunStatus.COMPLETED if report.failed == 0 else BatchRunStatus.INTERRUPTED
-    )
-    batch_run.completed_at = datetime.now(UTC)
+    # Completion is a property of the whole ledgered plan: a --retry-failed
+    # invocation that fixes its subset must not close a run that still owes
+    # never-attempted dates.
+    session.flush()
+    still_owed = outstanding_dates(session, batch_run=batch_run)
+    if still_owed:
+        batch_run.status = BatchRunStatus.INTERRUPTED
+        batch_run.completed_at = None
+    else:
+        batch_run.status = BatchRunStatus.COMPLETED
+        batch_run.completed_at = datetime.now(UTC)
     session.commit()
     return report
