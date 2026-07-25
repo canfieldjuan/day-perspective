@@ -11,12 +11,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
-from typing import Any
+from typing import Any, Literal, cast
 from uuid import UUID
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.governance import EditorialSelection, EditorialSelectionStatus
 from app.models import (
     CoverageEntry,
     DayProfile,
@@ -38,8 +39,29 @@ SECTION_KEYS = (
     "evidence_notes",
 )
 RECORDED_SECTION = "recorded_on_this_date"
-STANDING_RULE_REVIEW_STATUS = "rule_selected"
-REVIEWED_STATUS = "reviewed"
+#: What review actually happened for a date, derived from editorial-selection
+#: rows rather than from the presence of evidence. A recorded event is not a
+#: reviewed one: per-date human review exists as data or it does not exist.
+CoverageReviewStatus = Literal["reviewed", "rule_selected", "unreviewed"]
+REVIEWED_STATUS: CoverageReviewStatus = "reviewed"
+STANDING_RULE_REVIEW_STATUS: CoverageReviewStatus = "rule_selected"
+UNREVIEWED_STATUS: CoverageReviewStatus = "unreviewed"
+REVIEW_STATUSES: tuple[CoverageReviewStatus, ...] = (
+    REVIEWED_STATUS,
+    STANDING_RULE_REVIEW_STATUS,
+    UNREVIEWED_STATUS,
+)
+
+
+def as_review_status(value: str) -> CoverageReviewStatus:
+    """Narrow a stored status, weakening rather than inventing a claim.
+
+    A row written by a future version with a status this one cannot name
+    must not be read as something stronger than it is.
+    """
+    if value in REVIEW_STATUSES:
+        return cast(CoverageReviewStatus, value)
+    return UNREVIEWED_STATUS
 
 
 @dataclass(frozen=True)
@@ -50,12 +72,22 @@ class CoverageRecord:
     has_recorded_event: bool
     sections: dict[str, int]
     quality_floor: str | None
-    review_status: str
+    review_status: CoverageReviewStatus
     index_version: int
     nearest_enriched_before: date | None = None
     nearest_enriched_after: date | None = None
     nearest_recorded_event_before: date | None = None
     nearest_recorded_event_after: date | None = None
+
+
+@dataclass
+class CoverageRebuildReport:
+    """What a rebuild indexed, and what it refused to index."""
+
+    indexed: int = 0
+    dropped: int = 0
+    index_version: int = 1
+    unreadable: list[date] = field(default_factory=list)
 
 
 @dataclass
@@ -110,13 +142,43 @@ def quality_floor_from_payload(payload: dict[str, Any]) -> str | None:
     return max(grades)
 
 
+def _review_status(session: Session, profile_date: date) -> CoverageReviewStatus:
+    """Derive review status from recorded editorial decisions.
+
+    ``reviewed`` means a reviewer other than the standing rule selected
+    content for this date. Everything else says so plainly rather than
+    borrowing the credibility of a review that never happened.
+    """
+    from app.un_wpp import STANDING_ANNUAL_CONTEXT_RULE
+
+    reviewers = set(
+        session.scalars(
+            select(EditorialSelection.reviewed_by).where(
+                EditorialSelection.profile_date == profile_date,
+                EditorialSelection.status == EditorialSelectionStatus.SELECTED,
+            )
+        )
+    )
+    if not reviewers:
+        return UNREVIEWED_STATUS
+    if reviewers - {STANDING_ANNUAL_CONTEXT_RULE}:
+        return REVIEWED_STATUS
+    return STANDING_RULE_REVIEW_STATUS
+
+
+def _current_index_version(session: Session) -> int:
+    """The generation the index is already on, so an ordinary publication
+    does not silently regress one date to an older one."""
+    return session.scalar(select(func.max(CoverageEntry.index_version))) or 1
+
+
 def upsert_coverage_entry(
     session: Session,
     *,
     manifest: PublicationManifest,
     payload: dict[str, Any] | None = None,
     store: PublishedProfileStore | None = None,
-    index_version: int = 1,
+    index_version: int | None = None,
 ) -> CoverageEntry:
     """Record this date's richness. Called as publication's final step.
 
@@ -125,6 +187,8 @@ def upsert_coverage_entry(
     store. Without either, an existing floor is preserved rather than
     silently nulled.
     """
+    if index_version is None:
+        index_version = _current_index_version(session)
     counts = _section_counts(session, manifest.id)
     has_event = counts[RECORDED_SECTION] > 0
     entry = session.scalar(
@@ -149,9 +213,7 @@ def upsert_coverage_entry(
         "has_recorded_event": has_event,
         "sections": counts,
         "quality_floor": floor,
-        "review_status": (
-            REVIEWED_STATUS if has_event else STANDING_RULE_REVIEW_STATUS
-        ),
+        "review_status": _review_status(session, manifest.profile_date),
         "index_version": index_version,
         "refreshed_at": datetime.now(UTC),
     }
@@ -195,20 +257,31 @@ def rebuild_coverage_index(
     *,
     store: PublishedProfileStore | None = None,
     index_version: int | None = None,
-) -> int:
+) -> CoverageRebuildReport:
     """Regenerate the whole index from published state.
 
     Deterministic and idempotent: dates whose newest publication disappeared
     or was superseded by an unpublished manifest are dropped rather than
     left describing an archive that no longer exists.
+
+    Each date is re-read under its publication lock, so a correction that
+    lands while this walks its snapshot wins instead of being overwritten by
+    the manifest that was newest when the walk began.
     """
+    from app.services import _acquire_publication_lock
+
     if index_version is None:
         index_version = (
             session.scalar(select(func.max(CoverageEntry.index_version))) or 0
         ) + 1
-    manifests = latest_published_manifests(session)
+    report = CoverageRebuildReport(index_version=index_version)
+    snapshot = latest_published_manifests(session)
     live_dates = set()
-    for manifest in manifests:
+    for stale in snapshot:
+        _acquire_publication_lock(session, stale.profile_date, stale.profile_type)
+        manifest = _latest_published_manifest(session, stale.profile_date)
+        if manifest is None:
+            continue
         has_profile = session.scalar(
             select(DayProfile.id).where(
                 DayProfile.publication_manifest_id == manifest.id
@@ -217,6 +290,14 @@ def rebuild_coverage_index(
         if has_profile is None:
             # A manifest without its profile row is not served to readers.
             continue
+        if store is not None:
+            try:
+                store.read(manifest.storage_uri, manifest.content_hash)
+            except (OSError, RuntimeError, ValueError):
+                # The day endpoint fails for this date. Indexing it anyway
+                # would send readers to a page that cannot be served.
+                report.unreadable.append(manifest.profile_date)
+                continue
         upsert_coverage_entry(
             session, manifest=manifest, store=store, index_version=index_version
         )
@@ -224,8 +305,24 @@ def rebuild_coverage_index(
     for entry in session.scalars(select(CoverageEntry)):
         if entry.profile_date not in live_dates:
             session.delete(entry)
+            report.dropped += 1
     session.flush()
-    return len(live_dates)
+    report.indexed = len(live_dates)
+    return report
+
+
+def _latest_published_manifest(
+    session: Session, profile_date: date
+) -> PublicationManifest | None:
+    return session.scalar(
+        select(PublicationManifest)
+        .where(
+            PublicationManifest.profile_date == profile_date,
+            PublicationManifest.status == PublicationStatus.PUBLISHED,
+        )
+        .order_by(PublicationManifest.version.desc())
+        .limit(1)
+    )
 
 
 def _neighbour(
@@ -266,7 +363,7 @@ def coverage_for_date(session: Session, profile_date: date) -> CoverageRecord | 
         has_recorded_event=entry.has_recorded_event,
         sections=dict(entry.sections or {}),
         quality_floor=entry.quality_floor,
-        review_status=entry.review_status,
+        review_status=as_review_status(entry.review_status),
         index_version=entry.index_version,
         nearest_enriched_before=_neighbour(
             session,
@@ -287,22 +384,31 @@ def coverage_for_date(session: Session, profile_date: date) -> CoverageRecord | 
 
 
 def coverage_summary(session: Session) -> CoverageSummary:
+    """Aggregate in the database: this response is constant-size, and the
+    archive it describes is not."""
     summary = CoverageSummary()
     summary.by_tier = dict.fromkeys((tier.value for tier in PublicationTier), 0)
-    for entry in session.scalars(select(CoverageEntry)):
-        summary.total_published += 1
-        summary.by_tier[entry.publication_tier.value] += 1
-        if entry.has_recorded_event:
-            summary.with_recorded_event += 1
-        summary.earliest = (
-            entry.profile_date
-            if summary.earliest is None
-            else min(summary.earliest, entry.profile_date)
+    totals = session.execute(
+        select(
+            func.count(CoverageEntry.profile_date),
+            func.count(CoverageEntry.profile_date).filter(
+                CoverageEntry.has_recorded_event.is_(True)
+            ),
+            func.min(CoverageEntry.profile_date),
+            func.max(CoverageEntry.profile_date),
+            func.max(CoverageEntry.index_version),
         )
-        summary.latest = (
-            entry.profile_date
-            if summary.latest is None
-            else max(summary.latest, entry.profile_date)
-        )
-        summary.index_version = max(summary.index_version, entry.index_version)
+    ).one()
+    summary.total_published = totals[0] or 0
+    summary.with_recorded_event = totals[1] or 0
+    summary.earliest = totals[2]
+    summary.latest = totals[3]
+    summary.index_version = totals[4] or 0
+    for tier, count in session.execute(
+        select(
+            CoverageEntry.publication_tier,
+            func.count(CoverageEntry.profile_date),
+        ).group_by(CoverageEntry.publication_tier)
+    ):
+        summary.by_tier[tier.value] = count
     return summary

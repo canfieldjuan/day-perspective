@@ -187,3 +187,83 @@ def test_publication_tier_backfill_derives_from_statement_evidence(
     finally:
         command.upgrade(alembic_config, "head")
         engine.dispose()
+
+
+@pytest.mark.integration
+def test_the_coverage_index_migration_backfills_an_existing_archive(
+    session: Session, tmp_path: Path, migrated_database: str
+) -> None:
+    """Upgrading a populated archive must not leave every date reporting
+    coverage_not_indexed until someone remembers to rebuild."""
+    from datetime import date
+
+    from alembic import command
+    from alembic.config import Config
+    from app.adapters.base import LocalFilesystemRawSourceStore
+    from app.batch_publication import (
+        CONTEXT_BATCH_KIND,
+        run_context_batch,
+        start_batch_run,
+    )
+    from app.services import LocalFilesystemPublishedProfileStore
+    from app.un_wpp import ingest_un_wpp, review_un_wpp
+    from tests.conftest import SERVICE_ROOT
+
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+    fixture = (
+        Path(__file__).resolve().parents[3]
+        / "data"
+        / "fixtures"
+        / "un-wpp"
+        / "wpp2024-world-1950-2025.csv"
+    )
+    result = ingest_un_wpp(
+        session,
+        fixture_path=fixture,
+        raw_store=LocalFilesystemRawSourceStore(tmp_path / "raw"),
+    )
+    assert result.source_release_id is not None
+    review_un_wpp(session, result.source_release_id)
+    session.commit()
+
+    context_dates = [date(1977, 6, 1), date(1977, 6, 2)]
+    run = start_batch_run(
+        session,
+        kind=CONTEXT_BATCH_KIND,
+        requested={"dates": [value.isoformat() for value in context_dates]},
+    )
+    run_context_batch(session, store=store, dates=context_dates, batch_run=run)
+    session.commit()
+    session.close()
+
+    alembic_config = Config(str(SERVICE_ROOT / "alembic.ini"))
+    alembic_config.attributes["database_url"] = migrated_database
+    command.stamp(alembic_config, "head")
+    # Drop the index the way an upgrade from before it would find things:
+    # the archive exists, the table does not.
+    command.downgrade(alembic_config, "20260726_0013")
+
+    engine = create_engine(migrated_database)
+    try:
+        assert "coverage_entries" not in inspect(engine).get_table_names()
+        command.upgrade(alembic_config, "head")
+        with engine.connect() as connection:
+            rows = {
+                str(row[0]): (row[1], row[2], row[3])
+                for row in connection.execute(
+                    text(
+                        "SELECT profile_date::text, publication_tier::text, "
+                        "review_status, sections::text FROM coverage_entries"
+                    )
+                ).all()
+            }
+        assert set(rows) == {value.isoformat() for value in context_dates}
+        for tier, review_status, sections in rows.values():
+            assert tier == "context_only"
+            # Selected by the standing rule, which is not a human review.
+            assert review_status == "rule_selected"
+            assert '"typical_day_in_this_year": 2' in sections
+            assert '"wider_historical_context": 3' in sections
+    finally:
+        command.upgrade(alembic_config, "head")
+        engine.dispose()

@@ -110,6 +110,73 @@ export interface PublishedProfileResponse {
   profile: PublishedDayProfile;
 }
 
+/**
+ * Coverage index (epic #32, slice AA3). Once every supported date carries
+ * annual context, "is anything published?" stops distinguishing anything;
+ * these shapes carry how rich a date is and where the nearest richer date
+ * lies. Navigation reads them, so they belong to the contract rather than
+ * to either side privately.
+ */
+export const COVERAGE_REVIEW_STATUSES = [
+  "reviewed",
+  "rule_selected",
+  "unreviewed"
+] as const;
+
+/**
+ * What review actually happened for a date. `reviewed` means a reviewer
+ * other than a standing editorial rule selected this date's content;
+ * `rule_selected` means a standing rule did; `unreviewed` means no
+ * editorial decision is recorded. Presence of evidence is not review.
+ */
+export type CoverageReviewStatus = (typeof COVERAGE_REVIEW_STATUSES)[number];
+
+export type CoverageSectionCounts = Partial<Record<DayProfileSectionKey, number>>;
+
+export interface CoverageDateResponse {
+  status: "coverage";
+  date: string;
+  profile_type: ProfileType;
+  publication_tier: PublicationTier;
+  has_recorded_event: boolean;
+  /** Published statement counts per section, from immutable evidence rows. */
+  sections: CoverageSectionCounts;
+  /** The weakest grade the profile rests on, not its best; null if unknown. */
+  quality_floor: string | null;
+  review_status: CoverageReviewStatus;
+  index_version: number;
+  nearest_enriched_before: string | null;
+  nearest_enriched_after: string | null;
+  nearest_recorded_event_before: string | null;
+  nearest_recorded_event_after: string | null;
+}
+
+/** A date with no published profile is absent from the index, never empty. */
+export interface CoverageNotIndexedResponse {
+  status: "coverage_not_indexed";
+  date: string;
+  detail: string;
+}
+
+export interface CoverageSummaryResponse {
+  status: "coverage_summary";
+  total_published: number;
+  by_tier: Record<PublicationTier, number>;
+  with_recorded_event: number;
+  earliest: string | null;
+  latest: string | null;
+  index_version: number;
+  supported_range: { minimum: string; maximum: string };
+}
+
+export function isCoverageReviewStatus(
+  value: unknown
+): value is CoverageReviewStatus {
+  return (COVERAGE_REVIEW_STATUSES as readonly string[]).includes(
+    value as string
+  );
+}
+
 export function profileTypeForDate(value: string): ProfileType | undefined {
   if (value < PUBLIC_DATE_MIN || value > PUBLIC_DATE_MAX) {
     return undefined;

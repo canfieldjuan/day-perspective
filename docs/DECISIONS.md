@@ -804,3 +804,31 @@ longer serves readers; publication carries one extra write per date.
 **Revisit trigger:** Coverage needs per-section quality or provenance
 detail, at which point the entry grows rather than the profile being
 re-read per request.
+
+**Amendment (PR #43 review, 2026-07-26):** four properties were added
+because the first implementation could describe an archive that did not
+exist.
+
+- *Review status is derived from editorial-selection rows, not from the
+  presence of evidence.* The vocabulary is `reviewed` (a reviewer other
+  than a standing rule selected this date's content), `rule_selected` (a
+  standing rule did), and `unreviewed` (no editorial decision is
+  recorded). Calling a recorded event "reviewed" borrowed the credibility
+  of a review that does not exist as data.
+- *Every path that makes a profile readable indexes it* — publication,
+  idempotent republication, and reconciliation repair — through a single
+  seam. A profile the day endpoint serves while coverage reports it
+  missing is a navigation lie, and the idempotent path meant re-running
+  the publishers could not heal a missing index.
+- *A rebuild refuses to index an artifact it cannot read*, and reports it.
+  The day endpoint fails for such a date; sending readers there because
+  the database row looks fine is the same dishonesty in a different
+  place. Rebuilds also re-read each date under its publication lock, so a
+  correction that lands mid-rebuild wins.
+- *The migration backfills an existing archive* (leaving quality floors
+  null, since they live in the artifacts), and the summary aggregates in
+  SQL rather than materializing every entry — that response is
+  constant-size and the archive it describes is not.
+
+The coverage response shapes live in `packages/contracts/src/index.ts`,
+so the vocabulary the API sends is the vocabulary the UI can name.

@@ -18,6 +18,23 @@ published objects and verify manifest hashes. Pipeline workers must run outside
 ordinary request handling and must have separate credentials. The review
 surface must be private and protected by production authentication.
 
+## Schema Upgrade Steps
+
+Applying migrations is not sufficient on its own for the coverage index
+(D034). `20260726_0014` backfills `coverage_entries` from published
+manifests so an existing archive is never left reporting
+`coverage_not_indexed`, but quality floors live in the published artifacts
+rather than in the database and are left null by the backfill. After
+`make db-migrate` on a populated archive, run:
+
+```bash
+make rebuild-coverage
+```
+
+It is idempotent, reports what it indexed and dropped, and exits non-zero
+if any published date's artifact could not be read — an unreadable
+artifact is left out of the index rather than advertised to navigation.
+
 ## Blocking Decisions
 
 - Hosting provider and region

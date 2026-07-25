@@ -13,7 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
-from app.coverage import coverage_for_date, coverage_summary
+from app.coverage import CoverageReviewStatus, coverage_for_date, coverage_summary
 from app.database import get_session
 from app.governance import ReviewDecisionValue, record_claim_review
 from app.models import (
@@ -25,6 +25,7 @@ from app.models import (
     ProfileType,
     PublicationManifest,
     PublicationStatus,
+    PublicationTier,
     ResolvedClaimEvidence,
     ReviewTask,
     Source,
@@ -100,12 +101,12 @@ class SourcesResponse(APIModel):
 class CoverageDateResponse(APIModel):
     status: Literal["coverage"]
     date: dtmod.date
-    profile_type: str
-    publication_tier: str
+    profile_type: ProfileType
+    publication_tier: PublicationTier
     has_recorded_event: bool
     sections: dict[str, int]
     quality_floor: str | None
-    review_status: str
+    review_status: CoverageReviewStatus
     index_version: int
     nearest_enriched_before: dtmod.date | None
     nearest_enriched_after: dtmod.date | None
@@ -278,8 +279,8 @@ def coverage_for_profile_date(
     return CoverageDateResponse(
         status="coverage",
         date=record.profile_date,
-        profile_type=record.profile_type.value,
-        publication_tier=record.publication_tier.value,
+        profile_type=record.profile_type,
+        publication_tier=record.publication_tier,
         has_recorded_event=record.has_recorded_event,
         sections=record.sections,
         quality_floor=record.quality_floor,

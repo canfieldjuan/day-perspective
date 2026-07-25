@@ -1074,6 +1074,7 @@ def reconcile_publications(
             if repair:
                 _mark_manifest_published(session, manifest)
                 _ensure_day_profile(session, manifest)
+                _index_coverage(session, manifest)
                 session.commit()
         else:
             report.abandoned_pending += 1
@@ -1128,6 +1129,7 @@ def reconcile_publications(
                     session, manifest.profile_date, manifest.profile_type
                 )
                 _ensure_day_profile(session, manifest)
+                _index_coverage(session, manifest)
                 session.commit()
         else:
             report.healthy_published += 1
@@ -1262,6 +1264,23 @@ class PendingPublicationError(RuntimeError):
     """A pending publication with different content blocks this attempt."""
 
 
+def _index_coverage(
+    session: Session,
+    manifest: PublicationManifest,
+    payload: dict[str, Any] | None = None,
+) -> None:
+    """Record this manifest in the coverage index.
+
+    Every path that makes a profile readable goes through here: publication,
+    idempotent republication, and reconciliation repair. A profile the day
+    endpoint serves while coverage reports it missing is a navigation lie.
+    Imported lazily because app.coverage reads this module's lock helper.
+    """
+    from app.coverage import upsert_coverage_entry
+
+    upsert_coverage_entry(session, manifest=manifest, payload=payload)
+
+
 def publication_advisory_lock_key(profile_date: date, profile_type: ProfileType) -> str:
     return f"publication:{profile_date.isoformat()}:{profile_type.value}"
 
@@ -1343,7 +1362,11 @@ def publish_day_profile(
                 )
             )
             if existing_profile is not None:
-                store.read(latest_published.storage_uri, digest)
+                payload_on_disk = store.read(latest_published.storage_uri, digest)
+                # Re-running the publishers is the obvious way to heal an
+                # index that was never built (or was dropped); if the
+                # idempotent path skipped coverage, that never works.
+                _index_coverage(session, latest_published, payload_on_disk)
                 session.commit()
                 return existing_profile
 
@@ -1470,9 +1493,7 @@ def publish_day_profile(
         session.flush()
         # Coverage is publication's final step, so navigation never reads a
         # stale picture of the archive between bulk runs (D034).
-        from app.coverage import upsert_coverage_entry
-
-        upsert_coverage_entry(session, manifest=completed, payload=payload)
+        _index_coverage(session, completed, payload)
         session.commit()
         return profile
     except BaseException:

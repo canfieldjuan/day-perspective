@@ -160,7 +160,7 @@ def main() -> None:
             if batch_report.failed:
                 raise SystemExit(1)
         elif args.command == "rebuild-coverage":
-            indexed = rebuild_coverage_index(
+            rebuild = rebuild_coverage_index(
                 session,
                 store=LocalFilesystemPublishedProfileStore(
                     settings.published_profile_root
@@ -172,10 +172,18 @@ def main() -> None:
                 f"{tier}={count}" for tier, count in sorted(summary.by_tier.items())
             )
             print(
-                f"indexed={indexed} index_version={summary.index_version} "
+                f"indexed={rebuild.indexed} dropped={rebuild.dropped} "
+                f"unreadable={len(rebuild.unreadable)} "
+                f"index_version={summary.index_version} "
                 f"total_published={summary.total_published} "
                 f"with_recorded_event={summary.with_recorded_event} {tiers}"
             )
+            for profile_date in rebuild.unreadable:
+                print(f"unreadable date={profile_date.isoformat()}")
+            if rebuild.unreadable:
+                # An unservable date left out of the index is the honest
+                # outcome, but it is not a clean rebuild.
+                raise SystemExit(1)
 
 
 if __name__ == "__main__":

@@ -25,6 +25,8 @@ cascade-deleted.
 | `batch_run_status` | `running`, `completed`, `interrupted` | Lifecycle of a batch publication run (D033). |
 | `batch_entry_status` | `published`, `unchanged`, `failed`, `skipped` | Per-date outcome inside a batch run; `unchanged` marks a rerun-safe no-op, `skipped` a dry run (D033). |
 | `coverage_entries` | one row per published date | Archive richness index: tier, recorded-event flag, per-section statement counts, quality floor, review status, index version (D034). Rebuilt with `make rebuild-coverage`. |
+| `coverage_entries.review_status` | `reviewed`, `rule_selected`, `unreviewed` | What review actually happened for the date, derived from `editorial_selections`. `reviewed` requires a reviewer other than a standing rule; evidence alone never implies review. |
+| `coverage_entries.quality_floor` | any grade string, or null | The weakest grade the profile rests on, not its best. Untyped text because the contract permits any grade and this row is written after the artifact is promoted. |
 | `profile_type` | `limited_historical`, `standard_statistical`, `enhanced_structured` |
 | `legal_review_status` | `not_required`, `pending`, `approved`, `restricted`, `rejected` |
 | `pipeline_run_status` | `running`, `succeeded`, `failed`, `cancelled` |

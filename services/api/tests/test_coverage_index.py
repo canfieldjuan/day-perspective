@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from datetime import date
 from pathlib import Path
+from typing import Any
 
 import pytest
 from sqlalchemy import select
@@ -23,7 +24,7 @@ from app.coverage import (
     coverage_summary,
     rebuild_coverage_index,
 )
-from app.models import CoverageEntry, PublicationTier
+from app.models import CoverageEntry, PublicationManifest, PublicationTier
 from app.services import (
     LocalFilesystemPublishedProfileStore,
     PublicationStatementEvidenceInput,
@@ -54,19 +55,22 @@ def reviewed_un_wpp(session: Session, tmp_path: Path) -> None:
     session.commit()
 
 
-def publish_enriched(
-    session: Session,
-    store: LocalFilesystemPublishedProfileStore,
-    profile_date: date,
-    *,
-    label: str,
-) -> None:
-    from app.models import LegalReviewStatus, ProfileType, Source
+def delete_coverage_entries() -> Any:
+    """Simulate an archive that predates the index (or a dropped table)."""
+    from sqlalchemy import delete
+
+    return delete(CoverageEntry)
+
+
+def _synthetic_release(session: Session, label: str) -> Any:
+    """A dedicated single-record source per enriched date.
+
+    The shared helper uses a fixed slug (so it cannot be called twice), and
+    reusing the UN WPP release would demand per-claim source-record hashes.
+    """
+    from app.models import LegalReviewStatus, Source
     from app.services import create_source_release
 
-    # A dedicated single-record source per enriched date: the shared helper
-    # uses a fixed slug (so it cannot be called twice), and reusing the UN
-    # WPP release would demand per-claim source-record hashes.
     source = Source(
         slug=f"test-source-{label}",
         name=f"Synthetic source for {label}",
@@ -76,7 +80,7 @@ def publish_enriched(
     )
     session.add(source)
     session.flush()
-    release = create_source_release(
+    return create_source_release(
         session,
         source_id=source.id,
         release_label=f"{label}-v1",
@@ -85,6 +89,18 @@ def publish_enriched(
         raw_bytes=f"raw bytes for {label}".encode(),
         raw_record_count=1,
     )
+
+
+def publish_enriched(
+    session: Session,
+    store: LocalFilesystemPublishedProfileStore,
+    profile_date: date,
+    *,
+    label: str,
+) -> None:
+    from app.models import ProfileType
+
+    release = _synthetic_release(session, label)
     claim = create_claim(
         session,
         source_release_id=release.id,
@@ -348,3 +364,389 @@ def test_the_coverage_api_serves_richness_and_neighbours(
     assert unindexed.json()["status"] == "coverage_not_indexed"
     assert out_of_range.status_code == 404
     assert out_of_range.json()["status"] == "date_out_of_supported_range"
+
+
+# --- Round 1 review findings (PR #43) ------------------------------------
+
+
+@pytest.mark.integration
+def test_reconcile_repair_indexes_the_profile_it_completes(
+    session: Session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A repaired publication is served by /api/v1/day, so coverage must not
+    keep reporting it missing until someone runs a full rebuild."""
+    from app.models import ProfileType
+    from app.services import reconcile_publications
+
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+    profile_date = date(1975, 4, 30)
+    claim = create_claim(
+        session,
+        source_release_id=_synthetic_release(session, "repair-coverage").id,
+        source_record_locator="record:repair",
+        claim_type="synthetic_assertion",
+        assertion_text="A recorded event.",
+    )
+    resolved = resolve_claim(
+        session,
+        canonical_key="test:repair-coverage",
+        resolved_value={"statement": "A recorded event."},
+        rationale="Test-only recorded event.",
+        supporting_claim_ids=[claim.id],
+    )
+    evidence = [
+        PublicationStatementEvidenceInput(
+            statement_path="/sections/recorded_on_this_date/0",
+            resolved_claim_id=resolved.id,
+        )
+    ]
+
+    from app import services as services_module
+
+    def explode(*args: object, **inner: object) -> None:
+        raise RuntimeError("Simulated crash before artifact promotion.")
+
+    monkeypatch.setattr(services_module.StagedProfileWrite, "finalize", explode)
+    with pytest.raises(RuntimeError, match="Simulated crash"):
+        publish_day_profile(
+            session,
+            store=store,
+            profile_date=profile_date,
+            profile_type=ProfileType.STANDARD_STATISTICAL,
+            payload={
+                "schema_version": "1",
+                "date": profile_date.isoformat(),
+                "profile_type": "standard_statistical",
+                "sections": {
+                    "recorded_on_this_date": [
+                        {"statement_id": "event", "statement": "A recorded event."}
+                    ]
+                },
+            },
+            statement_evidence=evidence,
+        )
+    monkeypatch.undo()
+    session.rollback()
+
+    report = reconcile_publications(session, store=store, repair=True)
+    session.commit()
+
+    assert report.completed_pending + report.abandoned_pending >= 1
+    if report.completed_pending:
+        record = coverage_for_date(session, profile_date)
+        assert record is not None, "repaired publication is absent from coverage"
+        assert record.has_recorded_event is True
+
+
+@pytest.mark.integration
+def test_republishing_identical_content_still_heals_a_missing_entry(
+    session: Session, tmp_path: Path, reviewed_un_wpp: None
+) -> None:
+    """Idempotent publication returns early; if that path skips coverage, an
+    archive whose index was never built cannot be healed by re-running the
+    publishers."""
+    from app.un_wpp import publish_context_profile
+
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+    profile_date = date(1983, 7, 4)
+    publish_context_profile(session, store=store, profile_date=profile_date)
+    session.commit()
+    session.execute(delete_coverage_entries())
+    session.commit()
+    assert coverage_for_date(session, profile_date) is None
+
+    publish_context_profile(session, store=store, profile_date=profile_date)
+    session.commit()
+
+    assert coverage_for_date(session, profile_date) is not None
+
+
+@pytest.mark.integration
+def test_rebuild_refuses_to_advertise_an_unreadable_artifact(
+    session: Session, tmp_path: Path, reviewed_un_wpp: None
+) -> None:
+    """The day endpoint 503s on a missing artifact; coverage must not keep
+    telling navigation that the date is worth visiting."""
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+    profile_date = date(1984, 2, 2)
+    run = start_batch_run(
+        session,
+        kind=CONTEXT_BATCH_KIND,
+        requested={"dates": [profile_date.isoformat()]},
+    )
+    run_context_batch(session, store=store, dates=[profile_date], batch_run=run)
+    session.commit()
+    rebuild_coverage_index(session, store=store)
+    session.commit()
+    assert coverage_for_date(session, profile_date) is not None
+
+    for artifact in (tmp_path / "published").rglob("*.json"):
+        artifact.unlink()
+
+    result = rebuild_coverage_index(session, store=store)
+    session.commit()
+
+    assert coverage_for_date(session, profile_date) is None
+    assert result.unreadable == [profile_date]
+    assert result.indexed == 0
+
+
+@pytest.mark.integration
+def test_publication_after_a_rebuild_keeps_the_index_generation(
+    session: Session, tmp_path: Path, reviewed_un_wpp: None
+) -> None:
+    """A date written by an ordinary publication must not report an older
+    generation than the summary claims the index is on."""
+    from app.un_wpp import publish_context_profile
+
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+    first = date(1985, 9, 9)
+    second = date(1985, 9, 10)
+    publish_context_profile(session, store=store, profile_date=first)
+    session.commit()
+    rebuild_coverage_index(session, store=store)
+    rebuild_coverage_index(session, store=store)
+    session.commit()
+    generation = coverage_summary(session).index_version
+    assert generation >= 2
+
+    publish_context_profile(session, store=store, profile_date=second)
+    session.commit()
+
+    record = coverage_for_date(session, second)
+    assert record is not None
+    assert record.index_version == generation
+    assert coverage_summary(session).index_version == generation
+
+
+@pytest.mark.integration
+def test_review_status_reflects_recorded_review_not_evidence_presence(
+    session: Session, tmp_path: Path, reviewed_un_wpp: None
+) -> None:
+    """A recorded event is not a reviewed one. Per-date human review exists
+    as editorial-selection data or it does not exist at all."""
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+    context_date = date(1986, 1, 6)
+    unreviewed_date = date(1986, 1, 8)
+    run = start_batch_run(
+        session,
+        kind=CONTEXT_BATCH_KIND,
+        requested={"dates": [context_date.isoformat()]},
+    )
+    run_context_batch(session, store=store, dates=[context_date], batch_run=run)
+    publish_enriched(session, store, unreviewed_date, label="unreviewed-event")
+    session.commit()
+    rebuild_coverage_index(session, store=store)
+    session.commit()
+
+    context = coverage_for_date(session, context_date)
+    assert context is not None
+    assert context.review_status == "rule_selected"
+
+    unreviewed = coverage_for_date(session, unreviewed_date)
+    assert unreviewed is not None
+    assert unreviewed.has_recorded_event is True
+    assert unreviewed.review_status == "unreviewed"
+
+
+@pytest.mark.integration
+def test_a_human_editorial_decision_reads_as_reviewed(
+    session: Session, tmp_path: Path, reviewed_un_wpp: None
+) -> None:
+    from app.governance import EditorialSelection, EditorialSelectionStatus
+    from app.models import ResolvedClaim
+
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+    profile_date = date(1987, 5, 5)
+    publish_enriched(session, store, profile_date, label="human-reviewed")
+    resolved = session.scalar(
+        select(ResolvedClaim).where(
+            ResolvedClaim.canonical_key == "test:human-reviewed"
+        )
+    )
+    assert resolved is not None
+    session.add(
+        EditorialSelection(
+            profile_date=profile_date,
+            section_key="recorded_on_this_date",
+            resolved_claim_id=resolved.id,
+            status=EditorialSelectionStatus.SELECTED,
+            decision_version=1,
+            display_rank=1,
+            rationale="A human considered this date.",
+            reviewed_by="editor@example.invalid",
+        )
+    )
+    session.commit()
+    rebuild_coverage_index(session, store=store)
+    session.commit()
+
+    record = coverage_for_date(session, profile_date)
+    assert record is not None
+    assert record.review_status == "reviewed"
+
+
+@pytest.mark.integration
+def test_rebuild_does_not_overwrite_a_newer_publication(
+    session: Session, tmp_path: Path, reviewed_un_wpp: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A correction published while a rebuild is walking its snapshot must
+    win: the rebuild re-reads each date under the publication lock."""
+    from app import coverage as coverage_module
+    from app.un_wpp import publish_context_profile
+
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+    profile_date = date(1988, 8, 8)
+    publish_context_profile(session, store=store, profile_date=profile_date)
+    session.commit()
+    stale = list(coverage_module.latest_published_manifests(session))
+    stale_versions = {manifest.version for manifest in stale}
+    assert stale_versions == {1}
+
+    publish_context_profile(
+        session, store=store, profile_date=profile_date, force_new_version=True
+    )
+    session.commit()
+    current = session.scalar(
+        select(PublicationManifest.version)
+        .where(PublicationManifest.profile_date == profile_date)
+        .order_by(PublicationManifest.version.desc())
+        .limit(1)
+    )
+    assert current == 2
+
+    monkeypatch.setattr(
+        coverage_module, "latest_published_manifests", lambda _session: stale
+    )
+    rebuild_coverage_index(session, store=store)
+    session.commit()
+
+    entry = session.scalar(
+        select(CoverageEntry).where(CoverageEntry.profile_date == profile_date)
+    )
+    assert entry is not None
+    indexed_version = session.scalar(
+        select(PublicationManifest.version).where(
+            PublicationManifest.id == entry.publication_manifest_id
+        )
+    )
+    assert indexed_version == 2, "rebuild indexed a superseded manifest"
+
+
+@pytest.mark.integration
+def test_the_summary_does_not_scale_with_the_archive(
+    session: Session, tmp_path: Path, reviewed_un_wpp: None
+) -> None:
+    """A constant-size public response must not load 27,759 JSONB blobs."""
+    from sqlalchemy import event
+
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+    dates = [date(1989, 4, day) for day in range(1, 9)]
+    run = start_batch_run(
+        session,
+        kind=CONTEXT_BATCH_KIND,
+        requested={"dates": [value.isoformat() for value in dates]},
+    )
+    run_context_batch(session, store=store, dates=dates, batch_run=run)
+    session.commit()
+    rebuild_coverage_index(session, store=store)
+    session.commit()
+
+    statements: list[str] = []
+
+    def record(conn, cursor, statement, parameters, context, executemany):  # type: ignore[no-untyped-def]
+        statements.append(statement)
+
+    event.listen(session.get_bind(), "before_cursor_execute", record)
+    try:
+        summary = coverage_summary(session)
+    finally:
+        event.remove(session.get_bind(), "before_cursor_execute", record)
+
+    assert summary.total_published == len(dates)
+    assert summary.earliest == dates[0]
+    assert summary.latest == dates[-1]
+    assert len(statements) <= 3, statements
+    assert not any("coverage_entries.sections" in text for text in statements), (
+        "the summary loaded per-date section blobs"
+    )
+
+
+@pytest.mark.integration
+def test_a_long_quality_grade_does_not_fail_publication(
+    session: Session, tmp_path: Path
+) -> None:
+    """Coverage is written after the artifact is promoted; a contract-valid
+    grade must never turn a completed publication into a failure."""
+    from app.models import ProfileType
+
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+    profile_date = date(1979, 3, 3)
+    grade = "provisional-B"
+    claim = create_claim(
+        session,
+        source_release_id=_synthetic_release(session, "long-grade").id,
+        source_record_locator="record:long-grade",
+        claim_type="synthetic_assertion",
+        assertion_text="A recorded event.",
+    )
+    resolved = resolve_claim(
+        session,
+        canonical_key="test:long-grade",
+        resolved_value={"statement": "A recorded event."},
+        rationale="Test-only recorded event.",
+        supporting_claim_ids=[claim.id],
+    )
+
+    publish_day_profile(
+        session,
+        store=store,
+        profile_date=profile_date,
+        profile_type=ProfileType.STANDARD_STATISTICAL,
+        payload={
+            "schema_version": "1",
+            "date": profile_date.isoformat(),
+            "profile_type": "standard_statistical",
+            "sections": {
+                "recorded_on_this_date": [
+                    {"statement_id": "event", "statement": "A recorded event."}
+                ]
+            },
+            "quality": {"grade": grade, "explanation": "Longer than eight."},
+        },
+        statement_evidence=[
+            PublicationStatementEvidenceInput(
+                statement_path="/sections/recorded_on_this_date/0",
+                resolved_claim_id=resolved.id,
+            )
+        ],
+    )
+    session.commit()
+
+    record = coverage_for_date(session, profile_date)
+    assert record is not None
+    assert record.quality_floor == grade
+
+
+def test_the_python_review_vocabulary_matches_the_shared_contract() -> None:
+    """The contract binds the API and the UI; a status the UI cannot name is
+    a status the API must not send."""
+    import re
+
+    from app.coverage import REVIEW_STATUSES
+
+    contract = (
+        Path(__file__).resolve().parents[3]
+        / "packages"
+        / "contracts"
+        / "src"
+        / "index.ts"
+    ).read_text(encoding="utf-8")
+    block = re.search(
+        r"export const COVERAGE_REVIEW_STATUSES = \[(.*?)\] as const;",
+        contract,
+        re.DOTALL,
+    )
+    assert block is not None, "contract does not declare coverage review statuses"
+    declared = tuple(re.findall(r'"([a-z_]+)"', block.group(1)))
+    assert declared == REVIEW_STATUSES
