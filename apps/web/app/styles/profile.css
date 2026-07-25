@@ -227,7 +227,10 @@
 }
 
 .publication-integrity summary {
+  align-items: center;
   cursor: pointer;
+  display: flex;
+  min-height: 44px;
 }
 
 @media (prefers-reduced-motion: no-preference) {
