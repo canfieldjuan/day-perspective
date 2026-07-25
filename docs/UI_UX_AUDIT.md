@@ -132,10 +132,11 @@ no landmark beyond `<main>`; no automated a11y scanning in any test.
 
 ### Tests
 
-- vitest/RTL: `DayProfileClient.test.tsx` (4 cases: unpublished honesty,
-  validated publish render, provenance open, date-change reset),
-  `ProfileSections.test.tsx` (supporting-link labeling),
-  `AdminReviewPage.test.tsx` (2), `day-profile.test.ts` (validators).
+- vitest/RTL: `DayProfileClient.test.tsx` (5 cases: unpublished honesty,
+  validated publish render, provenance open, date-change reset,
+  unrecognized-response rejection), `ProfileSections.test.tsx`
+  (supporting-link labeling), `AdminReviewPage.test.tsx` (2),
+  `day-profile.test.ts` (validators). 10 web tests total, run-verified.
 - Playwright (`playwright.config.ts:11-18`): **desktop-chromium only**; no
   mobile viewport, no reduced-motion context. `webServer` runs
   `next build && next start` (`:19-26`), so every e2e invocation rebuilds.
