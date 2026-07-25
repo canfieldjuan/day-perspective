@@ -1,26 +1,55 @@
+import type { Metadata } from "next";
+import { permanentRedirect } from "next/navigation";
+
 import { DateInputForm } from "@/src/components/DateInputForm";
+import { DayNavigation } from "@/src/components/DayNavigation";
 import { DayProfileClient } from "@/src/components/DayProfileClient";
-import { formatPublicDate } from "@/src/lib/date";
+import { canonicalizePublicDatePath, formatPublicDate } from "@/src/lib/date";
 import { eraLineForDate } from "@/src/lib/day-profile";
 
-export default async function DayProfilePage({
-  params
-}: {
-  params: Promise<{ date: string }>;
-}) {
+type DayPageProps = { params: Promise<{ date: string }> };
+
+export async function generateMetadata({ params }: DayPageProps): Promise<Metadata> {
   const { date } = await params;
+  const monument = formatPublicDate(date);
+  if (!monument) {
+    return { title: "Day Perspective" };
+  }
+  return {
+    title: monument + " — Day Perspective",
+    description:
+      "Evidence-led historical profile of " +
+      monument +
+      " (" +
+      eraLineForDate(date) +
+      ")."
+  };
+}
+
+export default async function DayProfilePage({ params }: DayPageProps) {
+  const { date } = await params;
+  const canonical = canonicalizePublicDatePath(date);
+  if (canonical) {
+    permanentRedirect("/day/" + canonical);
+  }
+
   const monument = formatPublicDate(date);
   const eraLine = eraLineForDate(date);
 
   return (
     <main className="page-shell">
-      <header className="masthead day-arrival" data-testid="day-arrival">
-        <p className="eyebrow">Historical perspective</p>
-        <h1>{monument ?? "Day profile: " + date}</h1>
-        {eraLine ? <p className="day-arrival__era">{eraLine}</p> : null}
-        <DateInputForm initialDate={date} />
-      </header>
-      <DayProfileClient date={date} />
+      <div className="day-layout">
+        <div className="day-layout__content">
+          <header className="masthead day-arrival" data-testid="day-arrival">
+            <p className="eyebrow">Historical perspective</p>
+            <h1>{monument ?? "Day profile: " + date}</h1>
+            {eraLine ? <p className="day-arrival__era">{eraLine}</p> : null}
+            <DateInputForm initialDate={date} />
+          </header>
+          <DayProfileClient date={date} />
+        </div>
+        <DayNavigation date={date} />
+      </div>
     </main>
   );
 }

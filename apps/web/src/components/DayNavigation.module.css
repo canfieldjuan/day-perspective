@@ -1,0 +1,47 @@
+.bar {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 0;
+  bottom: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  justify-content: center;
+  margin-top: 1.5rem;
+  padding: 0.5rem 0.75rem;
+  position: sticky;
+  z-index: 10;
+}
+
+.step {
+  align-items: center;
+  background: transparent;
+  border: 1px solid var(--muted-ink);
+  color: var(--ink);
+  display: inline-flex;
+  font-family: "Courier New", monospace;
+  font-size: 0.8rem;
+  gap: 0.35rem;
+  min-height: 44px;
+  padding: 0.4rem 0.8rem;
+  text-decoration: none;
+}
+
+.step:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+@media (min-width: 64rem) {
+  .bar {
+    border: none;
+    background: transparent;
+    bottom: auto;
+    flex-direction: column;
+    gap: 0.6rem;
+    margin-top: 0;
+    padding: 0;
+    position: sticky;
+    top: 2rem;
+  }
+}
