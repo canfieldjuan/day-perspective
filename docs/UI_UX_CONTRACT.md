@@ -81,10 +81,15 @@ events share equal weight.
 1. **Classes and derivation.** Every rendered statement gets exactly one
    base class from `deriveEvidenceClass(sectionKey, statement)` — a pure,
    never-throwing function using, in precedence order: (a) typed signals —
-   section key and `provenance.root_type`; (b) runtime-checked optional
-   `details` markers — `temporal_assignment`, `data_status` — as
-   refinement only. Unknown or malformed markers degrade to the
-   section-default class, never to a crash or a stronger claim.
+   the section key and the **provenance root**, meaning the validated
+   presence of a `resolved_claim` vs `derived_value` object (the payload
+   validator requires at least one, `day-profile.ts:103`; the optional,
+   unvalidated `root_type` field may corroborate but is never the
+   discriminant); (b) runtime-checked optional `details` markers —
+   `temporal_assignment`, `data_status` — as refinement only. Unknown or
+   malformed markers degrade to the section-default class, never to a
+   crash or a stronger claim. In the table below, "root X" refers to this
+   validated-presence definition.
 
 | Class key | Base derivation | Chip label (canonical) | Edge treatment |
 | --- | --- | --- | --- |
