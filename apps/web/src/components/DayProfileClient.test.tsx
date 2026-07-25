@@ -251,3 +251,37 @@ describe("DayProfileClient", () => {
     ).toBeInTheDocument();
   });
 });
+
+describe("DayProfileClient arrival panel", () => {
+  it("keeps the publication status inside the arrival panel", async () => {
+    const { render: renderArrival, screen: arrivalScreen, waitFor } = await import(
+      "@testing-library/react"
+    ).then((m) => ({ render: m.render, screen: m.screen, waitFor: m.waitFor }));
+    const fetchMock = vi.spyOn(global, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          status: "profile_not_published",
+          date: "1900-01-01",
+          profile_type: "limited_historical",
+          detail: "No profile has been published for this date yet."
+        }),
+        { status: 404, headers: { "Content-Type": "application/json" } }
+      )
+    );
+    try {
+      renderArrival(
+        <DayProfileClient
+          date="1900-01-01"
+          arrival={<h1>January 1, 1900</h1>}
+        />
+      );
+      const arrival = arrivalScreen.getByTestId("day-arrival");
+      expect(arrival).toHaveTextContent("January 1, 1900");
+      await waitFor(() =>
+        expect(arrival).toHaveTextContent("No profile is published for this date.")
+      );
+    } finally {
+      fetchMock.mockRestore();
+    }
+  });
+});

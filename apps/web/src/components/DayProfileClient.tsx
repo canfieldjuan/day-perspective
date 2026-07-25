@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, type ReactNode } from "react";
 import { isSupportedPublicDate } from "@/src/lib/date";
 import {
   isProfileNotPublished,
@@ -29,7 +29,13 @@ async function parseJson(response: Response): Promise<unknown> {
   }
 }
 
-export function DayProfileClient({ date }: { date: string }) {
+export function DayProfileClient({
+  date,
+  arrival
+}: {
+  date: string;
+  arrival?: ReactNode;
+}) {
   const [state, setState] = useState<{ date: string; view: ViewState }>({
     date,
     view: { kind: "loading" }
@@ -88,9 +94,27 @@ export function DayProfileClient({ date }: { date: string }) {
   const viewState: ViewState =
     state.date === date ? state.view : { kind: "loading" };
 
+  const statusLine = !isSupportedPublicDate(date)
+    ? "No profile request was made for this address."
+    : viewState.kind === "loading"
+      ? "Checking publication status"
+      : viewState.kind === "unpublished"
+        ? "No profile is published for this date."
+        : viewState.kind === "api-error"
+          ? "Publication status unavailable."
+          : "An evidence-backed profile is published for this date.";
+
+  const arrivalPanel = (
+    <header className="masthead day-arrival" data-testid="day-arrival">
+      {arrival}
+      <p className="publication-status">{statusLine}</p>
+    </header>
+  );
+
   if (!isSupportedPublicDate(date)) {
     return (
       <>
+        {arrivalPanel}
         <section className="state-panel state-panel--error" aria-labelledby="invalid-date-title">
           <p className="eyebrow">Date outside public shell</p>
           <h2 id="invalid-date-title">Choose a date from 1900-01-01 through 2025-12-31.</h2>
@@ -104,6 +128,7 @@ export function DayProfileClient({ date }: { date: string }) {
   if (viewState.kind === "unpublished") {
     return (
       <>
+        {arrivalPanel}
         <section
           className="state-panel state-panel--unpublished"
           aria-labelledby="unpublished-profile-title"
@@ -123,6 +148,7 @@ export function DayProfileClient({ date }: { date: string }) {
   if (viewState.kind === "api-error") {
     return (
       <>
+        {arrivalPanel}
         <section className="state-panel state-panel--error" aria-labelledby="api-error-title">
           <p className="eyebrow">Profile service unavailable</p>
           <h2 id="api-error-title">The profile could not be loaded.</h2>
@@ -149,9 +175,7 @@ export function DayProfileClient({ date }: { date: string }) {
   if (viewState.kind === "published") {
     return (
       <>
-        <p className="publication-status">
-          An evidence-backed profile is published for this date.
-        </p>
+        {arrivalPanel}
         <ProfileSections
           availability="published"
           sections={viewState.profile.sections}
@@ -166,8 +190,8 @@ export function DayProfileClient({ date }: { date: string }) {
 
   return (
     <>
+      {arrivalPanel}
       <section className="state-panel" aria-busy="true" aria-live="polite">
-        <p className="eyebrow">Checking publication status</p>
         <div className="loading-line" data-testid="loading-line" />
         <div className="loading-line loading-line--short" data-testid="loading-line" />
       </section>

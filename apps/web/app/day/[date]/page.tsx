@@ -14,13 +14,17 @@ export default async function DayProfilePage({
 
   return (
     <main className="page-shell">
-      <header className="masthead day-arrival" data-testid="day-arrival">
-        <p className="eyebrow">Historical perspective</p>
-        <h1>{monument ?? "Day profile: " + date}</h1>
-        {eraLine ? <p className="day-arrival__era">{eraLine}</p> : null}
-        <DateInputForm initialDate={date} />
-      </header>
-      <DayProfileClient date={date} />
+      <DayProfileClient
+        date={date}
+        arrival={
+          <>
+            <p className="eyebrow">Historical perspective</p>
+            <h1>{monument ?? "Day profile: " + date}</h1>
+            {eraLine ? <p className="day-arrival__era">{eraLine}</p> : null}
+            <DateInputForm initialDate={date} />
+          </>
+        }
+      />
     </main>
   );
 }
