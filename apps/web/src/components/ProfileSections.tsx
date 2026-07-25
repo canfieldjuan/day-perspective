@@ -2,6 +2,7 @@ import React from "react";
 
 import type { PublishedDayProfile } from "@day-perspective/contracts";
 import { DAY_PROFILE_SECTIONS } from "@/src/lib/day-profile";
+import { deriveEvidenceClass } from "@/src/lib/evidence-class";
 
 export type SectionAvailability = "loading" | "unpublished" | "api-error" | "published";
 
@@ -17,16 +18,29 @@ type ProfileSectionsProps = {
   sections?: PublishedDayProfile["sections"];
   sectionStates?: PublishedDayProfile["section_states"];
   sourceAttribution?: PublishedDayProfile["source_attribution"];
+  quality?: PublishedDayProfile["quality"];
+  profileDate?: string;
 };
 
 export function ProfileSections({
   availability,
   sections,
   sectionStates,
-  sourceAttribution
+  sourceAttribution,
+  quality,
+  profileDate
 }: ProfileSectionsProps) {
+  const profileYear = profileDate?.slice(0, 4) ?? "";
+
   return (
     <>
+      {availability === "published" && quality ? (
+        <aside className="state-panel" aria-labelledby="publication-quality-title">
+          <p className="eyebrow">Publication quality</p>
+          <h2 id="publication-quality-title">Grade {quality.grade}</h2>
+          <p>{quality.explanation}</p>
+        </aside>
+      ) : null}
       {availability === "published" && sourceAttribution ? (
         <aside className="state-panel" aria-labelledby="source-attribution-title">
           <p className="eyebrow">Source attribution</p>
@@ -49,9 +63,42 @@ export function ProfileSections({
             </span>
             <h2 id={headingId}>{section.title}</h2>
             {availability === "published" && statements && statements.length > 0 ? (
-              statements.map((statement) => (
-                <article className="profile-statement" key={statement.statement_id}>
+              statements.map((statement) => {
+                const evidenceClass = deriveEvidenceClass(section.key, statement);
+                const disputed =
+                  (statement.provenance?.dissenting_claims.length ?? 0) > 0;
+                const caveat = evidenceClass.caveat
+                  ? evidenceClass.caveat.replace(
+                      "{year}",
+                      profileYear || "the year"
+                    )
+                  : null;
+
+                return (
+                <article
+                  className="profile-statement"
+                  data-evidence-class={evidenceClass.key}
+                  key={statement.statement_id}
+                >
+                  <p className="evidence-chips">
+                    <span
+                      className="evidence-chip"
+                      data-evidence-class={evidenceClass.key}
+                      data-testid="evidence-chip"
+                    >
+                      {evidenceClass.label}
+                    </span>
+                    {disputed ? (
+                      <span
+                        className="evidence-chip evidence-chip--disputed"
+                        data-testid="evidence-chip"
+                      >
+                        Disputed — sources disagree
+                      </span>
+                    ) : null}
+                  </p>
                   <p>{statement.statement}</p>
+                  {caveat ? <p className="evidence-caveat">{caveat}</p> : null}
                   {statement.provenance_note ? (
                     <p className="profile-statement__provenance">{statement.provenance_note}</p>
                   ) : null}
@@ -116,7 +163,8 @@ export function ProfileSections({
                     </details>
                   ) : null}
                 </article>
-              ))
+                );
+              })
             ) : (
               <p>
                 {availability === "published"
