@@ -17,10 +17,10 @@ test("a valid date departs to its day page", async ({ page }) => {
   await page.goto("/");
   await expect(page.getByTestId("era-horizon")).toBeVisible();
 
+  const eraLive = page.getByTestId("era-live");
+  await expect(eraLive).toHaveText("");
   await page.getByLabel("Date").fill("1964-03-27");
-  await expect(
-    page.getByText("Standard statistical era · 1950–1988").first()
-  ).toBeVisible();
+  await expect(eraLive).toHaveText("Standard statistical era · 1950–1988");
 
   await page.getByRole("button", { name: "Open profile" }).click();
   await expect(page).toHaveURL(/\/day\/1964-03-27$/);

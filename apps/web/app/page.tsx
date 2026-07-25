@@ -25,7 +25,7 @@ export default function HomePage() {
               className="era-horizon__segment"
               data-era={band.key}
               key={band.key}
-              style={{ flexGrow: bandYears(band) }}
+              style={{ flex: bandYears(band) + " 1 0" }}
             >
               <span className="era-horizon__label">{band.line}</span>
             </div>

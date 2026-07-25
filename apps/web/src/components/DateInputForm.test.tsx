@@ -31,3 +31,24 @@ describe("DateInputForm navigation intent", () => {
     expect(hasNavigated()).toBe(true);
   });
 });
+
+describe("DateInputForm live era feedback", () => {
+  beforeEach(() => {
+    resetArrivalsForTests();
+  });
+
+  it("keeps the live region mounted but empty until the user edits", () => {
+    render(<DateInputForm initialDate="1964-03-27" />);
+    expect(screen.getByTestId("era-live")).toHaveTextContent("");
+  });
+
+  it("announces the typed date's era after an edit", () => {
+    render(<DateInputForm />);
+    fireEvent.change(screen.getByLabelText("Date"), {
+      target: { value: "1900-06-15" }
+    });
+    expect(screen.getByTestId("era-live")).toHaveTextContent(
+      "Limited historical era · 1900–1949"
+    );
+  });
+});
