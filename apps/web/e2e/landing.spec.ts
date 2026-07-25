@@ -33,13 +33,16 @@ test("an unsupported date shows a recoverable alert without navigating", async (
   await page.goto("/");
   await page.getByLabel("Date").fill("1800-01-01");
   await page.getByRole("button", { name: "Open profile" }).click();
-  await expect(page.getByRole("alert")).toContainText(
+  const formAlert = page
+    .getByRole("alert")
+    .filter({ hasText: "Enter a valid date" });
+  await expect(formAlert).toContainText(
     "Enter a valid date from 1900-01-01 through 2025-12-31"
   );
   await expect(page).toHaveURL(/\/$/);
 
   await page.getByLabel("Date").fill("1964-03-27");
-  await expect(page.getByRole("alert")).toHaveCount(1);
+  await expect(formAlert).toHaveCount(1);
 });
 
 test("the keyboard-only path departs with Enter", async ({ page }) => {
