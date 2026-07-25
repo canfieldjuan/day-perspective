@@ -25,6 +25,10 @@ test("a valid date departs to its day page", async ({ page }) => {
   await page.getByRole("button", { name: "Open profile" }).click();
   await expect(page).toHaveURL(/\/day\/1964-03-27$/);
   await expect(page.getByTestId("day-arrival")).toContainText("March 27, 1964");
+  await expect(page.getByTestId("travel-shell")).toHaveAttribute(
+    "data-entry",
+    "initial"
+  );
 });
 
 test("an unsupported date shows a recoverable alert without navigating", async ({
