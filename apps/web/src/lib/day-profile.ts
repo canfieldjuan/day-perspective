@@ -190,6 +190,29 @@ export function isPublishedProfileResponse(
     return false;
   }
 
+  if (profile.quality !== undefined) {
+    const quality = asRecord(profile.quality);
+    if (
+      quality === undefined ||
+      typeof quality.grade !== "string" ||
+      typeof quality.explanation !== "string"
+    ) {
+      return false;
+    }
+  }
+
+  if (profile.source_attribution !== undefined) {
+    const attribution = asRecord(profile.source_attribution);
+    if (
+      attribution === undefined ||
+      typeof attribution.name !== "string" ||
+      typeof attribution.publisher !== "string" ||
+      typeof attribution.url !== "string"
+    ) {
+      return false;
+    }
+  }
+
   const sections = asRecord(profile.sections);
   return (
     sections !== undefined &&
