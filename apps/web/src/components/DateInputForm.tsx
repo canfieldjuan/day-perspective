@@ -9,6 +9,7 @@ import {
   isSupportedPublicDate
 } from "@/src/lib/date";
 import { eraLineForDate } from "@/src/lib/day-profile";
+import { markNavigation } from "@/src/lib/travel-store";
 
 type DateInputFormProps = {
   initialDate?: string;
@@ -34,6 +35,7 @@ export function DateInputForm({ initialDate = "" }: DateInputFormProps) {
     }
 
     setError(null);
+    markNavigation();
     router.push("/day/" + date);
   }
 

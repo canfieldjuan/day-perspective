@@ -10,4 +10,14 @@ describe("travel store", () => {
     resetArrivalsForTests();
     expect(recordArrival()).toBe(1);
   });
+
+  it("remembers user navigation independently of completed arrivals", async () => {
+    const { hasNavigated, markNavigation } = await import("./travel-store");
+    resetArrivalsForTests();
+    expect(hasNavigated()).toBe(false);
+    markNavigation();
+    expect(hasNavigated()).toBe(true);
+    resetArrivalsForTests();
+    expect(hasNavigated()).toBe(false);
+  });
 });
