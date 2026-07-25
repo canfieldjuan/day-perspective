@@ -613,6 +613,19 @@ def test_quality_assessment_is_published_with_grade_and_explanation(
     assert assessment is not None
     assert assessment.public_grade == "B"
     assert "single-source" in (assessment.public_explanation or "").lower()
+    assessment.public_grade = "A"
+    assessment.public_explanation = "Contradictory mutable assessment."
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+    profile = publish_golden_profile(session, store=store)
+    manifest = session.get(PublicationManifest, profile.publication_manifest_id)
+    assert manifest is not None
+    payload = store.read(manifest.storage_uri, manifest.content_hash)
+    assert payload["quality"]["grade"] == "B"
+    assert payload["quality"]["explanation"] != assessment.public_explanation
+    assert (
+        payload["sections"]["evidence_notes"][0]["statement"]
+        == payload["quality"]["explanation"]
+    )
 
 
 def test_development_review_guard_is_explicit_and_blocks_unguarded_access(

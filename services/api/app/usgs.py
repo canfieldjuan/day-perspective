@@ -1159,14 +1159,15 @@ def publish_golden_profile(
             select(Claim).where(Claim.source_release_id == release.id)
         )
     }
-    quality = session.scalar(
-        select(QualityAssessment).where(
-            QualityAssessment.source_release_id == release.id,
-            QualityAssessment.assessment_kind == "public_event_evidence_quality_v1",
+    quality_value = quality_derived.value_json or {}
+    quality_grade = quality_value.get("quality_grade")
+    quality_explanation = quality_value.get("explanation")
+    if not isinstance(quality_grade, str) or not isinstance(
+        quality_explanation, str
+    ):
+        raise ValueError(
+            "The selected derived quality root lacks a public grade or explanation."
         )
-    )
-    if quality is None or quality.public_grade is None or quality.public_explanation is None:
-        raise ValueError("A public quality assessment is required before publication.")
     un_context = build_un_wpp_profile_content(session)
     ucdp_context = build_ucdp_annual_profile_content(session)
     resolved_values = {
@@ -1280,7 +1281,7 @@ def publish_golden_profile(
         )
     evidence_statement = {
         "statement_id": "quality-assessment",
-        "statement": quality.public_explanation,
+        "statement": quality_explanation,
         "details": quality_derived.value_json,
         "provenance_note": "Quality methodology v1; no opaque weighted truth score.",
         "provenance": _public_quality_provenance(
@@ -1328,8 +1329,8 @@ def publish_golden_profile(
             for key in sections
         },
         "quality": {
-            "grade": quality.public_grade,
-            "explanation": quality.public_explanation,
+            "grade": quality_grade,
+            "explanation": quality_explanation,
         },
         "source_attribution": {
             "name": source.name,

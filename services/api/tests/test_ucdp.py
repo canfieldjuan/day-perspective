@@ -19,6 +19,7 @@ from app.models import (
     EventLocation,
     EventTime,
     ImpactDirectness,
+    Metric,
     PipelineRun,
     QualityAssessment,
     QualityCheck,
@@ -28,6 +29,7 @@ from app.models import (
     SourceRelease,
     TemporalAssignment,
 )
+from app.services import supersede_claim
 from app.ucdp import (
     LocalFilesystemRawSourceStore,
     build_ucdp_annual_profile_content,
@@ -171,6 +173,43 @@ def test_revised_ucdp_release_versions_resolutions_and_selects_current_context(
     )
     assert selected_derived is not None
     assert selected_derived.id == second_derived.id
+    metric = session.scalar(
+        select(Metric).where(
+            Metric.metric_key == "ucdp:active_state_based_conflict_count"
+        )
+    )
+    assert metric is not None
+    assert metric.provenance_resolved_claim_id in {
+        row.id for row in content.resolved_claims
+    }
+
+
+def test_superseded_ucdp_input_blocks_stale_annual_publication(
+    session: Session, tmp_path: Path
+) -> None:
+    result = ingest_ucdp_annual(
+        session,
+        fixture_path=ANNUAL_FIXTURE,
+        raw_store=LocalFilesystemRawSourceStore(tmp_path / "raw"),
+    )
+    review_ucdp_annual(session, result.source_release_id)
+    prior = session.scalar(
+        select(Claim)
+        .where(Claim.source_release_id == result.source_release_id)
+        .order_by(Claim.source_record_locator)
+    )
+    assert prior is not None
+    supersede_claim(
+        session,
+        prior_claim=prior,
+        assertion_text="Unreviewed corrected conflict-year record.",
+        assertion_json=prior.assertion_json,
+    )
+
+    with pytest.raises(
+        ValueError, match="exactly 25 current accepted claims"
+    ):
+        build_ucdp_annual_profile_content(session)
 
 
 def test_ucdp_ged_fixture_builds_bounded_direct_event_impact(

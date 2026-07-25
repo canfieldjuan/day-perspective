@@ -491,6 +491,9 @@ def review_ucdp_annual(session: Session, source_release_id: UUID) -> DerivedValu
             )
             session.add(metric)
             session.flush()
+        else:
+            metric.provenance_resolved_claim_id = resolved[0].id
+            metric.methodology_id = methodology.id
         derived = DerivedValue(
             metric_id=metric.id,
             methodology_id=methodology.id,
@@ -587,29 +590,73 @@ def build_ucdp_annual_profile_content(session: Session) -> UCDPAnnualProfileCont
     )
     if release is None:
         raise ValueError("UCDP annual release has not been ingested.")
-    derived = session.scalar(
+    current_claims = list(
+        session.scalars(
+            select(Claim).where(Claim.source_release_id == release.id)
+        )
+    )
+    if len(current_claims) != 25 or any(
+        claim.assertion_status != ClaimAssertionStatus.ACCEPTED
+        for claim in current_claims
+    ):
+        raise ValueError(
+            "UCDP annual publication requires exactly 25 current accepted claims."
+        )
+    unresolved_task = session.scalar(
+        select(ReviewTask).where(
+            ReviewTask.claim_id.in_([claim.id for claim in current_claims]),
+            ReviewTask.status.in_(("open", "in_progress")),
+        )
+    )
+    if unresolved_task is not None:
+        raise ValueError("UCDP annual publication requires completed claim review.")
+    resolution_rows = list(
+        session.execute(
+            select(Claim.id, ResolvedClaim)
+            .join(
+                ResolvedClaimEvidence,
+                ResolvedClaimEvidence.claim_id == Claim.id,
+            )
+            .join(
+                ResolvedClaim,
+                ResolvedClaim.id == ResolvedClaimEvidence.resolved_claim_id,
+            )
+            .where(
+                Claim.id.in_([claim.id for claim in current_claims]),
+                ResolvedClaimEvidence.stance == "supporting",
+            )
+            .order_by(ResolvedClaim.version.desc())
+        )
+    )
+    current_resolutions: dict[UUID, ResolvedClaim] = {}
+    for claim_id, resolution in resolution_rows:
+        current_resolutions.setdefault(claim_id, resolution)
+    if len(current_resolutions) != len(current_claims):
+        raise ValueError(
+            "UCDP annual publication requires a resolution for every current claim."
+        )
+    current_resolution_ids = {
+        resolution.id for resolution in current_resolutions.values()
+    }
+    derived = None
+    for candidate in session.scalars(
         select(DerivedValue)
-        .join(
-            DerivedValueInput,
-            DerivedValueInput.derived_value_id == DerivedValue.id,
-        )
-        .join(
-            ResolvedClaim,
-            ResolvedClaim.id == DerivedValueInput.resolved_claim_id,
-        )
-        .join(
-            ResolvedClaimEvidence,
-            ResolvedClaimEvidence.resolved_claim_id == ResolvedClaim.id,
-        )
-        .join(Claim, Claim.id == ResolvedClaimEvidence.claim_id)
         .where(
             DerivedValue.value_kind == "active_state_based_conflict_count",
             DerivedValue.period_start == date(1964, 1, 1),
-            Claim.source_release_id == release.id,
-            ResolvedClaimEvidence.stance == "supporting",
         )
-        .distinct()
-    )
+        .order_by(DerivedValue.created_at.desc())
+    ):
+        candidate_input_ids = set(
+            session.scalars(
+                select(DerivedValueInput.resolved_claim_id).where(
+                    DerivedValueInput.derived_value_id == candidate.id
+                )
+            )
+        )
+        if candidate_input_ids == current_resolution_ids:
+            derived = candidate
+            break
     if derived is None:
         raise ValueError("UCDP annual context has not been reviewed and derived.")
     methodology = session.get(Methodology, derived.methodology_id)
