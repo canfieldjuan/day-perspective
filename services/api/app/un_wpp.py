@@ -86,6 +86,7 @@ GOLDEN_DATE = date(1964, 3, 27)
 SUPPORTED_YEARS = frozenset(range(1950, 2026))
 ESTIMATE_YEARS = frozenset(range(1950, 2024))
 PROJECTION_YEARS = frozenset({2024, 2025})
+BASELINE_YEAR = min(SUPPORTED_YEARS)
 
 METRIC_DEFINITIONS = {
     "population_midyear": (
@@ -463,6 +464,10 @@ def ingest_un_wpp(
             )
         checksum = hashlib.sha256(payload).hexdigest()
         stage = "validation"
+        if mode == "live" and checksum != UN_WPP_WORKBOOK_SHA256:
+            raise ValueError(
+                "Live UN WPP workbook checksum does not match pinned GEN/01/REV1."
+            )
         records = _parse(payload, input_format=input_format)
         if dry_run:
             run.status = "succeeded"
@@ -820,6 +825,9 @@ def review_un_wpp(
             )
             session.add(metric)
             session.flush()
+        elif year == BASELINE_YEAR:
+            metric.provenance_resolved_claim_id = resolved_row.id
+            metric.methodology_id = methodology.id
         observation = session.scalar(
             select(Observation).where(
                 Observation.metric_id == metric.id,
@@ -920,6 +928,28 @@ def review_un_wpp(
                     "annual_thousands": str(annual_thousands),
                 }
             )
+            daily_metric_key = f"app:average_daily_{predicate[7:]}"
+            daily_metric = session.scalar(
+                select(Metric).where(Metric.metric_key == daily_metric_key)
+            )
+            if daily_metric is None:
+                daily_metric = Metric(
+                    metric_key=daily_metric_key,
+                    display_name=f"Average daily {predicate[7:]}",
+                    unit="persons per day",
+                    definition=(
+                        "Uniform daily equivalent calculated from an annual "
+                        "total; not a date-specific observation."
+                    ),
+                    data_status=DataStatus.MODELED,
+                    provenance_resolved_claim_id=resolved_input.id,
+                    methodology_id=methodology.id,
+                )
+                session.add(daily_metric)
+                session.flush()
+            elif year == BASELINE_YEAR:
+                daily_metric.provenance_resolved_claim_id = resolved_input.id
+                daily_metric.methodology_id = methodology.id
             derived = session.scalar(
                 select(DerivedValue).where(
                     DerivedValue.value_kind
@@ -929,27 +959,6 @@ def review_un_wpp(
                 )
             )
             if derived is None:
-                daily_metric_key = f"app:average_daily_{predicate[7:]}"
-                daily_metric = session.scalar(
-                    select(Metric).where(
-                        Metric.metric_key == daily_metric_key
-                    )
-                )
-                if daily_metric is None:
-                    daily_metric = Metric(
-                        metric_key=daily_metric_key,
-                        display_name=f"Average daily {predicate[7:]}",
-                        unit="persons per day",
-                        definition=(
-                            "Uniform daily equivalent calculated from an annual "
-                            "total; not a date-specific observation."
-                        ),
-                        data_status=DataStatus.MODELED,
-                        provenance_resolved_claim_id=resolved_input.id,
-                        methodology_id=methodology.id,
-                    )
-                    session.add(daily_metric)
-                    session.flush()
                 derived = DerivedValue(
                     metric_id=daily_metric.id,
                     methodology_id=methodology.id,

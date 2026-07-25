@@ -181,7 +181,7 @@ MVP and is not production-ready.
 
 ## Blocked or Missing MVP Work
 
-- Full supported-year UN and UCDP pipelines
+- Full supported-year UCDP pipeline and revision processing
 - Wikidata people, organizations, births, deaths, aliases, identifiers and
   merge workflows
 - Curated apocalypse catalog

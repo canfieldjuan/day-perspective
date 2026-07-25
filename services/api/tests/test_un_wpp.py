@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 from datetime import date
 from decimal import Decimal
+from io import BytesIO
 from pathlib import Path
 from typing import NoReturn
 from urllib.error import URLError
@@ -18,6 +19,7 @@ from app.models import (
     ClaimAssertionStatus,
     DataStatus,
     DerivedValue,
+    Methodology,
     Metric,
     PipelineRun,
     QualityCheck,
@@ -408,6 +410,45 @@ def test_review_derives_every_supported_year_with_gregorian_denominators(
         )
         assert year_provenance is not None
         assert year_provenance.canonical_key == f"un-wpp:world:{year}:annual_births"
+    stale_provenance = session.scalar(
+        select(ResolvedClaim).where(
+            ResolvedClaim.canonical_key == "un-wpp:world:1964:annual_births"
+        )
+    )
+    assert stale_provenance is not None
+    reconciled_metrics = list(
+        session.scalars(
+            select(Metric).where(
+                Metric.metric_key.in_(
+                    ("un-wpp:annual_births", "app:average_daily_births")
+                )
+            )
+        )
+    )
+    assert len(reconciled_metrics) == 2
+    for metric in reconciled_metrics:
+        metric.provenance_resolved_claim_id = stale_provenance.id
+        metric.methodology_id = None
+    session.flush()
+
+    review_un_wpp(session, result.source_release_id)
+
+    methodology = session.scalar(
+        select(Methodology).where(
+            Methodology.slug == "un-wpp-annual-context",
+            Methodology.version == "2",
+        )
+    )
+    assert methodology is not None
+    for metric in reconciled_metrics:
+        session.refresh(metric)
+        metric_provenance = session.get(
+            ResolvedClaim,
+            metric.provenance_resolved_claim_id,
+        )
+        assert metric.methodology_id == methodology.id
+        assert metric_provenance is not None
+        assert metric_provenance.canonical_key == "un-wpp:world:1950:annual_births"
 
 
 def test_profile_content_selects_requested_projection_year(
@@ -501,6 +542,36 @@ def test_live_retrieval_failure_records_failed_run_and_check(
     assert run.status == "failed"
     assert run.details["failure_stage"] == "retrieval"
     assert check.check_name == "un_wpp_retrieval"
+    assert check.status == "failed"
+    assert session.scalar(select(func.count()).select_from(SourceRelease)) == 0
+
+
+def test_live_retrieval_rejects_an_unpinned_workbook(
+    session: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def changed_live_response(*args: object, **kwargs: object) -> BytesIO:
+        return BytesIO(b"structurally irrelevant changed workbook")
+
+    monkeypatch.setattr(
+        "app.un_wpp.urllib.request.urlopen",
+        changed_live_response,
+    )
+
+    with pytest.raises(ValueError, match="does not match pinned GEN/01/REV1"):
+        ingest_un_wpp(
+            session,
+            raw_store=LocalFilesystemRawSourceStore(tmp_path / "raw"),
+        )
+
+    run = session.scalar(select(PipelineRun))
+    check = session.scalar(select(QualityCheck))
+    assert run is not None
+    assert check is not None
+    assert run.status == "failed"
+    assert run.details["failure_stage"] == "validation"
+    assert check.check_name == "un_wpp_schema_supported_world_years"
     assert check.status == "failed"
     assert session.scalar(select(func.count()).select_from(SourceRelease)) == 0
 

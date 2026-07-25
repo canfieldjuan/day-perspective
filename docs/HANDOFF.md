@@ -422,7 +422,7 @@ Full rationale is in `docs/DECISIONS.md`.
 
 - Only one date is published. Severity: release blocker.
 - Golden 100 records are not reviewed or generated. Severity: release blocker.
-- UN and UCDP support only selected fixtures, not full supported-year releases.
+- UCDP supports only selected fixtures, not full supported-year releases.
   Severity: release blocker.
 - Apocalypse, wonder/progress and comparison systems are absent. Severity:
   release blocker.
