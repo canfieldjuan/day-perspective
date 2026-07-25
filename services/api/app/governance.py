@@ -275,6 +275,14 @@ def record_claim_review(
     rationale: str,
     reviewed_by: str,
 ) -> ClaimReviewDecision:
+    # Serialize terminal decisions per claim and re-read the current status
+    # under the lock so a stale reviewer cannot append a second terminal
+    # decision (issue #4).
+    lock_key = f"claim-review:{claim.id}"
+    session.execute(
+        select(func.pg_advisory_xact_lock(func.hashtextextended(lock_key, 0)))
+    )
+    session.refresh(claim)
     if claim.assertion_status not in {
         ClaimAssertionStatus.CANDIDATE,
         ClaimAssertionStatus.IN_REVIEW,

@@ -4,15 +4,17 @@ import hashlib
 import json
 import os
 import tempfile
+import time
 from collections.abc import Iterable
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Protocol
 from uuid import UUID
 
-from sqlalchemy import event, func, or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
@@ -110,23 +112,6 @@ class StagedProfileWrite:
             self.created_destination = False
 
 
-_PENDING_PROFILE_WRITES = "pending_profile_writes"
-
-
-@event.listens_for(Session, "after_commit")
-def _finalize_profile_writes(session: Session) -> None:
-    pending = session.info.pop(_PENDING_PROFILE_WRITES, [])
-    for staged in pending:
-        staged.finalize()
-
-
-@event.listens_for(Session, "after_rollback")
-def _discard_profile_writes(session: Session) -> None:
-    pending = session.info.pop(_PENDING_PROFILE_WRITES, [])
-    for staged in pending:
-        staged.discard()
-
-
 class LocalFilesystemPublishedProfileStore:
     def __init__(self, root: Path) -> None:
         self.root = root.resolve()
@@ -156,16 +141,6 @@ class LocalFilesystemPublishedProfileStore:
                 os.unlink(temporary_path)
         return relative.as_posix()
 
-    def write_versioned(
-        self,
-        profile_date: date,
-        version: int,
-        payload: dict[str, Any],
-    ) -> str:
-        staged = self.stage_versioned(profile_date, version, payload)
-        staged.finalize()
-        return staged.storage_uri
-
     def stage_versioned(
         self,
         profile_date: date,
@@ -179,20 +154,21 @@ class LocalFilesystemPublishedProfileStore:
             raise RuntimeError("Refused profile write outside the configured storage root.")
         destination.parent.mkdir(parents=True, exist_ok=True)
         if destination.exists():
-            try:
-                self.read(relative.as_posix(), digest)
-                return StagedProfileWrite(
-                    relative.as_posix(), None, destination, digest, self
-                )
-            except RuntimeError:
-                destination.unlink()
-        descriptor, temporary_path = tempfile.mkstemp(prefix=".profile-", dir=destination.parent)
-        with os.fdopen(descriptor, "wb") as handle:
+            # Never destroy an existing final artifact here: verification
+            # failures are reconciliation's job, not staging's.
+            self.read(relative.as_posix(), digest)
+            return StagedProfileWrite(
+                relative.as_posix(), None, destination, digest, self
+            )
+        # Deterministic temp path so reconciliation can pair an interrupted
+        # publication's payload with its pending manifest.
+        temporary_path = destination.with_name(destination.name + ".tmp")
+        with open(temporary_path, "wb") as handle:
             handle.write(canonical_json_bytes(payload))
             handle.flush()
             os.fsync(handle.fileno())
         return StagedProfileWrite(
-            relative.as_posix(), Path(temporary_path), destination, digest, self
+            relative.as_posix(), temporary_path, destination, digest, self
         )
 
     def read(self, storage_uri: str, expected_hash: str) -> dict[str, Any]:
@@ -954,6 +930,210 @@ def _validate_profile_supersession(
         raise ValueError("Profile supersession must retain the same date and profile type.")
 
 
+@dataclass
+class PublicationReconcileReport:
+    completed_pending: int = 0
+    abandoned_pending: int = 0
+    completed_missing_profiles: int = 0
+    orphan_artifacts: int = 0
+    hash_mismatches: int = 0
+    stale_temps_removed: int = 0
+    healthy_published: int = 0
+    details: list[str] = dataclass_field(default_factory=list)
+
+
+def reconcile_publications(
+    session: Session,
+    *,
+    store: LocalFilesystemPublishedProfileStore,
+    repair: bool = False,
+    stale_temp_max_age_seconds: int = 3600,
+) -> PublicationReconcileReport:
+    """Deterministic recovery for every interrupted-publication state.
+
+    Pending manifests whose payload survives (as the staged temp or the
+    promoted artifact) are completed; pending manifests with no payload are
+    abandoned (withdrawn) for later republication; published manifests are
+    verified against their artifacts; unmatched final artifacts and
+    mismatched artifacts are quarantined, never silently deleted; stale
+    staging temps are swept. Report-only unless repair=True.
+    """
+    report = PublicationReconcileReport()
+    root = store.root
+
+    pending_manifests = list(
+        session.scalars(
+            select(PublicationManifest).where(
+                PublicationManifest.status == PublicationStatus.DRAFT,
+                PublicationManifest.storage_uri != "pending://local-filesystem-write",
+            )
+        )
+    )
+    for manifest in pending_manifests:
+        destination = root / manifest.storage_uri
+        temp = destination.with_name(destination.name + ".tmp")
+        payload_ready = False
+        if destination.exists():
+            try:
+                store.read(manifest.storage_uri, manifest.content_hash)
+                payload_ready = True
+            except RuntimeError:
+                report.hash_mismatches += 1
+                report.details.append(
+                    f"pending manifest {manifest.id} artifact hash mismatch: "
+                    f"{manifest.storage_uri}"
+                )
+                if repair:
+                    _quarantine(root, destination)
+        if not payload_ready and temp.exists():
+            staged_payload = json.loads(temp.read_text(encoding="utf-8"))
+            if content_hash(staged_payload) == manifest.content_hash:
+                if repair:
+                    staged = StagedProfileWrite(
+                        manifest.storage_uri,
+                        temp,
+                        destination,
+                        manifest.content_hash,
+                        store,
+                    )
+                    staged.finalize()
+                    store.read(manifest.storage_uri, manifest.content_hash)
+                    payload_ready = True
+            else:
+                report.details.append(
+                    f"pending manifest {manifest.id} staged payload mismatch: "
+                    f"{temp}"
+                )
+                if repair:
+                    _quarantine(root, temp)
+        if payload_ready:
+            report.completed_pending += 1
+            if repair:
+                _acquire_publication_lock(
+                    session, manifest.profile_date, manifest.profile_type
+                )
+                manifest.status = PublicationStatus.PUBLISHED
+                manifest.published_at = datetime.now(UTC)
+                _ensure_day_profile(session, manifest)
+                session.commit()
+        else:
+            report.abandoned_pending += 1
+            report.details.append(
+                f"pending manifest {manifest.id} has no recoverable payload"
+            )
+            if repair:
+                manifest.status = PublicationStatus.WITHDRAWN
+                manifest.metadata_json = {
+                    **(manifest.metadata_json or {}),
+                    "withdrawn_reason": "reconciliation: no recoverable payload",
+                }
+                session.commit()
+
+    published_manifests = list(
+        session.scalars(
+            select(PublicationManifest).where(
+                PublicationManifest.status == PublicationStatus.PUBLISHED
+            )
+        )
+    )
+    known_uris = {manifest.storage_uri for manifest in published_manifests} | {
+        manifest.storage_uri for manifest in pending_manifests
+    }
+    for manifest in published_manifests:
+        destination = root / manifest.storage_uri
+        try:
+            store.read(manifest.storage_uri, manifest.content_hash)
+        except (RuntimeError, OSError, ValueError):
+            report.hash_mismatches += 1
+            report.details.append(
+                f"published manifest {manifest.id} failed verification: "
+                f"{manifest.storage_uri}"
+            )
+            if repair and destination.exists():
+                _quarantine(root, destination)
+            continue
+        created = _ensure_day_profile(session, manifest) if repair else False
+        if created:
+            report.completed_missing_profiles += 1
+            session.commit()
+        else:
+            report.healthy_published += 1
+
+    day_root = root / "day"
+    if day_root.exists():
+        for artifact in sorted(day_root.rglob("profile-v*.json")):
+            relative = artifact.relative_to(root).as_posix()
+            if relative not in known_uris:
+                report.orphan_artifacts += 1
+                report.details.append(f"orphan artifact: {relative}")
+                if repair:
+                    _quarantine(root, artifact)
+        now = time.time()
+        for temp in sorted(day_root.rglob("*")):
+            if not temp.is_file():
+                continue
+            name = temp.name
+            if not (name.endswith(".json.tmp") or name.startswith(".profile-")):
+                continue
+            if now - temp.stat().st_mtime < stale_temp_max_age_seconds:
+                continue
+            report.stale_temps_removed += 1
+            report.details.append(f"stale temp: {temp.relative_to(root).as_posix()}")
+            if repair:
+                temp.unlink(missing_ok=True)
+
+    return report
+
+
+def _ensure_day_profile(session: Session, manifest: PublicationManifest) -> bool:
+    existing = session.scalar(
+        select(DayProfile).where(
+            DayProfile.publication_manifest_id == manifest.id
+        )
+    )
+    if existing is not None:
+        return False
+    session.add(
+        DayProfile(
+            profile_date=manifest.profile_date,
+            profile_type=manifest.profile_type,
+            publication_manifest_id=manifest.id,
+            content_hash=manifest.content_hash,
+        )
+    )
+    session.flush()
+    return True
+
+
+def _quarantine(root: Path, target: Path) -> None:
+    relative = target.relative_to(root)
+    destination = root / "quarantine" / relative
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    os.replace(target, destination)
+
+
+class PendingPublicationError(RuntimeError):
+    """A pending publication with different content blocks this attempt."""
+
+
+def publication_advisory_lock_key(profile_date: date, profile_type: ProfileType) -> str:
+    return f"publication:{profile_date.isoformat()}:{profile_type.value}"
+
+
+def _acquire_publication_lock(
+    session: Session, profile_date: date, profile_type: ProfileType
+) -> None:
+    session.execute(
+        select(
+            func.pg_advisory_xact_lock(
+                func.hashtextextended(
+                    publication_advisory_lock_key(profile_date, profile_type), 0
+                )
+            )
+        )
+    )
+
+
 def publish_day_profile(
     session: Session,
     *,
@@ -967,91 +1147,179 @@ def publish_day_profile(
     methodology_id: UUID | None = None,
     editorial_revision: int = 1,
     manifest_metadata: dict[str, Any] | None = None,
+    force_new_version: bool = False,
 ) -> DayProfile:
+    """Two-phase, fail-closed publication.
+
+    Phase one commits a durable pending state (DRAFT manifest + staged
+    payload beside its final path) under a per-(date, type) advisory lock;
+    phase two promotes the artifact, verifies it against the manifest, and
+    commits completion. A crash between phases leaves state that
+    reconcile_publications() can always finish or safely abandon. The
+    function owns its commits; identical already-published content is an
+    idempotent no-op unless force_new_version or supersession is requested.
+    """
     if profile_type_for_date(profile_date) != profile_type:
         raise ValueError("The profile type does not match the public date band.")
-    evidence = _validate_statement_evidence(
-        session,
-        payload,
-        statement_evidence,
-        profile_date=profile_date,
-        profile_type=profile_type,
-    )
-    snapshotted_evidence = _snapshot_statement_evidence(session, evidence)
-    _validate_profile_supersession(
-        session,
-        profile_date=profile_date,
-        profile_type=profile_type,
-        supersedes_manifest_id=supersedes_manifest_id,
-        supersedes_day_profile_id=supersedes_day_profile_id,
-    )
-    version = (
-        session.scalar(
-            select(func.coalesce(func.max(PublicationManifest.version), 0)).where(
+    digest = content_hash(payload)
+
+    staged: StagedProfileWrite | None = None
+    try:
+        _acquire_publication_lock(session, profile_date, profile_type)
+
+        latest_published = session.scalar(
+            select(PublicationManifest)
+            .where(
                 PublicationManifest.profile_date == profile_date,
                 PublicationManifest.profile_type == profile_type,
+                PublicationManifest.status == PublicationStatus.PUBLISHED,
+            )
+            .order_by(PublicationManifest.version.desc())
+            .limit(1)
+        )
+        if (
+            latest_published is not None
+            and latest_published.content_hash == digest
+            and supersedes_manifest_id is None
+            and not force_new_version
+        ):
+            existing_profile = session.scalar(
+                select(DayProfile).where(
+                    DayProfile.publication_manifest_id == latest_published.id
+                )
+            )
+            if existing_profile is not None:
+                store.read(latest_published.storage_uri, digest)
+                session.commit()
+                return existing_profile
+
+        pending = session.scalar(
+            select(PublicationManifest)
+            .where(
+                PublicationManifest.profile_date == profile_date,
+                PublicationManifest.profile_type == profile_type,
+                PublicationManifest.status == PublicationStatus.DRAFT,
+            )
+            .order_by(PublicationManifest.version.desc())
+            .limit(1)
+        )
+        if pending is not None:
+            if pending.content_hash != digest:
+                raise PendingPublicationError(
+                    "A pending publication with different content exists for "
+                    "this date; run publication reconciliation before "
+                    "publishing again."
+                )
+            manifest = pending
+            staged = store.stage_versioned(profile_date, manifest.version, payload)
+        else:
+            evidence = _validate_statement_evidence(
+                session,
+                payload,
+                statement_evidence,
+                profile_date=profile_date,
+                profile_type=profile_type,
+            )
+            snapshotted_evidence = _snapshot_statement_evidence(session, evidence)
+            _validate_profile_supersession(
+                session,
+                profile_date=profile_date,
+                profile_type=profile_type,
+                supersedes_manifest_id=supersedes_manifest_id,
+                supersedes_day_profile_id=supersedes_day_profile_id,
+            )
+            version = (
+                session.scalar(
+                    select(
+                        func.coalesce(func.max(PublicationManifest.version), 0)
+                    ).where(
+                        PublicationManifest.profile_date == profile_date,
+                        PublicationManifest.profile_type == profile_type,
+                    )
+                )
+                or 0
+            ) + 1
+            manifest = PublicationManifest(
+                profile_date=profile_date,
+                profile_type=profile_type,
+                version=version,
+                editorial_revision=editorial_revision,
+                status=PublicationStatus.DRAFT,
+                content_hash=digest,
+                source_snapshot_hash=_source_snapshot_hash(snapshotted_evidence),
+                storage_uri="pending://local-filesystem-write",
+                code_version=get_settings().service_version,
+                methodology_id=methodology_id,
+                supersedes_manifest_id=supersedes_manifest_id,
+                metadata_json={
+                    "evidence_snapshot_schema_version": "1",
+                    "statement_evidence_hashes": [
+                        {
+                            "statement_path": item.evidence.statement_path,
+                            "evidence_snapshot_hash": item.snapshot_hash,
+                        }
+                        for item in snapshotted_evidence
+                    ],
+                    **(manifest_metadata or {}),
+                },
+            )
+            session.add(manifest)
+            session.flush()
+            session.add_all(
+                [
+                    PublicationStatementEvidence(
+                        publication_manifest_id=manifest.id,
+                        statement_path=item.evidence.statement_path,
+                        resolved_claim_id=item.evidence.resolved_claim_id,
+                        derived_value_id=item.evidence.derived_value_id,
+                        evidence_snapshot=item.snapshot,
+                        evidence_snapshot_hash=item.snapshot_hash,
+                    )
+                    for item in snapshotted_evidence
+                ]
+            )
+            session.flush()
+            staged = store.stage_versioned(profile_date, version, payload)
+            manifest.storage_uri = staged.storage_uri
+        session.commit()
+    except BaseException:
+        session.rollback()
+        if staged is not None:
+            staged.discard()
+        raise
+
+    manifest_id = manifest.id
+    try:
+        staged.finalize()
+        store.read(manifest.storage_uri, digest)
+
+        _acquire_publication_lock(session, profile_date, profile_type)
+        completed = session.get(PublicationManifest, manifest_id)
+        if completed is None:  # pragma: no cover - defensive
+            raise RuntimeError("Pending manifest disappeared during completion.")
+        if completed.status != PublicationStatus.PUBLISHED:
+            completed.status = PublicationStatus.PUBLISHED
+            completed.published_at = datetime.now(UTC)
+        profile = session.scalar(
+            select(DayProfile).where(
+                DayProfile.publication_manifest_id == manifest_id
             )
         )
-        or 0
-    ) + 1
-    digest = content_hash(payload)
-    manifest = PublicationManifest(
-        profile_date=profile_date,
-        profile_type=profile_type,
-        version=version,
-        editorial_revision=editorial_revision,
-        status=PublicationStatus.DRAFT,
-        content_hash=digest,
-        source_snapshot_hash=_source_snapshot_hash(snapshotted_evidence),
-        storage_uri="pending://local-filesystem-write",
-        code_version=get_settings().service_version,
-        methodology_id=methodology_id,
-        supersedes_manifest_id=supersedes_manifest_id,
-        metadata_json={
-            "evidence_snapshot_schema_version": "1",
-            "statement_evidence_hashes": [
-                {
-                    "statement_path": item.evidence.statement_path,
-                    "evidence_snapshot_hash": item.snapshot_hash,
-                }
-                for item in snapshotted_evidence
-            ],
-            **(manifest_metadata or {}),
-        },
-    )
-    session.add(manifest)
-    session.flush()
-    session.add_all(
-        [
-            PublicationStatementEvidence(
-                publication_manifest_id=manifest.id,
-                statement_path=item.evidence.statement_path,
-                resolved_claim_id=item.evidence.resolved_claim_id,
-                derived_value_id=item.evidence.derived_value_id,
-                evidence_snapshot=item.snapshot,
-                evidence_snapshot_hash=item.snapshot_hash,
+        if profile is None:
+            profile = DayProfile(
+                profile_date=profile_date,
+                profile_type=profile_type,
+                publication_manifest_id=manifest_id,
+                content_hash=digest,
+                supersedes_day_profile_id=supersedes_day_profile_id,
             )
-            for item in snapshotted_evidence
-        ]
-    )
-    session.flush()
-    staged = store.stage_versioned(profile_date, version, payload)
-    staged.finalize()
-    manifest.storage_uri = staged.storage_uri
-    session.info.setdefault(_PENDING_PROFILE_WRITES, []).append(staged)
-    manifest.status = PublicationStatus.PUBLISHED
-    manifest.published_at = datetime.now(UTC)
-    session.flush()
-    profile = DayProfile(
-        profile_date=profile_date,
-        profile_type=profile_type,
-        publication_manifest_id=manifest.id,
-        content_hash=digest,
-        supersedes_day_profile_id=supersedes_day_profile_id,
-    )
-    session.add(profile)
-    session.flush()
-    return profile
+            session.add(profile)
+        session.flush()
+        session.commit()
+        return profile
+    except BaseException:
+        session.rollback()
+        raise
 
 
 def record_correction(
