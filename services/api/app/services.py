@@ -1012,8 +1012,7 @@ def reconcile_publications(
                 _acquire_publication_lock(
                     session, manifest.profile_date, manifest.profile_type
                 )
-                manifest.status = PublicationStatus.PUBLISHED
-                manifest.published_at = datetime.now(UTC)
+                _mark_manifest_published(session, manifest)
                 _ensure_day_profile(session, manifest)
                 session.commit()
         else:
@@ -1083,6 +1082,20 @@ def reconcile_publications(
                 temp.unlink(missing_ok=True)
 
     return report
+
+
+def _mark_manifest_published(session: Session, manifest: PublicationManifest) -> None:
+    """Flush the published status before dependent inserts.
+
+    The validate_day_profile_manifest trigger reads publication_manifests
+    during the day_profiles INSERT, and SQLAlchemy's unit of work orders a
+    dependent insert ahead of a parent update. Production sessions disable
+    autoflush (app/database.py), so this flush must be explicit.
+    """
+    if manifest.status != PublicationStatus.PUBLISHED:
+        manifest.status = PublicationStatus.PUBLISHED
+        manifest.published_at = datetime.now(UTC)
+        session.flush()
 
 
 def _ensure_day_profile(session: Session, manifest: PublicationManifest) -> bool:
@@ -1177,10 +1190,14 @@ def publish_day_profile(
             .order_by(PublicationManifest.version.desc())
             .limit(1)
         )
+        # Idempotency is decided by content, not by whether the caller
+        # offered a supersession candidate: real publishers always pass the
+        # previous manifest, and superseding identical content would create a
+        # meaningless version chain on every rerun (the archive-activation
+        # arc reruns publication across tens of thousands of dates).
         if (
             latest_published is not None
             and latest_published.content_hash == digest
-            and supersedes_manifest_id is None
             and not force_new_version
         ):
             existing_profile = session.scalar(
@@ -1297,9 +1314,7 @@ def publish_day_profile(
         completed = session.get(PublicationManifest, manifest_id)
         if completed is None:  # pragma: no cover - defensive
             raise RuntimeError("Pending manifest disappeared during completion.")
-        if completed.status != PublicationStatus.PUBLISHED:
-            completed.status = PublicationStatus.PUBLISHED
-            completed.published_at = datetime.now(UTC)
+        _mark_manifest_published(session, completed)
         profile = session.scalar(
             select(DayProfile).where(
                 DayProfile.publication_manifest_id == manifest_id

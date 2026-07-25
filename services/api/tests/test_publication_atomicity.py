@@ -418,3 +418,100 @@ def test_unrelated_nested_rollback_preserves_completed_publication(
             )
         )
         assert [m.status for m in manifests] == [PublicationStatus.PUBLISHED]
+
+
+@pytest.mark.integration
+def test_publication_completes_under_production_session_configuration(
+    session: Session, migrated_database: str, tmp_path: Path
+) -> None:
+    """Production SessionLocal disables autoflush (app/database.py), so a
+    pending manifest-status UPDATE is not implicitly emitted before the
+    dependent day_profiles INSERT; SQLAlchemy's unit of work orders a child
+    insert ahead of a parent update, and the validate_day_profile_manifest
+    trigger then rejects the row. Completion must flush the published status
+    explicitly rather than relying on autoflush."""
+    store = LocalFilesystemPublishedProfileStore(tmp_path)
+    evidence = statement_evidence(session)
+    session.commit()
+
+    engine = create_engine(migrated_database)
+    production_like = sessionmaker(
+        bind=engine, autocommit=False, autoflush=False, expire_on_commit=False
+    )
+    try:
+        with production_like() as production_session:
+            profile = publish_day_profile(
+                production_session,
+                store=store,
+                profile_date=PROFILE_DATE,
+                profile_type=PROFILE_TYPE,
+                payload=payload("Published without autoflush."),
+                statement_evidence=evidence,
+            )
+            manifest = production_session.get(
+                PublicationManifest, profile.publication_manifest_id
+            )
+            assert manifest is not None
+            assert manifest.status == PublicationStatus.PUBLISHED
+            assert store.read(manifest.storage_uri, manifest.content_hash)
+
+        with production_like() as verifier:
+            reconciled = reconcile_publications(verifier, store=store, repair=True)
+            verifier.commit()
+            assert reconciled.healthy_published == 1
+            assert reconciled.abandoned_pending == 0
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.integration
+def test_identical_republish_is_a_no_op_even_when_supersession_is_offered(
+    session: Session, tmp_path: Path
+) -> None:
+    """Real publishers (usgs.publish_golden_profile) always pass the previous
+    manifest as a supersession candidate, so idempotency must be decided by
+    content, not by whether the caller offered to supersede. Only
+    force_new_version may create a second version of identical content."""
+    store = LocalFilesystemPublishedProfileStore(tmp_path)
+    evidence = statement_evidence(session)
+
+    first = publish(session, store, evidence, "Rerun-safe content.")
+    repeat = publish_day_profile(
+        session,
+        store=store,
+        profile_date=PROFILE_DATE,
+        profile_type=PROFILE_TYPE,
+        payload=payload("Rerun-safe content."),
+        statement_evidence=evidence,
+        supersedes_manifest_id=first.publication_manifest_id,
+        supersedes_day_profile_id=first.id,
+    )
+    assert repeat.id == first.id
+    assert list(
+        session.scalars(
+            select(PublicationManifest.version).where(
+                PublicationManifest.profile_date == PROFILE_DATE
+            )
+        )
+    ) == [1]
+    assert len(list((tmp_path / "day" / PROFILE_DATE.isoformat()).glob("*.json"))) == 1
+
+    forced = publish_day_profile(
+        session,
+        store=store,
+        profile_date=PROFILE_DATE,
+        profile_type=PROFILE_TYPE,
+        payload=payload("Rerun-safe content."),
+        statement_evidence=evidence,
+        supersedes_manifest_id=first.publication_manifest_id,
+        supersedes_day_profile_id=first.id,
+        force_new_version=True,
+    )
+    assert forced.id != first.id
+    assert sorted(
+        session.scalars(
+            select(PublicationManifest.version).where(
+                PublicationManifest.profile_date == PROFILE_DATE
+            )
+        )
+    ) == [1, 2]

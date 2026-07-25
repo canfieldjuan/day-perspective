@@ -518,16 +518,29 @@ def test_manifest_and_object_hashes_match_and_include_required_snapshot_metadata
     assert manifest.metadata_json["resolved_claim_versions"]
 
 
-def test_republish_creates_version_two_without_mutating_version_one(
+def test_rerun_is_a_no_op_and_forced_republish_preserves_version_one(
     session: Session, tmp_path: Path
 ) -> None:
+    """Reruns of unchanged content must not accumulate versions (the archive
+    republishes at scale), while an explicitly forced republish still creates
+    version two and leaves version one immutable."""
     _, first = publish(session, tmp_path)
     first_manifest = session.get(PublicationManifest, first.publication_manifest_id)
     assert first_manifest is not None
     original_hash = first_manifest.content_hash
+
+    rerun = publish_golden_profile(
+        session,
+        store=LocalFilesystemPublishedProfileStore(tmp_path / "published"),
+    )
+    assert rerun.id == first.id
+    rerun_manifest = session.get(PublicationManifest, rerun.publication_manifest_id)
+    assert rerun_manifest is not None and rerun_manifest.version == 1
+
     second = publish_golden_profile(
         session,
         store=LocalFilesystemPublishedProfileStore(tmp_path / "published"),
+        force_new_version=True,
     )
     second_manifest = session.get(PublicationManifest, second.publication_manifest_id)
 
