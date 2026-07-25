@@ -138,3 +138,23 @@ describe("eraLineForDate calendar validity", () => {
     expect(eraLineForDate("1900-99-99")).toBeNull();
   });
 });
+
+describe("ERA_BANDS", () => {
+  it("tiles the public shell contiguously and agrees with the band mapping", async () => {
+    const { ERA_BANDS, eraLineForDate } = await import("./day-profile");
+    const { PUBLIC_DATE_MIN, PUBLIC_DATE_MAX } = await import(
+      "@day-perspective/contracts"
+    );
+    expect(ERA_BANDS[0].start).toBe(PUBLIC_DATE_MIN);
+    expect(ERA_BANDS[ERA_BANDS.length - 1].end).toBe(PUBLIC_DATE_MAX);
+    for (const band of ERA_BANDS) {
+      expect(eraLineForDate(band.start)).toBe(band.line);
+      expect(eraLineForDate(band.end)).toBe(band.line);
+    }
+    for (let index = 1; index < ERA_BANDS.length; index += 1) {
+      const previousEndYear = Number(ERA_BANDS[index - 1].end.slice(0, 4));
+      const startYear = Number(ERA_BANDS[index].start.slice(0, 4));
+      expect(startYear).toBe(previousEndYear + 1);
+    }
+  });
+});

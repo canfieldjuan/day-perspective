@@ -8,6 +8,7 @@ import {
   PUBLIC_DATE_MIN,
   isSupportedPublicDate
 } from "@/src/lib/date";
+import { eraLineForDate } from "@/src/lib/day-profile";
 
 type DateInputFormProps = {
   initialDate?: string;
@@ -16,6 +17,9 @@ type DateInputFormProps = {
 export function DateInputForm({ initialDate = "" }: DateInputFormProps) {
   const router = useRouter();
   const [error, setError] = useState<string | null>(null);
+  const [eraLine, setEraLine] = useState<string | null>(() =>
+    initialDate ? eraLineForDate(initialDate) : null
+  );
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -44,6 +48,9 @@ export function DateInputForm({ initialDate = "" }: DateInputFormProps) {
           max={PUBLIC_DATE_MAX}
           min={PUBLIC_DATE_MIN}
           name="date"
+          onChange={(event) => {
+            setEraLine(eraLineForDate(event.currentTarget.value));
+          }}
           required
           type="date"
         />
@@ -51,6 +58,11 @@ export function DateInputForm({ initialDate = "" }: DateInputFormProps) {
       <button className="action-button" type="submit">
         Open profile
       </button>
+      {eraLine ? (
+        <p aria-live="polite" className="date-form__era">
+          {eraLine}
+        </p>
+      ) : null}
       {error ? (
         <p className="form-error" id="date-form-error" role="alert">
           {error}

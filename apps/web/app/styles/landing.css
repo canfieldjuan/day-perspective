@@ -32,3 +32,57 @@
     flex-direction: column;
   }
 }
+
+.landing-masthead {
+  border-bottom: 0;
+  margin-bottom: 1rem;
+  padding-bottom: 0;
+}
+
+.landing-title {
+  font-family: var(--font-display), Georgia, "Times New Roman", serif;
+  font-weight: 560;
+}
+
+.era-horizon {
+  margin-top: 2.5rem;
+}
+
+.era-horizon__band {
+  border-bottom: 2px solid var(--ink);
+  display: flex;
+  gap: 0.25rem;
+}
+
+.era-horizon__segment {
+  border-left: 1px solid var(--muted-ink);
+  min-width: 0;
+  padding: 0.4rem 0.5rem 0.9rem;
+}
+
+.era-horizon__label {
+  color: var(--muted-ink);
+  display: block;
+  font-family: "Courier New", monospace;
+  font-size: 0.72rem;
+  letter-spacing: 0.06em;
+  overflow-wrap: anywhere;
+}
+
+.date-form__era {
+  color: var(--muted-ink);
+  flex-basis: 100%;
+  font-family: "Courier New", monospace;
+  font-size: 0.8rem;
+  margin: 0.4rem 0 0;
+}
+
+.date-form {
+  flex-wrap: wrap;
+}
+
+@media (max-width: 42rem) {
+  .era-horizon__label {
+    font-size: 0.62rem;
+  }
+}
