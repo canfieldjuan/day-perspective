@@ -750,3 +750,42 @@ def test_the_python_review_vocabulary_matches_the_shared_contract() -> None:
     assert block is not None, "contract does not declare coverage review statuses"
     declared = tuple(re.findall(r'"([a-z_]+)"', block.group(1)))
     assert declared == REVIEW_STATUSES
+
+
+@pytest.mark.integration
+def test_a_blank_reviewer_is_not_a_human_review(
+    session: Session, tmp_path: Path, reviewed_un_wpp: None
+) -> None:
+    """`reviewed_by` is NOT NULL but nothing forbids an empty string, and
+    "not the standing rule" is not the same as "a person decided"."""
+    from app.governance import EditorialSelection, EditorialSelectionStatus
+    from app.models import ResolvedClaim
+
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+    profile_date = date(1978, 11, 11)
+    publish_enriched(session, store, profile_date, label="blank-reviewer")
+    resolved = session.scalar(
+        select(ResolvedClaim).where(
+            ResolvedClaim.canonical_key == "test:blank-reviewer"
+        )
+    )
+    assert resolved is not None
+    session.add(
+        EditorialSelection(
+            profile_date=profile_date,
+            section_key="recorded_on_this_date",
+            resolved_claim_id=resolved.id,
+            status=EditorialSelectionStatus.SELECTED,
+            decision_version=1,
+            display_rank=1,
+            rationale="Selection with no recorded reviewer.",
+            reviewed_by="   ",
+        )
+    )
+    session.commit()
+    rebuild_coverage_index(session, store=store)
+    session.commit()
+
+    record = coverage_for_date(session, profile_date)
+    assert record is not None
+    assert record.review_status == "unreviewed"

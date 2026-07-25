@@ -151,14 +151,18 @@ def _review_status(session: Session, profile_date: date) -> CoverageReviewStatus
     """
     from app.un_wpp import STANDING_ANNUAL_CONTEXT_RULE
 
-    reviewers = set(
-        session.scalars(
+    reviewers = {
+        value.strip()
+        for value in session.scalars(
             select(EditorialSelection.reviewed_by).where(
                 EditorialSelection.profile_date == profile_date,
                 EditorialSelection.status == EditorialSelectionStatus.SELECTED,
             )
         )
-    )
+        # reviewed_by is NOT NULL, but nothing forbids an empty string, and
+        # "not the standing rule" is not the same as "a person decided".
+        if value and value.strip()
+    }
     if not reviewers:
         return UNREVIEWED_STATUS
     if reviewers - {STANDING_ANNUAL_CONTEXT_RULE}:
