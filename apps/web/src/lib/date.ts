@@ -42,3 +42,51 @@ export function isSupportedPublicDate(value: string): boolean {
     value <= PUBLIC_DATE_MAX
   );
 }
+
+/** Step one day in either direction; null when unsupported or past a shell edge. */
+export function adjacentPublicDate(
+  value: string,
+  offsetDays: 1 | -1
+): string | null {
+  if (!isSupportedPublicDate(value)) {
+    return null;
+  }
+  const parsed = new Date(value + "T00:00:00.000Z");
+  parsed.setUTCDate(parsed.getUTCDate() + offsetDays);
+  const stepped = parsed.toISOString().slice(0, 10);
+  return isSupportedPublicDate(stepped) ? stepped : null;
+}
+
+const SHELL_DAY_MS = 86_400_000;
+const SHELL_START_MS = Date.parse(PUBLIC_DATE_MIN + "T00:00:00.000Z");
+const SHELL_END_MS = Date.parse(PUBLIC_DATE_MAX + "T00:00:00.000Z");
+const SHELL_DAY_COUNT = (SHELL_END_MS - SHELL_START_MS) / SHELL_DAY_MS + 1;
+
+/** Uniform draw over the public shell; `random` is injectable for tests. */
+export function randomPublicDate(random: () => number = Math.random): string {
+  const index = Math.min(
+    SHELL_DAY_COUNT - 1,
+    Math.floor(random() * SHELL_DAY_COUNT)
+  );
+  return new Date(SHELL_START_MS + index * SHELL_DAY_MS)
+    .toISOString()
+    .slice(0, 10);
+}
+
+/**
+ * Zero-pad a parseable non-canonical date path into the canonical supported
+ * form. Null when already canonical, out of shell, or not a real date —
+ * callers redirect only on a non-null result.
+ */
+export function canonicalizePublicDatePath(value: string): string | null {
+  const match = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(value);
+  if (!match) {
+    return null;
+  }
+  const padded =
+    match[1] + "-" + match[2].padStart(2, "0") + "-" + match[3].padStart(2, "0");
+  if (padded === value) {
+    return null;
+  }
+  return isSupportedPublicDate(padded) ? padded : null;
+}

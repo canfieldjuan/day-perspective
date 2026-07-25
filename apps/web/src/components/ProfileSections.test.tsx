@@ -391,3 +391,38 @@ describe("ProfileSections quiet dates", () => {
     );
   });
 });
+
+describe("ProfileSections seam-state precedence", () => {
+  it("uses the unsupported fallback when not_yet_supported has no reason", () => {
+    render(
+      <ProfileSections
+        availability="published"
+        sections={emptySections}
+        sectionStates={{ wonder_and_progress: { status: "not_yet_supported" } }}
+        profileDate="1964-03-27"
+      />
+    );
+    expect(screen.getByTestId("stratum-wonder_and_progress")).toHaveTextContent(
+      "This section is not yet supported by an implemented pipeline."
+    );
+  });
+
+  it("keeps the no-event line alongside a recorded-section reason", () => {
+    render(
+      <ProfileSections
+        availability="published"
+        sections={emptySections}
+        sectionStates={{
+          recorded_on_this_date: {
+            status: "not_yet_supported",
+            reason: "Recorded events for this era await a pipeline."
+          }
+        }}
+        profileDate="1964-03-27"
+      />
+    );
+    const recorded = screen.getByTestId("stratum-recorded_on_this_date");
+    expect(recorded).toHaveTextContent("No reviewed event is published for this date.");
+    expect(recorded).toHaveTextContent("Recorded events for this era await a pipeline.");
+  });
+});
