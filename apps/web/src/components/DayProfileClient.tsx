@@ -148,14 +148,19 @@ export function DayProfileClient({ date }: { date: string }) {
 
   if (viewState.kind === "published") {
     return (
-      <ProfileSections
-        availability="published"
-        sections={viewState.profile.sections}
-        sectionStates={viewState.profile.section_states}
-        sourceAttribution={viewState.profile.source_attribution}
-        quality={viewState.profile.quality}
-        profileDate={date}
-      />
+      <>
+        <p className="publication-status">
+          An evidence-backed profile is published for this date.
+        </p>
+        <ProfileSections
+          availability="published"
+          sections={viewState.profile.sections}
+          sectionStates={viewState.profile.section_states}
+          sourceAttribution={viewState.profile.source_attribution}
+          quality={viewState.profile.quality}
+          profileDate={date}
+        />
+      </>
     );
   }
 
