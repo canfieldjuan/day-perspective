@@ -13,7 +13,12 @@ type ViewState =
   | { kind: "loading" }
   | { kind: "unpublished" }
   | { kind: "api-error" }
-  | { kind: "published"; profile: PublishedDayProfile };
+  | {
+      kind: "published";
+      profile: PublishedDayProfile;
+      manifestId: string;
+      contentHash: string;
+    };
 
 async function parseJson(response: Response): Promise<unknown> {
   const body = await response.text();
@@ -75,7 +80,12 @@ export function DayProfileClient({
 
         setState({
           date,
-          view: { kind: "published", profile: payload.profile }
+          view: {
+            kind: "published",
+            profile: payload.profile,
+            manifestId: payload.manifest_id,
+            contentHash: payload.content_hash
+          }
         });
       } catch {
         if (!controller.signal.aborted) {
@@ -183,6 +193,8 @@ export function DayProfileClient({
           sourceAttribution={viewState.profile.source_attribution}
           quality={viewState.profile.quality}
           profileDate={date}
+          publicationManifestId={viewState.manifestId}
+          publicationContentHash={viewState.contentHash}
         />
       </>
     );

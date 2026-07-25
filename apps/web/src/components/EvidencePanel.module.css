@@ -1,0 +1,54 @@
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--ink);
+  color: var(--ink);
+  margin: auto auto auto max(1rem, calc(100vw - 34rem));
+  max-height: 100dvh;
+  max-width: 33rem;
+  padding: 0;
+  width: calc(100vw - 2rem);
+}
+
+.panel::backdrop {
+  background: rgba(30, 42, 51, 0.35);
+}
+
+.body {
+  display: grid;
+  gap: 0.6rem;
+  max-height: calc(100dvh - 2rem);
+  overflow-y: auto;
+  padding: 1.25rem 1.5rem 1.5rem;
+}
+
+.statement {
+  font-size: 1.05rem;
+  font-weight: 700;
+  max-width: 60ch;
+}
+
+.chain dt {
+  font-family: "Courier New", monospace;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  margin-top: 0.7rem;
+  text-transform: uppercase;
+}
+
+.chain dd {
+  margin-left: 0;
+}
+
+.chain dd span {
+  display: block;
+}
+
+@media (max-width: 42rem) {
+  .panel {
+    margin: auto 0 0 0;
+    max-height: 85dvh;
+    max-width: none;
+    width: 100vw;
+  }
+}

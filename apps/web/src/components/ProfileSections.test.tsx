@@ -426,3 +426,33 @@ describe("ProfileSections seam-state precedence", () => {
     expect(recorded).toHaveTextContent("Recorded events for this era await a pipeline.");
   });
 });
+
+describe("ProfileSections publication integrity", () => {
+  it("renders manifest, truncated hash, quality, and attribution in the evidence stratum", () => {
+    render(
+      <ProfileSections
+        availability="published"
+        sections={emptySections}
+        profileDate="1964-03-27"
+        quality={{ grade: "B", explanation: "Single validated official source." }}
+        sourceAttribution={{
+          name: "USGS Earthquake Catalog",
+          publisher: "U.S. Geological Survey",
+          url: "https://earthquake.usgs.gov"
+        }}
+        publicationManifestId="manifest-42"
+        publicationContentHash={"a1b2c3d4e5f6".padEnd(64, "0")}
+      />
+    );
+
+    const integrity = screen.getByTestId("publication-integrity");
+    expect(integrity).toHaveTextContent("manifest-42");
+    expect(integrity).toHaveTextContent("a1b2c3d4e5f6…");
+    expect(integrity).toHaveTextContent("Grade B");
+    expect(integrity).toHaveTextContent("Single validated official source.");
+    expect(
+      screen.getByRole("link", { name: "USGS Earthquake Catalog" })
+    ).toBeInTheDocument();
+    expect(screen.getByText("a1b2c3d4e5f6".padEnd(64, "0"))).toBeInTheDocument();
+  });
+});
