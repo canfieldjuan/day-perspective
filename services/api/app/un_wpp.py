@@ -429,9 +429,12 @@ def ingest_un_wpp(
     raw_store: RawSourceStore,
     dry_run: bool = False,
 ) -> WPPIngestionResult:
-    payload, input_format = _retrieve(fixture_path)
-    checksum = hashlib.sha256(payload).hexdigest()
     mode = "fixture" if fixture_path is not None else "live"
+    input_format = (
+        "official_xlsx"
+        if fixture_path is None or fixture_path.suffix.lower() == ".xlsx"
+        else "normalized_csv"
+    )
     run = PipelineRun(
         pipeline_name="un-wpp-2024-adapter",
         code_version="0.4.0",
@@ -448,7 +451,15 @@ def ingest_un_wpp(
     )
     session.add(run)
     session.flush()
+    stage = "retrieval"
     try:
+        payload, retrieved_format = _retrieve(fixture_path)
+        if retrieved_format != input_format:
+            raise ValueError(
+                f"Expected {input_format} input but retrieved {retrieved_format}."
+            )
+        checksum = hashlib.sha256(payload).hexdigest()
+        stage = "validation"
         records = _parse(payload, input_format=input_format)
         if dry_run:
             run.status = "succeeded"
@@ -473,6 +484,7 @@ def ingest_un_wpp(
                 )
             )
             return WPPIngestionResult(run.id, None, 0, checksum, False)
+        stage = "persistence"
         with session.begin_nested():
             source = session.scalar(
                 select(Source).where(Source.slug == UN_WPP_SOURCE_SLUG)
@@ -658,15 +670,24 @@ def ingest_un_wpp(
     except Exception as error:
         run.status = "failed"
         run.completed_at = datetime.now(UTC)
-        run.details = {**run.details, "error": type(error).__name__}
+        run.details = {
+            **run.details,
+            "error": type(error).__name__,
+            "failure_stage": stage,
+        }
+        check_name = {
+            "retrieval": "un_wpp_retrieval",
+            "validation": "un_wpp_schema_supported_world_years",
+            "persistence": "un_wpp_ingestion",
+        }[stage]
         session.add(
             QualityCheck(
                 pipeline_run_id=run.id,
-                check_name="un_wpp_schema_supported_world_years",
+                check_name=check_name,
                 status="failed",
                 subject_type="pipeline_run",
                 subject_id=run.id,
-                details={"error": str(error)},
+                details={"error": str(error), "failure_stage": stage},
             )
         )
         session.flush()
@@ -1217,12 +1238,19 @@ def build_un_wpp_profile_content(
             raise ValueError("UN WPP daily equivalent is missing its value.")
         daily = int(value.value_numeric)
         status = claims[predicate].data_status.value
+        is_projection = claims[predicate].data_status == DataStatus.MODELED
+        projection_qualifier = (
+            ", based on the UN WPP medium-variant projection"
+            if is_projection
+            else ""
+        )
         selected_date_label = f"{profile_date:%B} {profile_date.day}"
         typical.append(
             {
                 "statement_id": f"average-daily-{label}",
                 "statement": (
-                    f"Average daily {label} in {profile_year}: about {daily:,}. "
+                    f"Average daily {label} in {profile_year}"
+                    f"{projection_qualifier}: about {daily:,}. "
                     "This is an average daily equivalent based on the annual total, "
                     f"not an observation for {selected_date_label}."
                 ),
@@ -1231,12 +1259,24 @@ def build_un_wpp_profile_content(
                     "temporal_assignment": "uniform_period_allocation",
                     "data_status": status,
                     "interpretation": (
-                        "Average daily equivalent based on annual total. This is not "
+                        "Average daily equivalent based on "
+                        + (
+                            "a medium-variant projected annual total. "
+                            if is_projection
+                            else "an annual total. "
+                        )
+                        + "This is not "
                         f"the number observed on {selected_date_label}."
                     ),
                 },
                 "provenance_note": (
-                    f"UN WPP annual value divided by "
+                    "UN WPP "
+                    + (
+                        "medium-variant projected annual value"
+                        if is_projection
+                        else "annual value"
+                    )
+                    + " divided by "
                     f"{366 if calendar.isleap(profile_year) else 365} days; "
                     "not date-specific."
                 ),

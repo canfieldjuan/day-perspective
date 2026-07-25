@@ -4,6 +4,8 @@ import csv
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
+from typing import NoReturn
+from urllib.error import URLError
 
 import pytest
 from openpyxl import Workbook
@@ -27,6 +29,7 @@ from app.models import (
 from app.un_wpp import (
     WORKBOOK_COLUMNS,
     LocalFilesystemRawSourceStore,
+    WPPIngestionResult,
     build_un_wpp_profile_content,
     ingest_un_wpp,
     review_un_wpp,
@@ -36,7 +39,7 @@ ROOT = Path(__file__).resolve().parents[3]
 FIXTURE = ROOT / "data/fixtures/un-wpp/wpp2024-world-1950-2025.csv"
 
 
-def ingest(session: Session, tmp_path: Path):
+def ingest(session: Session, tmp_path: Path) -> WPPIngestionResult:
     result = ingest_un_wpp(
         session,
         fixture_path=FIXTURE,
@@ -396,6 +399,12 @@ def test_profile_content_selects_requested_projection_year(
     assert "Average daily births in 2025" in str(
         content.typical_statements[0]["statement"]
     )
+    assert "medium-variant projection" in str(
+        content.typical_statements[0]["statement"]
+    )
+    assert "medium-variant projected annual value" in str(
+        content.typical_statements[0]["provenance_note"]
+    )
     assert "not an observation for July 20" in str(
         content.typical_statements[0]["statement"]
     )
@@ -420,6 +429,36 @@ def test_dry_run_validates_without_creating_a_release(
     assert session.scalar(select(func.count()).select_from(SourceRelease)) == 0
     assert session.scalar(select(PipelineRun.status)) == "succeeded"
     assert session.scalar(select(QualityCheck.status)) == "passed"
+
+
+def test_live_retrieval_failure_records_failed_run_and_check(
+    session: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_live_retrieval(*args: object, **kwargs: object) -> NoReturn:
+        raise URLError("simulated offline retrieval failure")
+
+    monkeypatch.setattr(
+        "app.un_wpp.urllib.request.urlopen",
+        fail_live_retrieval,
+    )
+
+    with pytest.raises(URLError, match="simulated offline retrieval failure"):
+        ingest_un_wpp(
+            session,
+            raw_store=LocalFilesystemRawSourceStore(tmp_path / "raw"),
+        )
+
+    run = session.scalar(select(PipelineRun))
+    check = session.scalar(select(QualityCheck))
+    assert run is not None
+    assert check is not None
+    assert run.status == "failed"
+    assert run.details["failure_stage"] == "retrieval"
+    assert check.check_name == "un_wpp_retrieval"
+    assert check.status == "failed"
+    assert session.scalar(select(func.count()).select_from(SourceRelease)) == 0
 
 
 def test_wpp_ingestion_rejects_a_fixture_missing_a_required_year(

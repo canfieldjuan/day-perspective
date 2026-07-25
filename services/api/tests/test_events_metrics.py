@@ -19,6 +19,8 @@ from app.models import (
     MetricCoverage,
     MissingReason,
     Observation,
+    ResolvedClaim,
+    SourceRelease,
     TemporalAssignment,
     TemporalPrecision,
 )
@@ -26,7 +28,7 @@ from app.services import classify_period_allocation, create_claim, resolve_claim
 from tests.helpers import source_release
 
 
-def provenance(session: Session):
+def provenance(session: Session) -> tuple[SourceRelease, ResolvedClaim]:
     release = source_release(session)
     claim = create_claim(
         session,

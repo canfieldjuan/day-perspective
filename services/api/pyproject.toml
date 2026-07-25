@@ -53,7 +53,7 @@ ignore = ["E501"]
 [tool.mypy]
 python_version = "3.13"
 strict = true
-files = ["app"]
+files = ["app", "tests"]
 
 [[tool.mypy.overrides]]
 module = ["geoalchemy2.*", "openpyxl.*"]

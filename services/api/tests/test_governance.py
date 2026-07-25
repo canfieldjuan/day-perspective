@@ -8,6 +8,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.orm import Session
 
+from app.adapters.base import IngestionResult
 from app.governance import (
     EditorialSelection,
     EditorialSelectionStatus,
@@ -46,7 +47,7 @@ UCDP_ANNUAL_FIXTURE = (
 )
 
 
-def ingest(session: Session, tmp_path: Path):
+def ingest(session: Session, tmp_path: Path) -> IngestionResult:
     return ingest_usgs(
         session,
         adapter=USGSEarthquakeAdapter(),

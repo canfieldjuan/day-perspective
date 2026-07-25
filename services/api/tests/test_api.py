@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
@@ -10,7 +12,7 @@ from app.main import app
 
 @pytest.mark.integration
 def test_api_returns_profile_not_published_for_an_unpublished_supported_day(session: Session) -> None:
-    def override_session():
+    def override_session() -> Iterator[Session]:
         yield session
 
     app.dependency_overrides[get_session] = override_session

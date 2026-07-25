@@ -5,6 +5,7 @@ import json
 from collections.abc import Callable, Generator
 from decimal import Decimal
 from pathlib import Path
+from typing import cast
 
 import pytest
 from fastapi.testclient import TestClient
@@ -13,11 +14,13 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 
 from app import main
+from app.adapters.base import IngestionResult
 from app.database import get_session
 from app.governance import ClaimReviewDecision, reviewed_resolutions_for_release
 from app.models import (
     Claim,
     ClaimAssertionStatus,
+    DayProfile,
     Event,
     EventLocation,
     EventTime,
@@ -71,7 +74,9 @@ def test_display_number_preserves_significant_integer_zeroes() -> None:
     assert _display_number(Decimal("0.50")) == "0.5"
 
 
-def ingest(session: Session, tmp_path: Path, fixture_path: Path = FIXTURE):
+def ingest(
+    session: Session, tmp_path: Path, fixture_path: Path = FIXTURE
+) -> IngestionResult:
     return ingest_usgs(
         session,
         adapter=USGSEarthquakeAdapter(),
@@ -80,7 +85,9 @@ def ingest(session: Session, tmp_path: Path, fixture_path: Path = FIXTURE):
     )
 
 
-def publish(session: Session, tmp_path: Path, fixture_path: Path = FIXTURE):
+def publish(
+    session: Session, tmp_path: Path, fixture_path: Path = FIXTURE
+) -> tuple[IngestionResult, DayProfile]:
     result = ingest(session, tmp_path, fixture_path)
     assert result.source_release_id is not None
     accept_and_resolve_release(session, result.source_release_id)
@@ -97,9 +104,12 @@ def publish(session: Session, tmp_path: Path, fixture_path: Path = FIXTURE):
         raw_store=LocalFilesystemRawSourceStore(tmp_path / "raw"),
     )
     review_ucdp_annual(session, ucdp_result.source_release_id)
-    profile = publish_golden_profile(
-        session,
-        store=LocalFilesystemPublishedProfileStore(tmp_path / "published"),
+    profile = cast(
+        DayProfile,
+        publish_golden_profile(
+            session,
+            store=LocalFilesystemPublishedProfileStore(tmp_path / "published"),
+        ),
     )
     session.flush()
     return result, profile
