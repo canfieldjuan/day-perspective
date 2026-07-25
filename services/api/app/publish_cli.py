@@ -13,6 +13,7 @@ from app.batch_publication import (
     start_batch_run,
 )
 from app.config import get_settings
+from app.coverage import coverage_summary, rebuild_coverage_index
 from app.database import SessionLocal
 from app.models import BatchRunStatus
 from app.services import LocalFilesystemPublishedProfileStore, reconcile_publications
@@ -64,6 +65,10 @@ def main() -> None:
         "--force-new-version",
         action="store_true",
         help="Publish a superseding version even when content is unchanged.",
+    )
+    subparsers.add_parser(
+        "rebuild-coverage",
+        help="Regenerate the coverage index from published state.",
     )
     args = parser.parse_args()
     settings = get_settings()
@@ -154,6 +159,23 @@ def main() -> None:
                 print(f"failure date={failed_date.isoformat()} reason={reason}")
             if batch_report.failed:
                 raise SystemExit(1)
+        elif args.command == "rebuild-coverage":
+            indexed = rebuild_coverage_index(
+                session,
+                store=LocalFilesystemPublishedProfileStore(
+                    settings.published_profile_root
+                ),
+            )
+            session.commit()
+            summary = coverage_summary(session)
+            tiers = " ".join(
+                f"{tier}={count}" for tier, count in sorted(summary.by_tier.items())
+            )
+            print(
+                f"indexed={indexed} index_version={summary.index_version} "
+                f"total_published={summary.total_published} "
+                f"with_recorded_event={summary.with_recorded_event} {tiers}"
+            )
 
 
 if __name__ == "__main__":

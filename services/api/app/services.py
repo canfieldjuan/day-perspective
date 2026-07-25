@@ -1468,6 +1468,11 @@ def publish_day_profile(
             )
             session.add(profile)
         session.flush()
+        # Coverage is publication's final step, so navigation never reads a
+        # stale picture of the archive between bulk runs (D034).
+        from app.coverage import upsert_coverage_entry
+
+        upsert_coverage_entry(session, manifest=completed, payload=payload)
         session.commit()
         return profile
     except BaseException:

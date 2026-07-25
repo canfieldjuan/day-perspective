@@ -886,3 +886,39 @@ class PublicationBatchEntry(Base):
     recorded_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+
+
+class CoverageEntry(Base):
+    """Per-date richness of the published archive.
+
+    Derived from published manifests and their statement evidence, and
+    maintained as the final step of publication so navigation never reads a
+    stale picture of what the archive holds.
+    """
+
+    __tablename__ = "coverage_entries"
+    __table_args__ = (
+        UniqueConstraint("profile_date", name="coverage_entries_date_unique"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    profile_date: Mapped[date] = mapped_column(Date)
+    profile_type: Mapped[ProfileType] = mapped_column(
+        enum_type(ProfileType, "profile_type")
+    )
+    publication_manifest_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("publication_manifests.id")
+    )
+    publication_tier: Mapped[PublicationTier] = mapped_column(
+        enum_type(PublicationTier, "publication_tier")
+    )
+    has_recorded_event: Mapped[bool] = mapped_column(Boolean, default=False)
+    sections: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    quality_floor: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    review_status: Mapped[str] = mapped_column(String(32), default="rule_selected")
+    index_version: Mapped[int] = mapped_column(Integer, default=1)
+    refreshed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )

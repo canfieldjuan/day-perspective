@@ -764,3 +764,43 @@ a crash by one entry but never overstate progress.
 
 **Revisit trigger:** Publication becomes parallel across dates, which would
 require the ledger to record worker ownership.
+
+## D034: Coverage is indexed per date, not inferred per request
+
+**Decision:** A `coverage_entries` table records, for each date a reader
+would actually be served: profile type, publication tier, whether a recorded
+event is present, per-section published-statement counts, quality floor,
+review status, and the index version. It is maintained as the final step of
+publication and can be regenerated deterministically
+(`make rebuild-coverage`). Counts come from immutable
+`publication_statement_evidence` rows; the quality floor comes from the
+served payload and is the weakest grade the profile rests on, not its best.
+`GET /api/v1/coverage` and `GET /api/v1/coverage/{date}` serve it, the
+latter including the nearest enriched and nearest recorded-event dates in
+both directions.
+
+**Context:** With every 1950–2025 date carrying annual context, "is
+anything published?" stops distinguishing anything. Navigation needs to know
+where the evidence actually is, and the landing page needs to disclose the
+archive's real shape rather than implying uniform richness.
+
+**Alternatives considered:** Computing richness per request from manifests
+and artifacts (a scan of tens of thousands of rows and files per
+navigation); a boolean published-dates index (superseded, and useless once
+the archive is dense — this closes issue #19); inferring richness in the
+frontend from section contents (splits the definition across languages and
+cannot answer "nearest enriched date").
+
+**Reason:** Publication already knows exactly what it published, so the
+index is a by-product rather than a derivation; the nearest-enriched
+queries that make navigation honest are index scans instead of archive
+walks.
+
+**Consequences:** Dates without a published profile are absent from the
+index rather than present-and-empty, so the API can distinguish "no profile"
+from "sparse profile"; a rebuild drops entries whose newest publication no
+longer serves readers; publication carries one extra write per date.
+
+**Revisit trigger:** Coverage needs per-section quality or provenance
+detail, at which point the entry grows rather than the profile being
+re-read per request.
