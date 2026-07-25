@@ -58,7 +58,7 @@ from app.usgs import (
 ROOT = Path(__file__).resolve().parents[3]
 FIXTURE = ROOT / "data/fixtures/usgs/1964-prince-william-sound.geojson"
 UN_WPP_FIXTURE = (
-    ROOT / "data/fixtures/un-wpp/wpp2024-world-selected-years.csv"
+    ROOT / "data/fixtures/un-wpp/wpp2024-world-1950-2025.csv"
 )
 UCDP_ANNUAL_FIXTURE = (
     ROOT / "data/fixtures/ucdp/ucdp-prio-26.1-conflicts-1964.csv"
@@ -89,6 +89,7 @@ def publish(session: Session, tmp_path: Path, fixture_path: Path = FIXTURE):
         fixture_path=UN_WPP_FIXTURE,
         raw_store=LocalFilesystemRawSourceStore(tmp_path / "raw"),
     )
+    assert un_result.source_release_id is not None
     review_un_wpp(session, un_result.source_release_id)
     ucdp_result = ingest_ucdp_annual(
         session,

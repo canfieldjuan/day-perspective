@@ -29,7 +29,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Offline MVP context pipelines.")
     commands = parser.add_subparsers(dest="command", required=True)
     ingest = commands.add_parser("ingest-un-wpp")
-    ingest.add_argument("--fixture", type=Path, required=True)
+    source_mode = ingest.add_mutually_exclusive_group(required=True)
+    source_mode.add_argument("--fixture", type=Path)
+    source_mode.add_argument("--live", action="store_true")
+    ingest.add_argument("--dry-run", action="store_true")
     commands.add_parser("review-un-wpp")
     ingest_ucdp_annual_parser = commands.add_parser("ingest-ucdp-annual")
     ingest_ucdp_annual_parser.add_argument("--fixture", type=Path, required=True)
@@ -44,8 +47,9 @@ def main() -> None:
             try:
                 result = ingest_un_wpp(
                     session,
-                    fixture_path=args.fixture,
+                    fixture_path=args.fixture if not args.live else None,
                     raw_store=LocalFilesystemRawSourceStore(settings.raw_source_root),
+                    dry_run=args.dry_run,
                 )
             except Exception:
                 session.commit()
@@ -53,7 +57,8 @@ def main() -> None:
             session.commit()
             print(
                 f"source_release_id={result.source_release_id} "
-                f"claims={result.claim_count} idempotent={result.idempotent}"
+                f"claims={result.claim_count} idempotent={result.idempotent} "
+                f"dry_run={args.dry_run}"
             )
             return
         if args.command in {"ingest-ucdp-annual", "ingest-ucdp-ged"}:

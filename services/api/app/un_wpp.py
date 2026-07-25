@@ -1,14 +1,19 @@
 from __future__ import annotations
 
+import calendar
 import csv
 import hashlib
 import io
+import urllib.request
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import ROUND_HALF_UP, Decimal
+from io import BytesIO
 from pathlib import Path
+from typing import Any
 from uuid import UUID
 
+from openpyxl import load_workbook
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -70,9 +75,14 @@ UN_WPP_LICENSE_SNAPSHOT = (
     "The official WPP 2024 GEN/01/REV1 workbook states that the United Nations "
     "work is available under CC BY 3.0 IGO with a suggested source citation."
 )
+UN_WPP_WORKBOOK_SHA256 = (
+    "98e34d9b65b53858cd08a57a566e45050b08093ad85ba5714fe6fbd78055ae6d"
+)
 GOLDEN_YEAR = 1964
 GOLDEN_DATE = date(1964, 3, 27)
-SELECTED_YEARS = frozenset({1950, 1964, 1989, 2023})
+SUPPORTED_YEARS = frozenset(range(1950, 2026))
+ESTIMATE_YEARS = frozenset(range(1950, 2024))
+PROJECTION_YEARS = frozenset({2024, 2025})
 
 METRIC_DEFINITIONS = {
     "population_midyear": (
@@ -119,12 +129,21 @@ class WPPRecord:
     def record_id(self) -> str:
         return f"{self.location_code}:{self.year}:{self.variant.lower()}"
 
+    @property
+    def data_status(self) -> DataStatus:
+        return (
+            DataStatus.ESTIMATED
+            if self.variant == "Estimates"
+            else DataStatus.MODELED
+        )
+
     def canonical_value(self) -> dict[str, str | int]:
         return {
             "location": self.location,
             "location_code": self.location_code,
             "year": self.year,
             "variant": self.variant,
+            "data_status": self.data_status.value,
             "population_july_thousands": str(self.population_july_thousands),
             "births_thousands": str(self.births_thousands),
             "deaths_thousands": str(self.deaths_thousands),
@@ -138,7 +157,7 @@ class WPPRecord:
 @dataclass(frozen=True)
 class WPPIngestionResult:
     pipeline_run_id: UUID
-    source_release_id: UUID
+    source_release_id: UUID | None
     claim_count: int
     checksum: str
     idempotent: bool
@@ -154,44 +173,86 @@ class WPPProfileContent:
     resolved_claims: tuple[ResolvedClaim, ...]
 
 
-def _parse(payload: bytes) -> tuple[WPPRecord, ...]:
-    reader = csv.DictReader(io.StringIO(payload.decode("utf-8")))
-    required = {
-        "location",
-        "location_code",
-        "year",
-        "variant",
-        "population_july_thousands",
-        "births_thousands",
-        "deaths_thousands",
-        "life_expectancy_years",
-        "under_five_mortality_per_1000",
-    }
-    if reader.fieldnames is None or set(reader.fieldnames) != required:
-        raise ValueError("The WPP fixture schema does not match the selected release.")
-    records: list[WPPRecord] = []
-    for row in reader:
-        record = WPPRecord(
-            location=row["location"],
-            location_code=row["location_code"],
-            year=int(row["year"]),
-            variant=row["variant"],
-            population_july_thousands=Decimal(row["population_july_thousands"]),
-            births_thousands=Decimal(row["births_thousands"]),
-            deaths_thousands=Decimal(row["deaths_thousands"]),
-            life_expectancy_years=Decimal(row["life_expectancy_years"]),
+NORMALIZED_FIELDS = {
+    "location",
+    "location_code",
+    "year",
+    "variant",
+    "population_july_thousands",
+    "births_thousands",
+    "deaths_thousands",
+    "life_expectancy_years",
+    "under_five_mortality_per_1000",
+}
+
+WORKBOOK_COLUMNS = {
+    "variant": (1, "Variant"),
+    "location": (2, "Region, subregion, country or area *"),
+    "location_code": (4, "Location code"),
+    "year": (10, "Year"),
+    "population_july_thousands": (
+        12,
+        "Total Population, as of 1 July (thousands)",
+    ),
+    "births_thousands": (23, "Births (thousands)"),
+    "deaths_thousands": (30, "Total Deaths (thousands)"),
+    "life_expectancy_years": (
+        34,
+        "Life Expectancy at Birth, both sexes (years)",
+    ),
+    "under_five_mortality_per_1000": (
+        50,
+        "Under-Five Mortality (deaths under age 5 per 1,000 live births)",
+    ),
+}
+
+
+def _record(
+    *,
+    location: object,
+    location_code: object,
+    year: object,
+    variant: object,
+    population_july_thousands: object,
+    births_thousands: object,
+    deaths_thousands: object,
+    life_expectancy_years: object,
+    under_five_mortality_per_1000: object,
+) -> WPPRecord:
+    try:
+        return WPPRecord(
+            location=str(location),
+            location_code=str(location_code),
+            year=int(str(year)),
+            variant=str(variant),
+            population_july_thousands=Decimal(
+                str(population_july_thousands)
+            ),
+            births_thousands=Decimal(str(births_thousands)),
+            deaths_thousands=Decimal(str(deaths_thousands)),
+            life_expectancy_years=Decimal(str(life_expectancy_years)),
             under_five_mortality_per_1000=Decimal(
-                row["under_five_mortality_per_1000"]
+                str(under_five_mortality_per_1000)
             ),
         )
+    except (TypeError, ValueError, ArithmeticError) as error:
+        raise ValueError("The WPP release contains an invalid measure.") from error
+
+
+def _validate_records(records: list[WPPRecord]) -> tuple[WPPRecord, ...]:
+    if not records or len({record.record_id for record in records}) != len(
+        records
+    ):
+        raise ValueError("The WPP release must contain unique World-year records.")
+    for record in records:
+        expected_variant = "Estimates" if record.year in ESTIMATE_YEARS else "Medium"
         if (
             record.location != "World"
             or record.location_code != "900"
-            or record.variant != "Estimates"
-            or record.year < 1950
-            or record.year > 2023
+            or record.year not in SUPPORTED_YEARS
+            or record.variant != expected_variant
         ):
-            raise ValueError("The WPP fixture contains an unsupported record.")
+            raise ValueError("The WPP release contains an unsupported record.")
         measures = (
             record.population_july_thousands,
             record.births_thousands,
@@ -200,25 +261,114 @@ def _parse(payload: bytes) -> tuple[WPPRecord, ...]:
             record.under_five_mortality_per_1000,
         )
         if not all(value.is_finite() for value in measures):
-            raise ValueError("The WPP fixture contains a non-finite measure.")
+            raise ValueError("The WPP release contains a non-finite measure.")
         if min(measures) <= 0:
-            raise ValueError("The WPP fixture contains a non-positive measure.")
-        records.append(record)
-    if not records or len({record.record_id for record in records}) != len(records):
-        raise ValueError("The WPP fixture must contain unique selected records.")
+            raise ValueError("The WPP release contains a non-positive measure.")
     years = {record.year for record in records}
-    if years != SELECTED_YEARS or len(records) != len(SELECTED_YEARS):
+    if years != SUPPORTED_YEARS or len(records) != len(SUPPORTED_YEARS):
         raise ValueError(
-            "The WPP fixture must contain exactly 1950, 1964, 1989, and 2023."
+            "The WPP release must contain exactly one World record for every "
+            "year from 1950 through 2025."
         )
-    return tuple(records)
+    return tuple(sorted(records, key=lambda record: record.year))
+
+
+def _parse_normalized_csv(payload: bytes) -> tuple[WPPRecord, ...]:
+    reader = csv.DictReader(io.StringIO(payload.decode("utf-8")))
+    if reader.fieldnames is None or set(reader.fieldnames) != NORMALIZED_FIELDS:
+        raise ValueError("The WPP normalized schema does not match GEN/01/REV1.")
+    records: list[WPPRecord] = []
+    for row in reader:
+        records.append(
+            _record(
+                location=row["location"],
+                location_code=row["location_code"],
+                year=row["year"],
+                variant=row["variant"],
+                population_july_thousands=row["population_july_thousands"],
+                births_thousands=row["births_thousands"],
+                deaths_thousands=row["deaths_thousands"],
+                life_expectancy_years=row["life_expectancy_years"],
+                under_five_mortality_per_1000=row[
+                    "under_five_mortality_per_1000"
+                ],
+            )
+        )
+    return _validate_records(records)
+
+
+def _parse_workbook(payload: bytes) -> tuple[WPPRecord, ...]:
+    workbook = load_workbook(
+        filename=BytesIO(payload),
+        read_only=True,
+        data_only=True,
+    )
+    required_sheets = {"Estimates", "Medium variant"}
+    if not required_sheets <= set(workbook.sheetnames):
+        raise ValueError("The WPP workbook is missing a required sheet.")
+    records: list[WPPRecord] = []
+    sheet_specs = (
+        ("Estimates", ESTIMATE_YEARS),
+        ("Medium variant", PROJECTION_YEARS),
+    )
+    for sheet_name, supported_years in sheet_specs:
+        sheet = workbook[sheet_name]
+        header = next(
+            sheet.iter_rows(min_row=17, max_row=17, values_only=True)
+        )
+        for index, expected in WORKBOOK_COLUMNS.values():
+            if header[index] != expected:
+                raise ValueError(
+                    f"The WPP workbook column contract changed on {sheet_name}."
+                )
+        found_world = False
+        for row in sheet.iter_rows(min_row=18, values_only=True):
+            location_code = row[WORKBOOK_COLUMNS["location_code"][0]]
+            if str(location_code) not in {"900", "900.0"}:
+                if found_world:
+                    break
+                continue
+            found_world = True
+            year = int(str(row[WORKBOOK_COLUMNS["year"][0]]))
+            if year not in supported_years:
+                continue
+            values: dict[str, Any] = {
+                name: row[index] for name, (index, _) in WORKBOOK_COLUMNS.items()
+            }
+            records.append(_record(**values))
+    workbook.close()
+    return _validate_records(records)
+
+
+def _parse(payload: bytes, *, input_format: str) -> tuple[WPPRecord, ...]:
+    if input_format == "normalized_csv":
+        return _parse_normalized_csv(payload)
+    if input_format == "official_xlsx":
+        return _parse_workbook(payload)
+    raise ValueError(f"Unsupported WPP input format: {input_format}.")
+
+
+def _retrieve(fixture_path: Path | None) -> tuple[bytes, str]:
+    if fixture_path is not None:
+        return (
+            fixture_path.read_bytes(),
+            "official_xlsx"
+            if fixture_path.suffix.lower() == ".xlsx"
+            else "normalized_csv",
+        )
+    request = urllib.request.Request(
+        UN_WPP_SOURCE_URL,
+        headers={"User-Agent": "day-perspective-offline-ingestion/0.4"},
+    )
+    with urllib.request.urlopen(request, timeout=120) as response:
+        return response.read(), "official_xlsx"
 
 
 def _methodology(session: Session) -> Methodology:
     existing = session.scalar(
         select(Methodology).where(
             Methodology.slug == "un-wpp-annual-context",
-            Methodology.version == "1",
+            Methodology.version == "2",
         )
     )
     if existing is not None:
@@ -234,12 +384,12 @@ def _methodology(session: Session) -> Methodology:
     }
     row = Methodology(
         slug="un-wpp-annual-context",
-        version="1",
+        version="2",
         name="UN WPP annual context and daily-equivalent method",
         description=definition["language"],
         method_kind="annual_context_and_uniform_allocation",
         formula="annual_total_persons / gregorian_days_in_year",
-        code_version="0.3.0",
+        code_version="0.4.0",
         definition_hash=content_hash(definition),
         legal_review_status=LegalReviewStatus.NOT_REQUIRED,
     )
@@ -275,29 +425,55 @@ def _register_license(session: Session, release_id: UUID) -> None:
 def ingest_un_wpp(
     session: Session,
     *,
-    fixture_path: Path,
+    fixture_path: Path | None = None,
     raw_store: RawSourceStore,
+    dry_run: bool = False,
 ) -> WPPIngestionResult:
-    payload = fixture_path.read_bytes()
+    payload, input_format = _retrieve(fixture_path)
     checksum = hashlib.sha256(payload).hexdigest()
+    mode = "fixture" if fixture_path is not None else "live"
     run = PipelineRun(
         pipeline_name="un-wpp-2024-adapter",
-        code_version="0.3.0",
+        code_version="0.4.0",
         configuration_hash=content_hash(
             {
                 "dataset": "GEN/01/REV1",
-                "fixture": True,
+                "mode": mode,
+                "input_format": input_format,
                 "source_url": UN_WPP_SOURCE_URL,
             }
         ),
         status="running",
-        details={"mode": "fixture", "official_source_excerpt": True},
+        details={"mode": mode, "input_format": input_format},
     )
     session.add(run)
     session.flush()
     try:
+        records = _parse(payload, input_format=input_format)
+        if dry_run:
+            run.status = "succeeded"
+            run.completed_at = datetime.now(UTC)
+            run.details = {
+                **run.details,
+                "dry_run": True,
+                "checksum": checksum,
+                "records": len(records),
+            }
+            session.add(
+                QualityCheck(
+                    pipeline_run_id=run.id,
+                    check_name="un_wpp_schema_supported_world_years",
+                    status="passed",
+                    subject_type="pipeline_run",
+                    subject_id=run.id,
+                    details={
+                        "dry_run": True,
+                        "years": [record.year for record in records],
+                    },
+                )
+            )
+            return WPPIngestionResult(run.id, None, 0, checksum, False)
         with session.begin_nested():
-            records = _parse(payload)
             source = session.scalar(
                 select(Source).where(Source.slug == UN_WPP_SOURCE_SLUG)
             )
@@ -314,6 +490,13 @@ def ingest_un_wpp(
                 )
                 session.add(source)
                 session.flush()
+            else:
+                source.name = "World Population Prospects 2024"
+                source.publisher = (
+                    "United Nations, Department of Economic and Social Affairs, "
+                    "Population Division"
+                )
+                source.canonical_url = "https://population.un.org/wpp/"
             existing = session.scalar(
                 select(SourceRelease).where(
                     SourceRelease.source_id == source.id,
@@ -321,6 +504,10 @@ def ingest_un_wpp(
                 )
             )
             if existing is not None:
+                raw_store.read(
+                    existing.raw_storage_uri,
+                    existing.raw_checksum_sha256,
+                )
                 _register_license(session, existing.id)
                 run.status = "succeeded"
                 run.completed_at = datetime.now(UTC)
@@ -341,7 +528,7 @@ def ingest_un_wpp(
             release = create_source_release(
                 session,
                 source_id=source.id,
-                release_label=f"wpp2024-gen01-selected-{checksum[:12]}",
+                release_label=f"wpp2024-gen01-rev1-{checksum[:12]}",
                 source_url=UN_WPP_SOURCE_URL,
                 raw_storage_uri=storage_uri,
                 raw_bytes=payload,
@@ -351,14 +538,19 @@ def ingest_un_wpp(
                     "dataset": "World Population Prospects 2024",
                     "quality_contract_version": "1",
                     "required_quality_checks": [
-                        "un_wpp_schema_selected_world_rows"
+                        "un_wpp_schema_supported_world_years"
                     ],
                     "file_identity": "GEN/01/REV1",
-                    "fixture": "official minimal excerpt",
+                    "input_format": input_format,
+                    "fixture": fixture_path is not None,
                     "upstream_source_file_sha256": (
-                        "98e34d9b65b53858cd08a57a566e45050b08093ad85ba5714fe6fbd78055ae6d"
+                        UN_WPP_WORKBOOK_SHA256
+                        if fixture_path is not None
+                        else checksum
                     ),
-                    "variant": "Estimates",
+                    "variants": ["Estimates", "Medium"],
+                    "supported_year_start": min(SUPPORTED_YEARS),
+                    "supported_year_end": max(SUPPORTED_YEARS),
                     "license": "CC-BY-3.0-IGO",
                 },
                 legal_review_status=LegalReviewStatus.NOT_REQUIRED,
@@ -389,7 +581,7 @@ def ingest_un_wpp(
                         source_record_locator=locator,
                         raw_storage_uri=storage_uri,
                         raw_checksum_sha256=record_hash,
-                        schema_version="wpp2024-gen01-selected-v1",
+                        schema_version="wpp2024-gen01-supported-years-v1",
                         payload_json=record_json,
                     )
                 )
@@ -407,7 +599,8 @@ def ingest_un_wpp(
                             "unit": unit,
                             "year": record.year,
                             "geography": "World",
-                            "variant": "Estimates",
+                            "variant": record.variant,
+                            "data_status": record.data_status.value,
                         },
                         assertion_status=ClaimAssertionStatus.CANDIDATE,
                         unit=unit,
@@ -419,7 +612,7 @@ def ingest_un_wpp(
                     claim.temporal_precision = TemporalPrecision.YEAR
                     claim.temporal_assignment = TemporalAssignment.DIRECT_RECORD
                     claim.date_role = DateRole.REPORTED
-                    claim.data_status = DataStatus.ESTIMATED
+                    claim.data_status = record.data_status
                     claim.pipeline_run_id = run.id
                     session.add(
                         ReviewTask(
@@ -435,7 +628,7 @@ def ingest_un_wpp(
             session.add(
                 QualityCheck(
                     pipeline_run_id=run.id,
-                    check_name="un_wpp_schema_selected_world_rows",
+                    check_name="un_wpp_schema_supported_world_years",
                     status="passed",
                     subject_type="source_release",
                     subject_id=release.id,
@@ -443,6 +636,16 @@ def ingest_un_wpp(
                         "records": len(records),
                         "claims": claim_count,
                         "years": [record.year for record in records],
+                        "estimate_years": [
+                            record.year
+                            for record in records
+                            if record.data_status == DataStatus.ESTIMATED
+                        ],
+                        "projection_years": [
+                            record.year
+                            for record in records
+                            if record.data_status == DataStatus.MODELED
+                        ],
                     },
                 )
             )
@@ -459,7 +662,7 @@ def ingest_un_wpp(
         session.add(
             QualityCheck(
                 pipeline_run_id=run.id,
-                check_name="un_wpp_schema_selected_world_rows",
+                check_name="un_wpp_schema_supported_world_years",
                 status="failed",
                 subject_type="pipeline_run",
                 subject_id=run.id,
@@ -470,7 +673,12 @@ def ingest_un_wpp(
         raise
 
 
-def review_un_wpp(session: Session, source_release_id: UUID) -> int:
+def review_un_wpp(
+    session: Session,
+    source_release_id: UUID,
+    *,
+    editorial_dates: tuple[date, ...] = (GOLDEN_DATE,),
+) -> int:
     claims = list(
         session.scalars(
             select(Claim)
@@ -478,8 +686,22 @@ def review_un_wpp(session: Session, source_release_id: UUID) -> int:
             .order_by(Claim.claim_type, Claim.temporal_start)
         )
     )
-    if len(claims) != 20:
-        raise ValueError("The selected WPP fixture must contain twenty claims.")
+    required_predicates = set(METRIC_DEFINITIONS)
+    claims_by_year: dict[int, list[Claim]] = {}
+    for claim in claims:
+        if claim.temporal_start is None:
+            raise ValueError("Every WPP claim requires an annual period.")
+        claims_by_year.setdefault(claim.temporal_start.year, []).append(claim)
+    if set(claims_by_year) != SUPPORTED_YEARS or any(
+        {claim.claim_type for claim in year_claims} != required_predicates
+        or len(year_claims) != len(required_predicates)
+        for year_claims in claims_by_year.values()
+    ):
+        raise ValueError(
+            "WPP review requires five claims for every year from 1950 through 2025."
+        )
+    if any(selected.year not in SUPPORTED_YEARS for selected in editorial_dates):
+        raise ValueError("WPP editorial dates must use a supported year.")
     blocked = [
         claim.claim_type
         for claim in claims
@@ -567,6 +789,7 @@ def review_un_wpp(session: Session, source_release_id: UUID) -> int:
             session.flush()
         else:
             metric.provenance_resolved_claim_id = resolved_row.id
+            metric.methodology_id = methodology.id
         observation = session.scalar(
             select(Observation).where(
                 Observation.metric_id == metric.id,
@@ -585,7 +808,7 @@ def review_un_wpp(session: Session, source_release_id: UUID) -> int:
                 temporal_assignment=TemporalAssignment.DIRECT_RECORD,
                 date_role=DateRole.REPORTED,
                 value_numeric=claim.lower_bound,
-                data_status=DataStatus.ESTIMATED,
+                data_status=claim.data_status,
             )
             session.add(observation)
             session.flush()
@@ -605,26 +828,29 @@ def review_un_wpp(session: Session, source_release_id: UUID) -> int:
                     period_start=date(year, 1, 1),
                     period_end=date(year, 12, 31),
                     coverage_fraction=Decimal("1"),
-                    data_status=DataStatus.ESTIMATED,
+                    data_status=claim.data_status,
                     comparability_status=ComparabilityStatus.COMPARABLE,
                 )
             )
-        if year == GOLDEN_YEAR:
-            section = (
-                "typical_day_in_this_year"
-                if claim.claim_type in {"annual_births", "annual_deaths"}
-                else "wider_historical_context"
-            )
-            record_editorial_selection(
-                session,
-                profile_date=GOLDEN_DATE,
-                section_key=section,
-                resolved_claim_id=resolved_row.id,
-                status=EditorialSelectionStatus.SELECTED,
-                display_rank=resolved_count + 1,
-                rationale="Selected official annual context for the golden date.",
-                reviewed_by="development-fixture-review",
-            )
+        for selected_date in editorial_dates:
+            if year == selected_date.year:
+                section = (
+                    "typical_day_in_this_year"
+                    if claim.claim_type in {"annual_births", "annual_deaths"}
+                    else "wider_historical_context"
+                )
+                record_editorial_selection(
+                    session,
+                    profile_date=selected_date,
+                    section_key=section,
+                    resolved_claim_id=resolved_row.id,
+                    status=EditorialSelectionStatus.SELECTED,
+                    display_rank=resolved_count + 1,
+                    rationale=(
+                        "Selected official annual context for this profile date."
+                    ),
+                    reviewed_by="development-fixture-review",
+                )
         resolved_count += 1
     for task in session.scalars(
         select(ReviewTask).where(
@@ -634,108 +860,125 @@ def review_un_wpp(session: Session, source_release_id: UUID) -> int:
     ):
         task.status = "resolved"
         task.completed_at = datetime.now(UTC)
-    year_claims = {
-        claim.claim_type: claim
-        for claim in claims
-        if claim.temporal_start is not None and claim.temporal_start.year == GOLDEN_YEAR
-    }
-    for predicate in ("annual_births", "annual_deaths"):
-        claim = year_claims[predicate]
-        resolved_input = session.scalar(
-            select(ResolvedClaim)
-            .where(
-                ResolvedClaim.canonical_key
-                == f"un-wpp:world:{GOLDEN_YEAR}:{predicate}"
+    for year in sorted(SUPPORTED_YEARS):
+        year_claims = {
+            claim.claim_type: claim for claim in claims_by_year[year]
+        }
+        for predicate in ("annual_births", "annual_deaths"):
+            claim = year_claims[predicate]
+            resolved_input = session.scalar(
+                select(ResolvedClaim)
+                .where(
+                    ResolvedClaim.canonical_key
+                    == f"un-wpp:world:{year}:{predicate}"
+                )
+                .order_by(ResolvedClaim.version.desc())
             )
-            .order_by(ResolvedClaim.version.desc())
-        )
-        assert resolved_input is not None
-        annual_thousands = Decimal(str((claim.assertion_json or {})["value"]))
-        days = Decimal("366" if GOLDEN_YEAR % 4 == 0 else "365")
-        daily = (annual_thousands * Decimal("1000") / days).quantize(
-            Decimal("1"), rounding=ROUND_HALF_UP
-        )
-        fingerprint = content_hash(
-            {
-                "resolved_claim_id": str(resolved_input.id),
-                "resolved_version": resolved_input.version,
-                "days": str(days),
-                "annual_thousands": str(annual_thousands),
-            }
-        )
-        derived = session.scalar(
-            select(DerivedValue).where(
-                DerivedValue.value_kind == f"average_daily_{predicate[7:]}",
-                DerivedValue.period_start == date(GOLDEN_YEAR, 1, 1),
-                DerivedValue.input_fingerprint == fingerprint,
+            assert resolved_input is not None
+            annual_thousands = Decimal(
+                str((claim.assertion_json or {})["value"])
             )
-        )
-        if derived is None:
-            daily_metric_key = f"app:average_daily_{predicate[7:]}"
-            daily_metric = session.scalar(
-                select(Metric).where(Metric.metric_key == daily_metric_key)
+            days = Decimal(366 if calendar.isleap(year) else 365)
+            daily = (annual_thousands * Decimal("1000") / days).quantize(
+                Decimal("1"), rounding=ROUND_HALF_UP
             )
-            if daily_metric is None:
-                daily_metric = Metric(
-                    metric_key=daily_metric_key,
-                    display_name=f"Average daily {predicate[7:]}",
-                    unit="persons per day",
-                    definition=(
-                        "Uniform daily equivalent calculated from an annual total; "
-                        "not a date-specific observation."
-                    ),
-                    data_status=DataStatus.MODELED,
-                    provenance_resolved_claim_id=resolved_input.id,
+            fingerprint = content_hash(
+                {
+                    "resolved_claim_id": str(resolved_input.id),
+                    "resolved_version": resolved_input.version,
+                    "days": str(days),
+                    "annual_thousands": str(annual_thousands),
+                }
+            )
+            derived = session.scalar(
+                select(DerivedValue).where(
+                    DerivedValue.value_kind
+                    == f"average_daily_{predicate[7:]}",
+                    DerivedValue.period_start == date(year, 1, 1),
+                    DerivedValue.input_fingerprint == fingerprint,
+                )
+            )
+            if derived is None:
+                daily_metric_key = f"app:average_daily_{predicate[7:]}"
+                daily_metric = session.scalar(
+                    select(Metric).where(
+                        Metric.metric_key == daily_metric_key
+                    )
+                )
+                if daily_metric is None:
+                    daily_metric = Metric(
+                        metric_key=daily_metric_key,
+                        display_name=f"Average daily {predicate[7:]}",
+                        unit="persons per day",
+                        definition=(
+                            "Uniform daily equivalent calculated from an annual "
+                            "total; not a date-specific observation."
+                        ),
+                        data_status=DataStatus.MODELED,
+                        provenance_resolved_claim_id=resolved_input.id,
+                        methodology_id=methodology.id,
+                    )
+                    session.add(daily_metric)
+                    session.flush()
+                else:
+                    daily_metric.provenance_resolved_claim_id = (
+                        resolved_input.id
+                    )
+                    daily_metric.methodology_id = methodology.id
+                derived = DerivedValue(
+                    metric_id=daily_metric.id,
                     methodology_id=methodology.id,
+                    provenance_resolved_claim_id=resolved_input.id,
+                    value_kind=f"average_daily_{predicate[7:]}",
+                    period_start=date(year, 1, 1),
+                    period_end=date(year, 12, 31),
+                    temporal_assignment=(
+                        TemporalAssignment.UNIFORM_PERIOD_ALLOCATION
+                    ),
+                    value_numeric=daily,
+                    value_json={
+                        "annual_total_thousands": str(annual_thousands),
+                        "days_in_year": int(days),
+                        "average_daily_equivalent": int(daily),
+                        "display_precision": "nearest whole person",
+                        "source_data_status": claim.data_status.value,
+                    },
+                    data_status=claim.data_status,
+                    comparability_status=ComparabilityStatus.COMPARABLE,
+                    input_fingerprint=fingerprint,
+                    calculation_version="0.4.0",
                 )
-                session.add(daily_metric)
+                session.add(derived)
                 session.flush()
-            else:
-                daily_metric.provenance_resolved_claim_id = resolved_input.id
-            derived = DerivedValue(
-                metric_id=daily_metric.id,
-                methodology_id=methodology.id,
-                provenance_resolved_claim_id=resolved_input.id,
-                value_kind=f"average_daily_{predicate[7:]}",
-                period_start=date(GOLDEN_YEAR, 1, 1),
-                period_end=date(GOLDEN_YEAR, 12, 31),
-                temporal_assignment=TemporalAssignment.UNIFORM_PERIOD_ALLOCATION,
-                value_numeric=daily,
-                value_json={
-                    "annual_total_thousands": str(annual_thousands),
-                    "days_in_year": int(days),
-                    "average_daily_equivalent": int(daily),
-                    "display_precision": "nearest whole person",
-                },
-                data_status=DataStatus.ESTIMATED,
-                comparability_status=ComparabilityStatus.COMPARABLE,
-                input_fingerprint=fingerprint,
-                calculation_version="0.3.0",
-            )
-            session.add(derived)
-            session.flush()
-            session.add(
-                DerivedValueInput(
-                    derived_value_id=derived.id,
-                    resolved_claim_id=resolved_input.id,
-                    input_role="primary",
+                session.add(
+                    DerivedValueInput(
+                        derived_value_id=derived.id,
+                        resolved_claim_id=resolved_input.id,
+                        input_role="primary",
+                    )
                 )
-            )
-        record_editorial_selection(
-            session,
-            profile_date=GOLDEN_DATE,
-            section_key="typical_day_in_this_year",
-            derived_value_id=derived.id,
-            status=EditorialSelectionStatus.SELECTED,
-            display_rank=1 if predicate == "annual_births" else 2,
-            rationale="Selected annual total converted to a uniform daily equivalent.",
-            reviewed_by="development-fixture-review",
-        )
+            for selected_date in editorial_dates:
+                if selected_date.year == year:
+                    record_editorial_selection(
+                        session,
+                        profile_date=selected_date,
+                        section_key="typical_day_in_this_year",
+                        derived_value_id=derived.id,
+                        status=EditorialSelectionStatus.SELECTED,
+                        display_rank=(
+                            1 if predicate == "annual_births" else 2
+                        ),
+                        rationale=(
+                            "Selected annual total converted to a uniform daily "
+                            "equivalent."
+                        ),
+                        reviewed_by="development-fixture-review",
+                    )
     existing_assessment = session.scalar(
         select(QualityAssessment).where(
             QualityAssessment.source_release_id == source_release_id,
             QualityAssessment.assessment_kind
-            == "un_wpp_selected_context_quality_v1",
+            == "un_wpp_supported_context_quality_v1",
         )
     )
     if existing_assessment is None:
@@ -743,18 +986,18 @@ def review_un_wpp(session: Session, source_release_id: UUID) -> int:
             QualityAssessment(
             source_release_id=source_release_id,
             methodology_id=methodology.id,
-            assessment_kind="un_wpp_selected_context_quality_v1",
+            assessment_kind="un_wpp_supported_context_quality_v1",
             findings={
                 "source_resolution": "annual",
-                "data_status": "estimated",
-                "coverage": "World aggregate, selected fixture years",
+                "data_status": "estimated through 2023; modeled projection after",
+                "coverage": "World aggregate, every year from 1950 through 2025",
                 "daily_equivalent": "uniform allocation, not date-specific",
             },
             public_grade="B",
             public_explanation=(
-                "Grade B: official annual UN estimates with clear methodology and "
-                "coverage; daily values are transparent uniform equivalents, not "
-                "observations for March 27."
+                "Grade B: official annual UN estimates and medium projections "
+                "with clear methodology and complete 1950-2025 coverage; daily "
+                "values are transparent uniform equivalents, not date observations."
             ),
             legal_review_status=LegalReviewStatus.NOT_REQUIRED,
             )
@@ -846,7 +1089,14 @@ def _derived_provenance(
     }
 
 
-def build_un_wpp_profile_content(session: Session) -> WPPProfileContent:
+def build_un_wpp_profile_content(
+    session: Session,
+    *,
+    profile_date: date = GOLDEN_DATE,
+) -> WPPProfileContent:
+    profile_year = profile_date.year
+    if profile_year not in SUPPORTED_YEARS:
+        raise ValueError("UN WPP context is unavailable before 1950 or after 2025.")
     source = session.scalar(
         select(Source).where(Source.slug == UN_WPP_SOURCE_SLUG)
     )
@@ -865,7 +1115,7 @@ def build_un_wpp_profile_content(session: Session) -> WPPProfileContent:
         for claim in session.scalars(
             select(Claim).where(
                 Claim.source_release_id == release.id,
-                Claim.temporal_start == date(GOLDEN_YEAR, 1, 1),
+                Claim.temporal_start == date(profile_year, 1, 1),
             )
         )
     }
@@ -915,7 +1165,7 @@ def build_un_wpp_profile_content(session: Session) -> WPPProfileContent:
         select(DerivedValue)
         .where(
             DerivedValue.methodology_id == methodology.id,
-            DerivedValue.period_start == date(GOLDEN_YEAR, 1, 1),
+            DerivedValue.period_start == date(profile_year, 1, 1),
         )
         .order_by(DerivedValue.created_at.desc())
     ):
@@ -940,7 +1190,7 @@ def build_un_wpp_profile_content(session: Session) -> WPPProfileContent:
     assert_release_publication_eligible(
         session,
         source_release_id=release.id,
-        profile_date=GOLDEN_DATE,
+        profile_date=profile_date,
         resolved_root_ids_by_section={
             "wider_historical_context": {
                 resolved_rows[key].id
@@ -963,26 +1213,32 @@ def build_un_wpp_profile_content(session: Session) -> WPPProfileContent:
         (("annual_births", "births"), ("annual_deaths", "deaths"))
     ):
         value = derived[f"average_daily_{label}"]
-        daily = int(value.value_numeric or 0)
+        if value.value_numeric is None:
+            raise ValueError("UN WPP daily equivalent is missing its value.")
+        daily = int(value.value_numeric)
+        status = claims[predicate].data_status.value
+        selected_date_label = f"{profile_date:%B} {profile_date.day}"
         typical.append(
             {
                 "statement_id": f"average-daily-{label}",
                 "statement": (
-                    f"Average daily {label} in 1964: about {daily:,}. "
+                    f"Average daily {label} in {profile_year}: about {daily:,}. "
                     "This is an average daily equivalent based on the annual total, "
-                    "not an observation for March 27."
+                    f"not an observation for {selected_date_label}."
                 ),
                 "details": {
                     **(value.value_json or {}),
                     "temporal_assignment": "uniform_period_allocation",
-                    "data_status": "estimated",
+                    "data_status": status,
                     "interpretation": (
                         "Average daily equivalent based on annual total. This is not "
-                        "the number observed on March 27."
+                        f"the number observed on {selected_date_label}."
                     ),
                 },
                 "provenance_note": (
-                    "UN WPP annual estimate divided by 366 days; not date-specific."
+                    f"UN WPP annual value divided by "
+                    f"{366 if calendar.isleap(profile_year) else 365} days; "
+                    "not date-specific."
                 ),
                 "provenance": _derived_provenance(
                     derived=value,
@@ -1008,12 +1264,28 @@ def build_un_wpp_profile_content(session: Session) -> WPPProfileContent:
     under_five_mortality = Decimal(
         str(resolved_rows["under_five_mortality"].resolved_value["value"])
     )
+    population_verb = (
+        "estimates"
+        if claims["population_midyear"].data_status == DataStatus.ESTIMATED
+        else "projects"
+    )
+    life_expectancy_verb = (
+        "estimates"
+        if claims["life_expectancy"].data_status == DataStatus.ESTIMATED
+        else "projects"
+    )
+    mortality_verb = (
+        "estimates"
+        if claims["under_five_mortality"].data_status == DataStatus.ESTIMATED
+        else "projects"
+    )
     context_specs = (
         (
             "population_midyear",
             "world-population",
             (
-                "UN WPP estimates the mid-1964 world population at about "
+                f"UN WPP {population_verb} the mid-{profile_year} world "
+                "population at about "
                 f"{population_thousands / Decimal('1000000'):.3f} billion."
             ),
         ),
@@ -1021,7 +1293,8 @@ def build_un_wpp_profile_content(session: Session) -> WPPProfileContent:
             "life_expectancy",
             "world-life-expectancy",
             (
-                "UN WPP estimates global life expectancy at birth in 1964 at "
+                f"UN WPP {life_expectancy_verb} global life expectancy at birth "
+                f"in {profile_year} at "
                 f"{life_expectancy:.2f} years."
             ),
         ),
@@ -1029,7 +1302,8 @@ def build_un_wpp_profile_content(session: Session) -> WPPProfileContent:
             "under_five_mortality",
             "world-under-five-mortality",
             (
-                "UN WPP estimates 1964 global under-five mortality at about "
+                f"UN WPP {mortality_verb} {profile_year} global under-five "
+                "mortality at about "
                 f"{under_five_mortality:.0f} deaths per 1,000 live births."
             ),
         ),
@@ -1046,9 +1320,13 @@ def build_un_wpp_profile_content(session: Session) -> WPPProfileContent:
                     **(claim.assertion_json or {}),
                     "temporal_assignment": "direct_record",
                     "temporal_precision": "year",
-                    "data_status": "estimated",
+                    "data_status": claim.data_status.value,
                 },
-                "provenance_note": "Official annual UN WPP estimate.",
+                "provenance_note": (
+                    "Official annual UN WPP estimate."
+                    if claim.data_status == DataStatus.ESTIMATED
+                    else "Official annual UN WPP medium projection."
+                ),
                 "provenance": _claim_provenance(
                     claim=claim,
                     resolved=resolved_row,

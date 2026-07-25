@@ -34,6 +34,8 @@ cyclonedx-python-lib==11.11.0
     # via pip-audit
 defusedxml==0.7.1
     # via py-serializable
+et-xmlfile==2.0.0
+    # via openpyxl
 fastapi==0.139.2
     # via day-perspective-api (services/api/pyproject.toml)
 filelock==3.32.0
@@ -75,6 +77,8 @@ mypy==1.14.1
     # via day-perspective-api (services/api/pyproject.toml)
 mypy-extensions==1.1.0
     # via mypy
+openpyxl==3.1.5
+    # via day-perspective-api (services/api/pyproject.toml)
 packageurl-python==0.17.6
     # via cyclonedx-python-lib
 packaging==26.2

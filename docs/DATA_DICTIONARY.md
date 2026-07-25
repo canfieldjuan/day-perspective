@@ -178,8 +178,10 @@ allocating it to individual dates. It is distinct from `direct_record`,
 ### Current structured metric records
 
 UN WPP review materializes five metrics, annual observations and coverage for
-the selected fixture years. Average daily births and deaths are separate
-derived metrics with `uniform_period_allocation`. UCDP review materializes an
+every World aggregate year from 1950 through 2025. Rows through 2023 use
+`estimated`; the 2024 and 2025 medium-variant rows use `modeled`. Average daily
+births and deaths are separate derived metrics with
+`uniform_period_allocation`. UCDP review materializes an
 active state-based-conflict count derived from 25 resolved conflict-year inputs
 using `period_context`. UCDP GED fatalities are stored in `event_impacts` with
 directness `direct`; low and high bounds remain on the source claim and resolved

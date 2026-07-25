@@ -501,3 +501,29 @@ consistent.
 
 **Revisit trigger:** A distributed editorial command service owns sequencing
 with equivalent database guarantees.
+
+## D026: Preserve the WPP estimate-to-projection boundary
+
+**Decision:** The UN WPP adapter imports World aggregate rows for every year
+from 1950 through 2025 from the pinned `GEN/01/REV1` release. Years 1950–2023
+come from `Estimates` and use `estimated`; years 2024–2025 come from the
+`Medium variant` and use `modeled`. Tests use a normalized attributed fixture
+extracted from the pinned workbook; live ingestion stores the exact workbook.
+
+**Context:** The product shell requires demographic context through 2025, but
+WPP 2024 stops historical estimates at 2023. Treating the medium projection as
+an estimate would conceal a material evidence distinction.
+
+**Alternatives considered:** Stop demographic coverage at 2023; label all rows
+as estimates; query the WPP API during page rendering; commit the 26 MB
+workbook as a test fixture.
+
+**Reason:** Explicit status preserves the epistemic contract while a normalized
+fixture keeps tests fast, reviewable and network-independent.
+
+**Consequences:** Public profile builders must display projection language for
+2024–2025, parser validation must cover both workbook sheets, and source
+revision tests must preserve immutable earlier releases.
+
+**Revisit trigger:** A later official WPP release reclassifies the supported
+years or product policy excludes projected annual context.

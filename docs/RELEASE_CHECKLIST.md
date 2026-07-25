@@ -8,9 +8,9 @@ Overall status: **not MVP complete; release blocked**
 
 - [x] Repository installs from pinned JavaScript and Python lockfiles
 - [x] PostgreSQL/PostGIS starts locally
-- [x] Database migrates from zero through `20260724_0009`
+- [x] Database migrates from zero through `20260724_0011`
 - [x] USGS fixture ingests, reviews, resolves and publishes
-- [x] UN WPP fixture ingests and publishes annual demographic context
+- [x] UN WPP fixture ingests all supported years and publishes annual demographic context
 - [x] UCDP annual and GED fixtures ingest without network-dependent tests
 - [x] Wikidata fixture creates candidates without automatic acceptance
 - [x] Missing casualties remain absent rather than zero
@@ -32,7 +32,7 @@ Overall status: **not MVP complete; release blocked**
 - [ ] Golden 100 profiles automatically validated
 - [ ] Golden 100 manually reviewed
 - [ ] At least one published profile in each supported era
-- [ ] UN WPP full supported-year pipeline
+- [x] UN WPP full supported-year pipeline
 - [ ] UCDP full supported-year pipeline and revision processing
 - [ ] Wikidata/Wikimedia people, organizations, births, deaths and merge review
 - [ ] Curated apocalypse catalog

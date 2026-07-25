@@ -152,11 +152,14 @@ Open `http://localhost:3000/day/1964-03-27`. Live official retrieval is an expli
 ```bash
 make ingest-usgs-dry-run
 make ingest-usgs-live
+make ingest-un-wpp-dry-run
+make ingest-un-wpp-live
 ```
 
 A changed response creates a new immutable source release. Do not use live
-ingestion in automated tests. UN WPP, UCDP and Wikidata currently support the
-committed fixture path only.
+ingestion in automated tests. UN WPP supports the pinned official
+`GEN/01/REV1` workbook and the committed normalized World fixture for every
+year from 1950 through 2025. UCDP and Wikidata remain fixture-only.
 
 The minimal review API is development-only. Send `X-Development-Review-Token` with the value configured by `DEVELOPMENT_REVIEW_TOKEN` to `/api/v1/admin/claims`, `/api/v1/admin/conflicts`, `/api/v1/admin/review-tasks`, claim decision, release resolution, publication, and manifest endpoints. This guard is not secure authentication.
 
