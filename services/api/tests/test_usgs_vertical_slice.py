@@ -310,6 +310,11 @@ def test_event_time_conversion_and_local_civil_date_assignment(
     assert event_time.utc_offset_minutes == -600
     assert event_time.timezone_name == "America/Anchorage"
     assert "historical" in (event_time.interpretation or "").lower()
+    local_date_claim = session.scalar(
+        select(Claim).where(Claim.claim_type == "local_civil_date")
+    )
+    assert local_date_claim is not None
+    assert local_date_claim.temporal_assignment.value == "inferred"
     local_date_resolution = session.scalar(
         select(ResolvedClaim).where(
             ResolvedClaim.canonical_key
@@ -361,6 +366,18 @@ def test_dependent_lineage_is_not_counted_as_independent() -> None:
     )
 
     assert decision.independent_source_count == 2
+
+
+def test_non_authoritative_dependent_evidence_remains_unresolved() -> None:
+    decision = deterministic_resolution(
+        (
+            EvidenceCandidate("same", False, "republisher-root"),
+            EvidenceCandidate("same", False, "republisher-root"),
+        )
+    )
+
+    assert decision.status == "unresolved"
+    assert decision.independent_source_count == 1
 
 
 def test_unbounded_disagreement_remains_unresolved() -> None:
@@ -573,6 +590,68 @@ def test_manifest_and_object_hashes_match_and_include_required_snapshot_metadata
     assert manifest.storage_uri == "day/1964-03-27/profile-v1.json"
     assert manifest.metadata_json["source_release_ids"] == [str(result.source_release_id)]
     assert manifest.metadata_json["resolved_claim_versions"]
+
+
+def test_ingestion_repairs_required_official_source_attribution(
+    session: Session, tmp_path: Path
+) -> None:
+    session.add(
+        Source(
+            slug="usgs-earthquake-catalog",
+            name="Stale source name",
+            publisher=None,
+            canonical_url="https://example.invalid/stale",
+        )
+    )
+    session.flush()
+
+    publish(session, tmp_path)
+    source = session.scalar(
+        select(Source).where(Source.slug == "usgs-earthquake-catalog")
+    )
+
+    assert source is not None
+    assert source.publisher == "U.S. Geological Survey, Earthquake Hazards Program"
+
+
+def test_publication_uses_release_from_latest_successful_retrieval(
+    session: Session, tmp_path: Path
+) -> None:
+    store = LocalFilesystemRawSourceStore(tmp_path / "raw")
+    first = ingest_usgs(
+        session,
+        adapter=USGSEarthquakeAdapter(),
+        raw_store=store,
+        fixture_path=FIXTURE,
+    )
+    revised_fixture = tmp_path / "revised.geojson"
+    revised_payload = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    revised_payload["features"][0]["properties"]["title"] = "Revised fixture title"
+    revised_fixture.write_text(json.dumps(revised_payload), encoding="utf-8")
+    ingest_usgs(
+        session,
+        adapter=USGSEarthquakeAdapter(),
+        raw_store=store,
+        fixture_path=revised_fixture,
+    )
+    latest = ingest_usgs(
+        session,
+        adapter=USGSEarthquakeAdapter(),
+        raw_store=store,
+        fixture_path=FIXTURE,
+    )
+
+    profile = publish_golden_profile(
+        session,
+        store=LocalFilesystemPublishedProfileStore(tmp_path / "published"),
+    )
+    manifest = session.get(PublicationManifest, profile.publication_manifest_id)
+
+    assert latest.source_release_id == first.source_release_id
+    assert manifest is not None
+    assert manifest.metadata_json["source_release_ids"] == [
+        str(first.source_release_id)
+    ]
 
 
 def test_republish_creates_version_two_without_mutating_version_one(

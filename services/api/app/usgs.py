@@ -298,6 +298,7 @@ class USGSEarthquakeAdapter:
                     "utc_offset_minutes": int(offset.total_seconds() / 60),
                 },
                 temporal_precision=TemporalPrecision.DAY,
+                temporal_assignment=TemporalAssignment.INFERRED,
                 date_role=DateRole.OCCURRED,
             ),
             ClaimDraft(
@@ -418,6 +419,10 @@ def ingest_usgs(
                 )
                 session.add(source)
                 session.flush()
+            else:
+                source.name = adapter.metadata.name
+                source.publisher = adapter.metadata.publisher
+                source.canonical_url = adapter.metadata.canonical_url
             existing_release = session.scalar(
                 select(SourceRelease).where(
                     SourceRelease.source_id == source.id,
@@ -643,6 +648,17 @@ def deterministic_resolution(
             tuple(dissenting),
             independent,
             "Unresolved disagreement remains outside the declared agreement rule.",
+        )
+    if not authoritative and independent < 2:
+        return ResolutionDecision(
+            "unresolved",
+            tuple(supporting),
+            (),
+            independent,
+            (
+                "Unresolved evidence lacks an authoritative source or independent "
+                "corroboration."
+            ),
         )
     return ResolutionDecision(
         "accepted",
@@ -1072,9 +1088,18 @@ def publish_golden_profile(
         raise ValueError("USGS fixture has not been ingested.")
     release = session.scalar(
         select(SourceRelease)
-        .join(PipelineRun, SourceRelease.pipeline_run_id == PipelineRun.id)
-        .where(SourceRelease.source_id == source.id)
-        .order_by(PipelineRun.started_at.desc(), SourceRelease.id.desc())
+        .join(
+            QualityCheck,
+            QualityCheck.subject_id == SourceRelease.id,
+        )
+        .join(PipelineRun, QualityCheck.pipeline_run_id == PipelineRun.id)
+        .where(
+            SourceRelease.source_id == source.id,
+            QualityCheck.subject_type == "source_release",
+            QualityCheck.check_name == "usgs_schema_and_golden_record",
+            QualityCheck.status == "passed",
+        )
+        .order_by(PipelineRun.started_at.desc(), QualityCheck.id.desc())
     )
     if release is None:
         raise ValueError("USGS fixture has no source release.")
