@@ -120,7 +120,7 @@ export function DayProfileClient({
               contentHash: payload.content_hash
             },
             adjacentArrival: hasNavigated() || arrivalNumber > 1,
-              navigatedArrival: hasNavigated()
+            navigatedArrival: hasNavigated()
           });
         }
       } catch {
@@ -130,7 +130,7 @@ export function DayProfileClient({
             date,
             view: { kind: "api-error" },
             adjacentArrival: hasNavigated() || arrivalNumber > 1,
-              navigatedArrival: hasNavigated()
+            navigatedArrival: hasNavigated()
           });
         }
       }

@@ -342,7 +342,6 @@ describe("DayProfileClient focus discipline", () => {
 
 describe("DayProfileClient first-load retry focus", () => {
   it("never moves focus to the heading when retrying without navigation", async () => {
-    const { resetArrivalsForTests } = await import("@/src/lib/travel-store");
     resetArrivalsForTests();
     const fetchMock = vi
       .spyOn(global, "fetch")
