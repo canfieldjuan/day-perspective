@@ -68,6 +68,18 @@ describe("EvidencePanel", () => {
     expect(screen.getByText(/Test method/)).toBeInTheDocument();
   });
 
+  it("renders the statement's quality grade inside the chain when provided", () => {
+    render(
+      <EvidencePanel
+        open
+        qualityGrade="B"
+        statement={statement}
+        onClose={() => undefined}
+      />
+    );
+    expect(screen.getByText("Grade B")).toBeInTheDocument();
+  });
+
   it("states the canonical empty-dissent line when no dissent exists", () => {
     const undisputed: ProfileStatement = {
       ...statement,

@@ -227,5 +227,64 @@
 }
 
 .publication-integrity summary {
+  align-items: center;
   cursor: pointer;
+  display: flex;
+  min-height: 44px;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .travel-shell[data-phase="arrived"][data-entry="initial"] .stratum {
+    animation: stratum-arrive 280ms ease-out both;
+  }
+
+  .travel-shell[data-phase="arrived"][data-entry="initial"] .stratum:nth-of-type(2) {
+    animation-delay: 60ms;
+  }
+
+  .travel-shell[data-phase="arrived"][data-entry="initial"] .stratum:nth-of-type(3) {
+    animation-delay: 120ms;
+  }
+
+  .travel-shell[data-phase="arrived"][data-entry="initial"] .stratum:nth-of-type(4) {
+    animation-delay: 180ms;
+  }
+
+  .travel-shell[data-phase="arrived"][data-entry="initial"] .stratum:nth-of-type(5) {
+    animation-delay: 240ms;
+  }
+
+  .travel-shell[data-phase="arrived"][data-entry="initial"] .stratum:nth-of-type(6) {
+    animation-delay: 300ms;
+  }
+
+  .travel-shell[data-phase="arrived"][data-entry="initial"] .stratum:nth-of-type(7) {
+    animation-delay: 360ms;
+  }
+
+  .travel-shell[data-phase="arrived"][data-entry="adjacent"] .strata {
+    animation: quick-arrive 180ms ease-out both;
+  }
+}
+
+@keyframes stratum-arrive {
+  from {
+    opacity: 0;
+    transform: translateY(0.5rem);
+  }
+
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes quick-arrive {
+  from {
+    opacity: 0.4;
+  }
+
+  to {
+    opacity: 1;
+  }
 }
