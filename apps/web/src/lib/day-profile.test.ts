@@ -130,3 +130,11 @@ describe("isPublishedProfileResponse optional metadata", () => {
     ).toBe(false);
   });
 });
+
+describe("eraLineForDate calendar validity", () => {
+  it("refuses impossible dates that are lexically in range", async () => {
+    const { eraLineForDate } = await import("./day-profile");
+    expect(eraLineForDate("1964-02-30")).toBeNull();
+    expect(eraLineForDate("1900-99-99")).toBeNull();
+  });
+});

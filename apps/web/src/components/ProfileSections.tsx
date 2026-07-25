@@ -55,6 +55,17 @@ export function ProfileSections({
         const headingId = section.id + "-heading";
         const statements = sections?.[section.key];
         const sectionState = sectionStates?.[section.key];
+        const recordedPopulated =
+          availability === "published" &&
+          (sections?.recorded_on_this_date?.length ?? 0) > 0;
+        const typicalPopulated =
+          availability === "published" &&
+          (sections?.typical_day_in_this_year?.length ?? 0) > 0;
+        const leadSectionKey = recordedPopulated
+          ? "recorded_on_this_date"
+          : typicalPopulated
+            ? "typical_day_in_this_year"
+            : null;
         const populated =
           availability === "published" &&
           statements !== undefined &&
@@ -88,7 +99,7 @@ export function ProfileSections({
                     )
                   : null;
                 const isLead =
-                  section.key === "recorded_on_this_date" && statementIndex === 0;
+                  section.key === leadSectionKey && statementIndex === 0;
 
                 return (
                 <article
@@ -114,7 +125,7 @@ export function ProfileSections({
                       </span>
                     ) : null}
                   </p>
-                  <p>{statement.statement}</p>
+                  <p className="statement-text">{statement.statement}</p>
                   {caveat ? <p className="evidence-caveat">{caveat}</p> : null}
                   {statement.provenance_note ? (
                     <p className="profile-statement__provenance">{statement.provenance_note}</p>
@@ -186,7 +197,9 @@ export function ProfileSections({
               <p className="stratum__state">
                 {availability === "published"
                   ? sectionState?.reason ??
-                    "No evidence-backed content was published for this section."
+                    (section.key === "recorded_on_this_date"
+                      ? "No reviewed event is published for this date."
+                      : "No evidence-backed content was published for this section.")
                   : sectionMessages[availability]}
               </p>
             )}

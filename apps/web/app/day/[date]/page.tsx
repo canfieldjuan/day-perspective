@@ -40,13 +40,17 @@ export default async function DayProfilePage({ params }: DayPageProps) {
     <main className="page-shell">
       <div className="day-layout">
         <div className="day-layout__content">
-          <header className="masthead day-arrival" data-testid="day-arrival">
-            <p className="eyebrow">Historical perspective</p>
-            <h1>{monument ?? "Day profile: " + date}</h1>
-            {eraLine ? <p className="day-arrival__era">{eraLine}</p> : null}
-            <DateInputForm initialDate={date} />
-          </header>
-          <DayProfileClient date={date} />
+          <DayProfileClient
+            date={date}
+            arrival={
+              <>
+                <p className="eyebrow">Historical perspective</p>
+                <h1>{monument ?? "Day profile: " + date}</h1>
+                {eraLine ? <p className="day-arrival__era">{eraLine}</p> : null}
+                <DateInputForm initialDate={date} />
+              </>
+            }
+          />
         </div>
         <DayNavigation date={date} />
       </div>

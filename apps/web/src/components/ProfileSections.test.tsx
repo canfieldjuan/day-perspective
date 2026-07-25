@@ -291,9 +291,14 @@ describe("ProfileSections strata", () => {
     expect(unsupported).toHaveTextContent(
       "This vertical slice does not publish this evidence class."
     );
-    const empty = screen.getByTestId("stratum-recorded_on_this_date");
-    expect(empty).toHaveAttribute("data-stratum-state", "empty");
-    expect(empty).toHaveTextContent(
+    const recordedEmpty = screen.getByTestId("stratum-recorded_on_this_date");
+    expect(recordedEmpty).toHaveAttribute("data-stratum-state", "empty");
+    expect(recordedEmpty).toHaveTextContent(
+      "No reviewed event is published for this date."
+    );
+    const genericEmpty = screen.getByTestId("stratum-wonder_and_progress");
+    expect(genericEmpty).toHaveAttribute("data-stratum-state", "empty");
+    expect(genericEmpty).toHaveTextContent(
       "No evidence-backed content was published for this section."
     );
   });
@@ -346,5 +351,43 @@ describe("ProfileSections strata", () => {
     const follow = screen.getByText("Synthetic follow-up statement.").closest("article");
     expect(lead).toHaveAttribute("data-lead", "true");
     expect(follow).not.toHaveAttribute("data-lead");
+  });
+});
+
+describe("ProfileSections quiet dates", () => {
+  it("moves the lead to the average day and states the missing event plainly", () => {
+    const sections = {
+      ...emptySections,
+      typical_day_in_this_year: [
+        {
+          statement_id: "avg-1",
+          statement: "Synthetic average lead statement.",
+          details: { temporal_assignment: "uniform_period_allocation" },
+          provenance: {
+            ...testProvenance,
+            derived_value: {
+              kind: "average_daily_births",
+              calculation_version: "0.3.0",
+              value: {}
+            }
+          }
+        }
+      ]
+    } as PublishedDayProfile["sections"];
+
+    render(
+      <ProfileSections
+        availability="published"
+        sections={sections}
+        profileDate="1964-03-27"
+      />
+    );
+
+    expect(
+      screen.getByText("Synthetic average lead statement.").closest("article")
+    ).toHaveAttribute("data-lead", "true");
+    expect(screen.getByTestId("stratum-recorded_on_this_date")).toHaveTextContent(
+      "No reviewed event is published for this date."
+    );
   });
 });
