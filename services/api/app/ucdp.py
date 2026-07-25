@@ -646,8 +646,8 @@ def build_ucdp_annual_profile_content(session: Session) -> UCDPAnnualProfileCont
         session,
         source_release_id=release.id,
         profile_date=GOLDEN_DATE,
-        resolved_root_ids=set(),
-        derived_root_ids={derived.id},
+        resolved_root_ids_by_section={},
+        derived_root_ids_by_section={"wider_historical_context": {derived.id}},
     )
     statement: dict[str, object] = {
         "statement_id": "ucdp-1964-active-conflicts",
@@ -1237,15 +1237,17 @@ def review_ucdp_ged(session: Session, source_release_id: UUID) -> Event:
                 public_explanation=(
                     (
                         "Grade B: official event-level UCDP record with day and place "
-                        "precision. It is single-source evidence and the fatality high "
-                        "bound is much larger than the best estimate."
+                        "precision. It is single-source evidence. "
+                        f"The fatality interval records low {fatality_low:,}, best "
+                        f"{fatality_best:,}, and high {fatality_high:,}."
                     )
                     if temporal_precision == TemporalPrecision.DAY
                     else (
                         "Grade C: official event-level UCDP record with place detail, "
                         "but the source interval does not support day precision. It is "
-                        "single-source evidence and the fatality high bound is much "
-                        "larger than the best estimate."
+                        "single-source evidence. "
+                        f"The fatality interval records low {fatality_low:,}, best "
+                        f"{fatality_best:,}, and high {fatality_high:,}."
                     )
                 ),
                 legal_review_status=LegalReviewStatus.NOT_REQUIRED,

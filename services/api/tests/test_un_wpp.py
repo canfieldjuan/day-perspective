@@ -70,6 +70,34 @@ def test_idempotent_rerun_does_not_duplicate_release_records_or_claims(
     assert session.scalar(select(func.count()).select_from(Claim)) == 20
 
 
+def test_non_finite_wpp_measure_fails_before_release_creation(
+    session: Session, tmp_path: Path
+) -> None:
+    with FIXTURE.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        fieldnames = reader.fieldnames
+        rows = list(reader)
+    assert fieldnames is not None
+    next(row for row in rows if row["year"] == "1964")[
+        "life_expectancy_years"
+    ] = "Infinity"
+    invalid_fixture = tmp_path / "non-finite-wpp.csv"
+    with invalid_fixture.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    with pytest.raises(ValueError, match="non-finite"):
+        ingest_un_wpp(
+            session,
+            fixture_path=invalid_fixture,
+            raw_store=LocalFilesystemRawSourceStore(tmp_path / "raw"),
+        )
+
+    assert session.scalar(select(func.count()).select_from(SourceRelease)) == 0
+    assert session.scalar(select(PipelineRun.status)) == "failed"
+
+
 def test_review_derives_leap_year_daily_equivalents_without_date_claim(
     session: Session, tmp_path: Path
 ) -> None:

@@ -453,3 +453,25 @@ version is recoverable on retry.
 
 **Revisit trigger:** Production object storage provides a durable
 prepare/finalize protocol or transactional outbox.
+
+## D024: Scope editorial publication authority to section and evidence root
+
+**Decision:** Publication eligibility evaluates the latest decision for each
+date, section, root type and root identifier. Publishers declare required
+resolved and derived roots grouped by their actual public section.
+
+**Context:** A root can be appropriate for evidence notes while being rejected
+from the recorded-event section. Collapsing those decisions by root alone lets
+one section silently authorize another.
+
+**Alternatives considered:** Treat selection as profile-wide; infer sections
+from root types.
+
+**Reason:** Section placement is an epistemic claim and is already explicit in
+the editorial ledger and published artifact.
+
+**Consequences:** Every publication builder must declare the exact section for
+each statement root, and cross-section approval substitution fails closed.
+
+**Revisit trigger:** A richer editorial policy engine replaces direct section
+selection without weakening section-level authority.

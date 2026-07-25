@@ -212,6 +212,21 @@ def test_latest_editorial_decision_controls_publication(
         rationale="Withdrawn from this profile after review.",
         reviewed_by="test-reviewer",
     )
+    for status in (
+        EditorialSelectionStatus.SELECTED,
+        EditorialSelectionStatus.DEFERRED,
+        EditorialSelectionStatus.SELECTED,
+    ):
+        record_editorial_selection(
+            session,
+            profile_date=date(1964, 3, 27),
+            section_key="evidence_notes",
+            resolved_claim_id=root.id,
+            status=status,
+            display_rank=1 if status == EditorialSelectionStatus.SELECTED else None,
+            rationale="A separate evidence-notes decision cannot authorize event use.",
+            reviewed_by="test-reviewer",
+        )
 
     with pytest.raises(ValueError, match="explicit editorial selection"):
         publish_golden_profile(

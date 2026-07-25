@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import urllib.request
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -148,7 +149,12 @@ class USGSGeometry(BaseModel):
     @model_validator(mode="after")
     def validate_ranges(self) -> USGSGeometry:
         longitude, latitude, depth = self.coordinates
-        if not -180 <= longitude <= 180 or not -90 <= latitude <= 90 or depth < 0:
+        if (
+            not all(math.isfinite(value) for value in (longitude, latitude, depth))
+            or not -180 <= longitude <= 180
+            or not -90 <= latitude <= 90
+            or depth < 0
+        ):
             raise ValueError("USGS point coordinates or depth are outside valid ranges.")
         return self
 
@@ -622,22 +628,35 @@ def derive_quality(*, independent_sources: int, complete_predicates: int) -> tup
         "revision_stability": "immutable retrieved release; upstream record may be revised",
         "methodology_transparency": "deterministic rules and historical timezone conversion published",
     }
-    grade = "B" if independent_sources == 1 and complete_predicates >= 9 else "C"
-    explanation = (
-        (
+    if complete_predicates < 9:
+        grade = "C"
+        explanation = (
+            "Grade C: the available official USGS evidence is incomplete for the "
+            "required event predicates. The assessment retains the available "
+            "precision without overstating coverage."
+        )
+    elif independent_sources <= 0:
+        grade = "C"
+        explanation = (
+            "Grade C: all required event predicates are present, but no independent "
+            "source supports publication."
+        )
+    elif independent_sources == 1:
+        grade = "B"
+        explanation = (
             "Grade B: the occurrence, time, epicenter, magnitude, and depth come "
             "from one validated official USGS catalog release with second-level "
             "and point-level detail. The grade is limited because this is "
             "single-source acceptance with no independent confirmation and does "
             "not assert a casualty value."
         )
-        if grade == "B"
-        else (
-            "Grade C: the available official USGS evidence is incomplete for the "
-            "required event predicates. The assessment retains the available "
-            "precision and single-source limitation without overstating coverage."
+    else:
+        grade = "B"
+        explanation = (
+            "Grade B: all required event predicates are present with second-level "
+            "and point-level detail, supported by "
+            f"{independent_sources} independent sources."
         )
-    )
     return grade, explanation, dimensions
 
 
@@ -1116,8 +1135,10 @@ def publish_golden_profile(
         session,
         source_release_id=release.id,
         profile_date=GOLDEN_DATE,
-        resolved_root_ids={row.id for row in resolved.values()},
-        derived_root_ids={quality_derived.id},
+        resolved_root_ids_by_section={
+            "recorded_on_this_date": {row.id for row in resolved.values()}
+        },
+        derived_root_ids_by_section={"evidence_notes": {quality_derived.id}},
     )
     claims = {
         claim.claim_type: claim

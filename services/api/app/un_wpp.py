@@ -192,13 +192,16 @@ def _parse(payload: bytes) -> tuple[WPPRecord, ...]:
             or record.year > 2023
         ):
             raise ValueError("The WPP fixture contains an unsupported record.")
-        if min(
+        measures = (
             record.population_july_thousands,
             record.births_thousands,
             record.deaths_thousands,
             record.life_expectancy_years,
             record.under_five_mortality_per_1000,
-        ) <= 0:
+        )
+        if not all(value.is_finite() for value in measures):
+            raise ValueError("The WPP fixture contains a non-finite measure.")
+        if min(measures) <= 0:
             raise ValueError("The WPP fixture contains a non-positive measure.")
         records.append(record)
     if not records or len({record.record_id for record in records}) != len(records):
@@ -938,8 +941,21 @@ def build_un_wpp_profile_content(session: Session) -> WPPProfileContent:
         session,
         source_release_id=release.id,
         profile_date=GOLDEN_DATE,
-        resolved_root_ids={row.id for row in resolved_rows.values()},
-        derived_root_ids={derived[key].id for key in required_derived},
+        resolved_root_ids_by_section={
+            "wider_historical_context": {
+                resolved_rows[key].id
+                for key in (
+                    "population_midyear",
+                    "life_expectancy",
+                    "under_five_mortality",
+                )
+            }
+        },
+        derived_root_ids_by_section={
+            "typical_day_in_this_year": {
+                derived[key].id for key in required_derived
+            }
+        },
     )
     typical: list[dict[str, object]] = []
     evidence: list[PublicationStatementEvidenceInput] = []

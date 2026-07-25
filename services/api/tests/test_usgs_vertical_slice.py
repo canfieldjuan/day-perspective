@@ -321,6 +321,32 @@ def test_quality_explanation_matches_a_lower_grade() -> None:
     assert explanation.startswith("Grade C:")
 
 
+def test_non_finite_usgs_depth_fails_before_release_creation(
+    session: Session, tmp_path: Path
+) -> None:
+    fixture = tmp_path / "non-finite-depth.geojson"
+    payload = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    payload["features"][0]["geometry"]["coordinates"][2] = float("inf")
+    fixture.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="outside valid ranges"):
+        ingest(session, tmp_path, fixture)
+
+    assert session.scalar(select(func.count()).select_from(SourceRelease)) == 0
+    assert session.scalar(select(PipelineRun.status)) == "failed"
+
+
+def test_complete_independently_corroborated_evidence_is_not_downgraded() -> None:
+    grade, explanation, _ = derive_quality(
+        independent_sources=2,
+        complete_predicates=9,
+    )
+
+    assert grade == "B"
+    assert "2 independent sources" in explanation
+    assert "incomplete" not in explanation.lower()
+
+
 def test_resolution_is_versioned_when_a_resolved_value_changes(
     session: Session, tmp_path: Path
 ) -> None:

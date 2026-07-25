@@ -265,6 +265,35 @@ def test_ucdp_ged_materializes_reviewed_fatality_values(
     )
 
 
+def test_ucdp_ged_quality_describes_equal_fatality_bounds_without_exaggeration(
+    session: Session, tmp_path: Path
+) -> None:
+    equal_bounds = tmp_path / "equal-bounds-ged.csv"
+    equal_bounds.write_text(
+        GED_FIXTURE.read_text(encoding="utf-8").replace(
+            ",100,100,1100,100,0,0,0",
+            ",100,100,100,100,0,0,0",
+        ),
+        encoding="utf-8",
+    )
+    result = ingest_ucdp_ged(
+        session,
+        fixture_path=equal_bounds,
+        raw_store=LocalFilesystemRawSourceStore(tmp_path / "raw"),
+    )
+    review_ucdp_ged(session, result.source_release_id)
+    assessment = session.scalar(
+        select(QualityAssessment).where(
+            QualityAssessment.assessment_kind == "ucdp_ged_event_quality_v1"
+        )
+    )
+
+    assert assessment is not None
+    assert assessment.public_explanation is not None
+    assert "low 100, best 100, and high 100" in assessment.public_explanation
+    assert "much larger" not in assessment.public_explanation
+
+
 def test_rejected_ucdp_ged_claim_blocks_review_before_resolution(
     session: Session, tmp_path: Path
 ) -> None:

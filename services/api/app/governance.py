@@ -411,8 +411,8 @@ def assert_release_publication_eligible(
     *,
     source_release_id: UUID,
     profile_date: date,
-    resolved_root_ids: set[UUID],
-    derived_root_ids: set[UUID] | None = None,
+    resolved_root_ids_by_section: dict[str, set[UUID]],
+    derived_root_ids_by_section: dict[str, set[UUID]] | None = None,
 ) -> None:
     release = session.get(SourceRelease, source_release_id)
     if release is None:
@@ -453,7 +453,7 @@ def assert_release_publication_eligible(
             "Publication is missing required quality checks: "
             + ", ".join(sorted(missing_checks))
         )
-    latest_by_root: dict[tuple[str, UUID], EditorialSelection] = {}
+    latest_by_root: dict[tuple[str, str, UUID], EditorialSelection] = {}
     for selection in session.scalars(
         select(EditorialSelection)
         .where(EditorialSelection.profile_date == profile_date)
@@ -465,20 +465,32 @@ def assert_release_publication_eligible(
             else ("derived", selection.derived_value_id)
         )
         if root[1] is not None:
-            latest_by_root.setdefault((root[0], root[1]), selection)
+            latest_by_root.setdefault(
+                (selection.section_key, root[0], root[1]), selection
+            )
     resolved_selections = {
-        root_id
-        for (root_type, root_id), selection in latest_by_root.items()
+        (section_key, root_id)
+        for (section_key, root_type, root_id), selection in latest_by_root.items()
         if root_type == "resolved"
         and selection.status == EditorialSelectionStatus.SELECTED.value
     }
     derived_selections = {
-        root_id
-        for (root_type, root_id), selection in latest_by_root.items()
+        (section_key, root_id)
+        for (section_key, root_type, root_id), selection in latest_by_root.items()
         if root_type == "derived"
         and selection.status == EditorialSelectionStatus.SELECTED.value
     }
-    if not resolved_root_ids <= resolved_selections or not (
-        derived_root_ids or set()
-    ) <= derived_selections:
+    required_resolved = {
+        (section_key, root_id)
+        for section_key, root_ids in resolved_root_ids_by_section.items()
+        for root_id in root_ids
+    }
+    required_derived = {
+        (section_key, root_id)
+        for section_key, root_ids in (derived_root_ids_by_section or {}).items()
+        for root_id in root_ids
+    }
+    if not required_resolved <= resolved_selections or not (
+        required_derived <= derived_selections
+    ):
         raise ValueError("Publication requires explicit editorial selection for every root.")
