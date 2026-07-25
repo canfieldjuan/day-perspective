@@ -72,6 +72,9 @@ describe("eraLineForDate", () => {
     const { eraLineForDate } = await import("./day-profile");
     expect(eraLineForDate("1899-12-31")).toBeNull();
     expect(eraLineForDate("garbage")).toBeNull();
+  });
+});
+
 describe("isPublishedProfileResponse optional metadata", () => {
   function envelope(profileExtras: Record<string, unknown>) {
     return {
