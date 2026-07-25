@@ -194,14 +194,26 @@ export function ProfileSections({
                 );
               })
             ) : (
-              <p className="stratum__state">
-                {availability === "published"
-                  ? sectionState?.reason ??
-                    (section.key === "recorded_on_this_date"
-                      ? "No reviewed event is published for this date."
-                      : "No evidence-backed content was published for this section.")
-                  : sectionMessages[availability]}
-              </p>
+              <>
+                {availability === "published" &&
+                section.key === "recorded_on_this_date" ? (
+                  <p className="stratum__state">
+                    No reviewed event is published for this date.
+                  </p>
+                ) : null}
+                {availability !== "published" ? (
+                  <p className="stratum__state">{sectionMessages[availability]}</p>
+                ) : sectionState?.status === "not_yet_supported" ? (
+                  <p className="stratum__state">
+                    {sectionState.reason ??
+                      "This section is not yet supported by an implemented pipeline."}
+                  </p>
+                ) : section.key !== "recorded_on_this_date" ? (
+                  <p className="stratum__state">
+                    No evidence-backed content was published for this section.
+                  </p>
+                ) : null}
+              </>
             )}
           </section>
         );

@@ -97,7 +97,7 @@ export function DayProfileClient({
   const statusLine = !isSupportedPublicDate(date)
     ? "No profile request was made for this address."
     : viewState.kind === "loading"
-      ? "Checking publication status"
+      ? null
       : viewState.kind === "unpublished"
         ? "No profile is published for this date."
         : viewState.kind === "api-error"
@@ -107,7 +107,7 @@ export function DayProfileClient({
   const arrivalPanel = (
     <header className="masthead day-arrival" data-testid="day-arrival">
       {arrival}
-      <p className="publication-status">{statusLine}</p>
+      {statusLine ? <p className="publication-status">{statusLine}</p> : null}
     </header>
   );
 
@@ -192,6 +192,7 @@ export function DayProfileClient({
     <>
       {arrivalPanel}
       <section className="state-panel" aria-busy="true" aria-live="polite">
+        <p className="eyebrow">Checking publication status</p>
         <div className="loading-line" data-testid="loading-line" />
         <div className="loading-line loading-line--short" data-testid="loading-line" />
       </section>
