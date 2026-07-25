@@ -80,7 +80,43 @@ describe("DayProfileClient", () => {
               curated_claims: [],
               derived_comparisons: [],
               wonder_and_progress: [],
-              evidence_notes: []
+              evidence_notes: [
+                {
+                  statement_id: "quality-assessment",
+                  statement: "Grade B: complete official single-source evidence.",
+                  provenance: {
+                    root_type: "derived_value",
+                    published_statement: "Derived from all selected evidence.",
+                    derived_value: {
+                      kind: "public_event_evidence_quality",
+                      calculation_version: "0.3.0",
+                      value: { quality_grade: "B" }
+                    },
+                    supporting_claims: [
+                      {
+                        predicate: "magnitude",
+                        value: { value: 9.2, scale: "mw" },
+                        source_record_locator: "https://earthquake.usgs.gov/example",
+                        source_record_hash_sha256: "c".repeat(64)
+                      }
+                    ],
+                    dissenting_claims: [],
+                    source_release: {
+                      source: "USGS Earthquake Catalog",
+                      publisher: "U.S. Geological Survey",
+                      release: "fixture-v1",
+                      source_url: "https://earthquake.usgs.gov",
+                      raw_checksum_sha256: "d".repeat(64),
+                      retrieved_at: "2026-07-24T00:00:00Z"
+                    },
+                    methodology: {
+                      name: "USGS authoritative resolution",
+                      version: "1",
+                      description: "Deterministic."
+                    }
+                  }
+                }
+              ]
             }
           }
         }),
@@ -208,8 +244,8 @@ describe("DayProfileClient", () => {
       await screen.findByText("USGS reports a magnitude of 9.2 Mw.")
     ).toBeInTheDocument();
     expect(
-      screen.getByText("Why can the app say this?")
-    ).toBeInTheDocument();
+      screen.getAllByText("Why can the app say this?")
+    ).toHaveLength(2);
     expect(screen.getByText("Published by U.S. Geological Survey.")).toBeInTheDocument();
     expect(
       screen.getByRole("link", { name: "USGS Earthquake Catalog" })
@@ -217,7 +253,12 @@ describe("DayProfileClient", () => {
       "href",
       "https://earthquake.usgs.gov/earthquakes/eventpage/example"
     );
-    expect(screen.getByText("None in this publication.")).toBeInTheDocument();
+    expect(screen.getAllByText("None in this publication.")).toHaveLength(2);
+    expect(
+      screen.getByText(
+        "public_event_evidence_quality, calculation version 0.3.0"
+      )
+    ).toBeInTheDocument();
   });
 
   it("rejects an unrecognized successful response instead of calling it published", async () => {

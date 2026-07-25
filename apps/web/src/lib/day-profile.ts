@@ -58,14 +58,26 @@ function isProvenance(value: unknown): boolean {
     return false;
   }
   const resolvedClaim = asRecord(provenance.resolved_claim);
+  const derivedValue = asRecord(provenance.derived_value);
   const sourceRelease = asRecord(provenance.source_release);
   const methodology = asRecord(provenance.methodology);
-  return (
+  const hasResolvedRoot =
     resolvedClaim !== undefined &&
     typeof resolvedClaim.canonical_key === "string" &&
     typeof resolvedClaim.version === "number" &&
     typeof resolvedClaim.method === "string" &&
-    typeof resolvedClaim.rationale === "string" &&
+    typeof resolvedClaim.rationale === "string";
+  const hasDerivedRoot =
+    derivedValue !== undefined &&
+    typeof derivedValue.kind === "string" &&
+    typeof derivedValue.calculation_version === "string" &&
+    (derivedValue.value === undefined ||
+      derivedValue.value === null ||
+      asRecord(derivedValue.value) !== undefined);
+  return (
+    hasResolvedRoot !== hasDerivedRoot &&
+    (provenance.root_type === undefined ||
+      provenance.root_type === (hasDerivedRoot ? "derived_value" : "resolved_claim")) &&
     Array.isArray(provenance.supporting_claims) &&
     provenance.supporting_claims.every(isClaimEvidence) &&
     Array.isArray(provenance.dissenting_claims) &&

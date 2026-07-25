@@ -115,6 +115,8 @@ _PENDING_PROFILE_WRITES = "pending_profile_writes"
 
 @event.listens_for(Session, "after_commit")
 def _finalize_profile_writes(session: Session) -> None:
+    if session.in_transaction():
+        return
     pending = session.info.pop(_PENDING_PROFILE_WRITES, [])
     for staged in pending:
         staged.finalize()
@@ -302,6 +304,12 @@ def supersede_claim(
         assertion_status=ClaimAssertionStatus.CANDIDATE,
         supersedes_claim_id=prior_claim.id,
         source_record_hash_sha256=prior_claim.source_record_hash_sha256,
+        pipeline_run_id=prior_claim.pipeline_run_id,
+        temporal_precision=prior_claim.temporal_precision,
+        temporal_assignment=prior_claim.temporal_assignment,
+        temporal_start=prior_claim.temporal_start,
+        temporal_end=prior_claim.temporal_end,
+        date_role=prior_claim.date_role,
         unit=unit,
         lower_bound=lower_bound,
         upper_bound=upper_bound,

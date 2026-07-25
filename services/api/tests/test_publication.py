@@ -909,3 +909,30 @@ def test_failed_commit_discards_staged_profile_and_retry_reuses_version(
     assert store.read(
         replacement_manifest.storage_uri, replacement_manifest.content_hash
     ) == replacement_payload
+
+
+def test_outer_rollback_discards_profile_finalized_inside_a_savepoint(
+    session: Session, tmp_path: Path
+) -> None:
+    store = LocalFilesystemPublishedProfileStore(tmp_path)
+    provenance = statement_evidence(session)
+    session.commit()
+
+    with session.begin_nested():
+        profile = publish_day_profile(
+            session,
+            store=store,
+            profile_date=date(1969, 7, 20),
+            profile_type=ProfileType.STANDARD_STATISTICAL,
+            payload=payload("Savepoint-owned publication."),
+            statement_evidence=provenance,
+        )
+        manifest = session.get(
+            PublicationManifest, profile.publication_manifest_id
+        )
+        assert manifest is not None
+        storage_uri = manifest.storage_uri
+
+    assert (tmp_path / storage_uri).exists()
+    session.rollback()
+    assert not (tmp_path / storage_uri).exists()

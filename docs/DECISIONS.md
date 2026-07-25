@@ -355,3 +355,27 @@ passes.
 
 **Revisit trigger:** Event time and civil-date assignments become separate
 canonical projection tables.
+
+## D019: Root aggregate quality statements in an explicit derived value
+
+**Decision:** The public USGS quality statement uses a
+`public_event_evidence_quality` derived value with all nine current resolved
+claims as durable inputs. Raw record URIs address the canonical bytes hashed by
+their row, and claim resolution selects only leaves of supersession chains.
+
+**Context:** A quality grade assesses more than event identity, a corrected
+claim must replace rather than coexist with its predecessor, and a checksum can
+verify only the bytes identified by its own URI.
+
+**Alternatives considered:** Point quality at event identity; ignore
+superseded rows by count; retain the release URI on raw records.
+
+**Reason:** Each alternative breaks reconstruction at a different edge of the
+evidence chain.
+
+**Consequences:** Public provenance identifies derived quality explicitly,
+record integrity is directly verifiable, and same-release corrections remain
+resolvable.
+
+**Revisit trigger:** Quality assessment becomes its own publication evidence
+root type with equivalent immutable input snapshots.

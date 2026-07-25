@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Callable, Generator
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,8 @@ from app.models import (
     Claim,
     ClaimAssertionStatus,
     DayProfile,
+    DerivedValue,
+    DerivedValueInput,
     Event,
     EventLocation,
     EventTime,
@@ -40,6 +43,7 @@ from app.services import (
     canonical_json_bytes,
     content_hash,
     create_source_release,
+    supersede_claim,
 )
 from app.usgs import (
     GOLDEN_DATE,
@@ -229,6 +233,45 @@ def test_claim_transformation_preserves_predicates_hash_units_and_bounds(
         for row in claims.values()
     )
     assert raw_record.raw_checksum_sha256 != result.checksum
+    stored_record = LocalFilesystemRawSourceStore(tmp_path / "raw").read(
+        raw_record.raw_storage_uri,
+        raw_record.raw_checksum_sha256,
+    )
+    assert stored_record == canonical_json_bytes(raw_record.payload_json)
+
+
+def test_resolution_uses_the_leaf_claim_after_same_release_supersession(
+    session: Session, tmp_path: Path
+) -> None:
+    result = ingest(session, tmp_path)
+    prior = session.scalar(
+        select(Claim).where(
+            Claim.source_release_id == result.source_release_id,
+            Claim.claim_type == "magnitude",
+        )
+    )
+    assert prior is not None
+    replacement = supersede_claim(
+        session,
+        prior_claim=prior,
+        assertion_text="9.3 mw",
+        assertion_json={"value": 9.3, "scale": "mw"},
+        unit="mw",
+        lower_bound=Decimal("9.3"),
+        upper_bound=Decimal("9.3"),
+    )
+
+    resolved = accept_and_resolve_release(session, result.source_release_id)
+
+    assert resolved["magnitude"].resolved_value == {"value": 9.3, "scale": "mw"}
+    assert prior.assertion_status == ClaimAssertionStatus.SUPERSEDED
+    supporting_id = session.scalar(
+        select(ResolvedClaimEvidence.claim_id).where(
+            ResolvedClaimEvidence.resolved_claim_id == resolved["magnitude"].id,
+            ResolvedClaimEvidence.stance == "supporting",
+        )
+    )
+    assert supporting_id == replacement.id
 
 
 def test_usgs_release_rejects_extra_source_records_before_persistence(
@@ -813,11 +856,31 @@ def test_quality_assessment_is_published_with_grade_and_explanation(
     assert assessment is not None
     assert assessment.public_grade == "B"
     assert "single-source" in (assessment.public_explanation or "").lower()
-    evidence = session.scalar(select(PublicationStatementEvidence))
+    evidence = session.scalar(
+        select(PublicationStatementEvidence).where(
+            PublicationStatementEvidence.statement_path
+            == "/sections/evidence_notes/0"
+        )
+    )
     assert evidence is not None
-    quality_snapshots = evidence.evidence_snapshot["evidence"][0]["claim"][
-        "source_release"
-    ]["release"]["quality_assessments"]
+    assert evidence.derived_value_id is not None
+    assert evidence.resolved_claim_id is None
+    assert evidence.evidence_snapshot["root_type"] == "derived_value"
+    assert len(evidence.evidence_snapshot["inputs"]) == 9
+    assert (
+        session.scalar(
+            select(func.count())
+            .select_from(DerivedValueInput)
+            .where(DerivedValueInput.derived_value_id == evidence.derived_value_id)
+        )
+        == 9
+    )
+    quality_root = session.get(DerivedValue, evidence.derived_value_id)
+    assert quality_root is not None
+    assert quality_root.value_kind == "public_event_evidence_quality"
+    quality_snapshots = evidence.evidence_snapshot["derived_value"][
+        "quality_assessments"
+    ]
     assert quality_snapshots[0]["public_grade"] == "B"
     assert "single-source" in quality_snapshots[0]["public_explanation"].lower()
 

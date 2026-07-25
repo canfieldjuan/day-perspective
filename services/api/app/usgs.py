@@ -24,6 +24,8 @@ from app.models import (
     DataStatus,
     DateRole,
     DayProfile,
+    DerivedValue,
+    DerivedValueInput,
     Event,
     EventLocation,
     EventTime,
@@ -51,6 +53,7 @@ from app.services import (
     LocalFilesystemPublishedProfileStore,
     PublicationStatementEvidenceInput,
     canonical_json_bytes,
+    content_hash,
     create_claim,
     create_source_release,
     publish_day_profile,
@@ -69,6 +72,24 @@ USGS_QUERY_URL = (
 )
 GOLDEN_DATE = date(1964, 3, 27)
 ALASKA_TIMEZONE = "America/Anchorage"
+
+
+def _current_claims_for_release(
+    session: Session, source_release_id: UUID
+) -> list[Claim]:
+    all_claims = list(
+        session.scalars(
+            select(Claim)
+            .where(Claim.source_release_id == source_release_id)
+            .order_by(Claim.claim_type, Claim.id)
+        )
+    )
+    superseded_ids = {
+        claim.supersedes_claim_id
+        for claim in all_claims
+        if claim.supersedes_claim_id is not None
+    }
+    return [claim for claim in all_claims if claim.id not in superseded_ids]
 
 
 class USGSProperties(BaseModel):
@@ -409,6 +430,22 @@ def ingest_usgs(
                     existing_release.raw_storage_uri,
                     existing_release.raw_checksum_sha256,
                 )
+                existing_records = list(
+                    session.scalars(
+                        select(RawSourceRecord).where(
+                            RawSourceRecord.source_release_id == existing_release.id
+                        )
+                    )
+                )
+                if len(existing_records) != 1:
+                    raise RuntimeError(
+                        "The reused USGS release must retain exactly one raw record."
+                    )
+                for existing_record in existing_records:
+                    raw_store.read(
+                        existing_record.raw_storage_uri,
+                        existing_record.raw_checksum_sha256,
+                    )
                 existing_claim_ids = tuple(
                     session.scalars(
                         select(Claim.id)
@@ -461,14 +498,18 @@ def ingest_usgs(
                 legal_review_status=LegalReviewStatus.NOT_REQUIRED,
             )
             record_payload = record.model_dump(mode="json")
-            record_hash = hashlib.sha256(
-                canonical_json_bytes(record_payload)
-            ).hexdigest()
+            record_bytes = canonical_json_bytes(record_payload)
+            record_hash = hashlib.sha256(record_bytes).hexdigest()
+            record_storage_uri = raw_store.write(
+                f"{adapter.metadata.slug}-records",
+                record_hash,
+                record_bytes,
+            )
             raw_record = RawSourceRecord(
                 source_release_id=release.id,
                 source_record_id=adapter.source_record_identity(record),
                 source_record_locator=record.properties.url,
-                raw_storage_uri=storage_uri,
+                raw_storage_uri=record_storage_uri,
                 raw_checksum_sha256=record_hash,
                 schema_version="usgs-fdsn-geojson-v1",
                 payload_json=record_payload,
@@ -668,14 +709,8 @@ def accept_and_resolve_release(session: Session, source_release_id: UUID) -> dic
         raise ValueError(
             "Golden earthquake resolution requires the expected USGS raw record."
         )
-    claims = list(
-        session.scalars(
-            select(Claim)
-            .where(Claim.source_release_id == source_release_id)
-            .order_by(Claim.claim_type)
-        )
-    )
-    if len(claims) != 9:
+    claims = _current_claims_for_release(session, source_release_id)
+    if len(claims) != 9 or len({claim.claim_type for claim in claims}) != 9:
         raise ValueError("The golden release must contain all nine predicate claims.")
     allowed_statuses = {
         ClaimAssertionStatus.CANDIDATE,
@@ -851,6 +886,74 @@ def accept_and_resolve_release(session: Session, source_release_id: UUID) -> dic
     grade, explanation, dimensions = derive_quality(
         independent_sources=1, complete_predicates=len(claims)
     )
+    quality_value = {
+        "quality_grade": grade,
+        "quality_explanation": explanation,
+        "dimensions": dimensions,
+        "missing_data": {
+            "casualties": {
+                "state": "unavailable",
+                "reason": (
+                    "No casualty value is asserted from this selected USGS catalog "
+                    "record; missing does not mean zero."
+                ),
+            }
+        },
+    }
+    quality_fingerprint = content_hash(
+        {
+            "methodology": {
+                "slug": methodology.slug,
+                "version": methodology.version,
+            },
+            "resolved_claims": [
+                {
+                    "id": str(row.id),
+                    "canonical_key": row.canonical_key,
+                    "version": row.version,
+                }
+                for row in sorted(
+                    resolved.values(), key=lambda item: item.canonical_key
+                )
+            ],
+            "value": quality_value,
+        }
+    )
+    quality_derived = session.scalar(
+        select(DerivedValue).where(
+            DerivedValue.methodology_id == methodology.id,
+            DerivedValue.value_kind == "public_event_evidence_quality",
+            DerivedValue.period_start == GOLDEN_DATE,
+            DerivedValue.input_fingerprint == quality_fingerprint,
+        )
+    )
+    if quality_derived is None:
+        quality_derived = DerivedValue(
+            methodology_id=methodology.id,
+            value_kind="public_event_evidence_quality",
+            period_start=GOLDEN_DATE,
+            period_end=GOLDEN_DATE,
+            temporal_assignment=TemporalAssignment.EDITORIAL_CONTEXT,
+            value_json=quality_value,
+            data_status=DataStatus.FINAL,
+            comparability_status=ComparabilityStatus.NOT_COMPARABLE,
+            input_fingerprint=quality_fingerprint,
+            calculation_version="0.3.0",
+        )
+        session.add(quality_derived)
+        session.flush()
+        session.add_all(
+            [
+                DerivedValueInput(
+                    derived_value_id=quality_derived.id,
+                    resolved_claim_id=row.id,
+                    input_role="supporting",
+                )
+                for row in sorted(
+                    resolved.values(), key=lambda item: item.canonical_key
+                )
+            ]
+        )
     existing_quality = session.scalar(
         select(QualityAssessment).where(
             QualityAssessment.source_release_id == release.id,
@@ -861,6 +964,7 @@ def accept_and_resolve_release(session: Session, source_release_id: UUID) -> dic
         session.add(
             QualityAssessment(
                 source_release_id=release.id,
+                derived_value_id=quality_derived.id,
                 methodology_id=methodology.id,
                 assessment_kind="public_event_evidence_quality_v1",
                 score=Decimal("0.80"),
@@ -914,6 +1018,50 @@ def _public_provenance(
     }
 
 
+def _public_quality_provenance(
+    *,
+    quality_derived: DerivedValue,
+    claims: dict[str, Claim],
+    release: SourceRelease,
+    source: Source,
+    methodology: Methodology,
+) -> dict[str, Any]:
+    return {
+        "root_type": "derived_value",
+        "published_statement": (
+            "This explanation is derived from the selected event evidence."
+        ),
+        "derived_value": {
+            "kind": quality_derived.value_kind,
+            "calculation_version": quality_derived.calculation_version,
+            "value": quality_derived.value_json,
+        },
+        "supporting_claims": [
+            {
+                "predicate": claim.claim_type,
+                "value": claim.assertion_json,
+                "source_record_locator": claim.source_record_locator,
+                "source_record_hash_sha256": claim.source_record_hash_sha256,
+            }
+            for claim in sorted(claims.values(), key=lambda item: item.claim_type)
+        ],
+        "dissenting_claims": [],
+        "source_release": {
+            "source": source.name,
+            "publisher": source.publisher,
+            "release": release.release_label,
+            "source_url": release.source_url,
+            "raw_checksum_sha256": release.raw_checksum_sha256,
+            "retrieved_at": release.retrieved_at.isoformat(),
+        },
+        "methodology": {
+            "name": methodology.name,
+            "version": methodology.version,
+            "description": methodology.description,
+        },
+    }
+
+
 def publish_golden_profile(
     session: Session,
     *,
@@ -948,9 +1096,7 @@ def publish_golden_profile(
     methodology = _methodology(session)
     claims = {
         claim.claim_type: claim
-        for claim in session.scalars(
-            select(Claim).where(Claim.source_release_id == release.id)
-        )
+        for claim in _current_claims_for_release(session, release.id)
     }
     quality = session.scalar(
         select(QualityAssessment).where(
@@ -960,6 +1106,29 @@ def publish_golden_profile(
     )
     if quality is None or quality.public_grade is None or quality.public_explanation is None:
         raise ValueError("A public quality assessment is required before publication.")
+    current_resolution_ids = {row.id for row in resolved.values()}
+    quality_derived = None
+    for candidate in session.scalars(
+        select(DerivedValue)
+        .where(
+            DerivedValue.methodology_id == methodology.id,
+            DerivedValue.value_kind == "public_event_evidence_quality",
+            DerivedValue.period_start == GOLDEN_DATE,
+        )
+        .order_by(DerivedValue.created_at.desc())
+    ):
+        input_ids = set(
+            session.scalars(
+                select(DerivedValueInput.resolved_claim_id).where(
+                    DerivedValueInput.derived_value_id == candidate.id
+                )
+            )
+        )
+        if input_ids == current_resolution_ids:
+            quality_derived = candidate
+            break
+    if quality_derived is None:
+        raise ValueError("A derived public quality explanation is required.")
     magnitude = claims["magnitude"].assertion_json or {}
     magnitude_value = float(magnitude["value"])
     magnitude_scale = str(magnitude["scale"])
@@ -1078,26 +1247,14 @@ def publish_golden_profile(
     evidence_statement = {
         "statement_id": "quality-assessment",
         "statement": quality.public_explanation,
-        "details": {
-            "quality_grade": quality.public_grade,
-            "dimensions": quality.findings,
-            "missing_data": {
-                "casualties": {
-                    "state": "unavailable",
-                    "reason": (
-                        "No casualty value is asserted from this selected USGS catalog record; "
-                        "missing does not mean zero."
-                    ),
-                }
-            },
-        },
+        "details": quality_derived.value_json,
         "provenance_note": "Quality methodology v1; no opaque weighted truth score.",
-        "provenance": _public_provenance(
-            claims["event_identity"],
-            resolved["event_identity"],
-            release,
-            source,
-            methodology,
+        "provenance": _public_quality_provenance(
+            quality_derived=quality_derived,
+            claims=claims,
+            release=release,
+            source=source,
+            methodology=methodology,
         ),
     }
     sections = {
@@ -1138,7 +1295,7 @@ def publish_golden_profile(
     evidence.append(
         PublicationStatementEvidenceInput(
             statement_path="/sections/evidence_notes/0",
-            resolved_claim_id=resolved["event_identity"].id,
+            derived_value_id=quality_derived.id,
         )
     )
     previous_manifest = session.scalar(

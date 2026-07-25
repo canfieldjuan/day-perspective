@@ -104,7 +104,8 @@ public record URL; `raw_storage_uri` is an internal storage key;
 the release checksum identifies the exact retrieved file bytes.
 `schema_version` identifies the adapter validation contract; `payload_json`
 retains the validated record. Update and delete are rejected. Release deletion
-is restricted.
+is restricted. `raw_storage_uri` points to the canonical record bytes whose
+SHA-256 is stored on the same row; it is not the enclosing release object.
 
 ### `claims` additions
 
