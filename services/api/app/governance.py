@@ -15,10 +15,13 @@ from sqlalchemy import (
     DateTime,
     Enum,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
+    func,
     select,
+    text,
 )
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, Session, mapped_column
@@ -177,6 +180,24 @@ class EditorialSelection(Base):
             "status IN ('selected','rejected','deferred')",
             name="editorial_selection_status",
         ),
+        Index(
+            "editorial_selections_resolved_history",
+            "profile_date",
+            "section_key",
+            "resolved_claim_id",
+            "decision_version",
+            unique=True,
+            postgresql_where=text("resolved_claim_id IS NOT NULL"),
+        ),
+        Index(
+            "editorial_selections_derived_history",
+            "profile_date",
+            "section_key",
+            "derived_value_id",
+            "decision_version",
+            unique=True,
+            postgresql_where=text("derived_value_id IS NOT NULL"),
+        ),
     )
 
 
@@ -266,6 +287,22 @@ def record_claim_review(
         ReviewDecisionValue.DEFERRED: ClaimAssertionStatus.IN_REVIEW,
     }[decision]
     claim.assertion_status = resulting
+    if decision != ReviewDecisionValue.DEFERRED:
+        tasks = list(
+            session.scalars(
+                select(ReviewTask).where(
+                    ReviewTask.claim_id == claim.id,
+                    ReviewTask.status.in_(("open", "in_progress")),
+                )
+            )
+        )
+        for task in tasks:
+            task.status = (
+                "dismissed"
+                if decision == ReviewDecisionValue.REJECTED
+                else "resolved"
+            )
+            task.completed_at = _utcnow()
     row = ClaimReviewDecision(
         claim_id=claim.id,
         decision=decision.value,
@@ -293,6 +330,15 @@ def record_editorial_selection(
 ) -> EditorialSelection:
     if (resolved_claim_id is None) == (derived_value_id is None):
         raise ValueError("Editorial selection requires exactly one evidence root.")
+    root_kind = "resolved" if resolved_claim_id is not None else "derived"
+    root_id = resolved_claim_id or derived_value_id
+    lock_key = (
+        f"editorial-selection:{profile_date.isoformat()}:{section_key}:"
+        f"{root_kind}:{root_id}"
+    )
+    session.execute(
+        select(func.pg_advisory_xact_lock(func.hashtextextended(lock_key, 0)))
+    )
     conditions = [
         EditorialSelection.profile_date == profile_date,
         EditorialSelection.section_key == section_key,

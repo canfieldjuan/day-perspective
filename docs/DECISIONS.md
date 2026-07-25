@@ -475,3 +475,29 @@ each statement root, and cross-section approval substitution fails closed.
 
 **Revisit trigger:** A richer editorial policy engine replaces direct section
 selection without weakening section-level authority.
+
+## D025: Serialize editorial versions and terminate review work atomically
+
+**Decision:** Editorial writers take a transaction-scoped advisory lock for
+the date/section/root identity before assigning the next version, while partial
+unique indexes enforce one row per version. Accepting or rejecting a claim
+closes its active review task in the same governance transaction, and claim IDs
+are parsed by FastAPI before database access.
+
+**Context:** Read-then-increment alone races for both first and later
+decisions; terminal claims otherwise leave unactionable queue entries; raw
+strings can reach PostgreSQL UUID operators.
+
+**Alternatives considered:** Rely only on a unique-index retry; lock only an
+existing latest row; catch DBAPI errors in the route.
+
+**Reason:** The service must serialize even the first decision, the database
+must remain a final backstop, and malformed identifiers should never reach
+persistence.
+
+**Consequences:** Competing writers wait rather than create ambiguous latest
+versions, direct duplicate inserts fail, and review/API state remains
+consistent.
+
+**Revisit trigger:** A distributed editorial command service owns sequencing
+with equivalent database guarantees.

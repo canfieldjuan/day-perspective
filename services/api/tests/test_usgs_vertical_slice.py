@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Callable, Generator
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -46,6 +47,7 @@ from app.usgs import (
     EvidenceCandidate,
     LocalFilesystemRawSourceStore,
     USGSEarthquakeAdapter,
+    _display_number,
     accept_and_resolve_release,
     derive_quality,
     deterministic_resolution,
@@ -61,6 +63,12 @@ UN_WPP_FIXTURE = (
 UCDP_ANNUAL_FIXTURE = (
     ROOT / "data/fixtures/ucdp/ucdp-prio-26.1-conflicts-1964.csv"
 )
+
+
+def test_display_number_preserves_significant_integer_zeroes() -> None:
+    assert _display_number(Decimal("1E+20")) == "100000000000000000000"
+    assert _display_number(Decimal("30.00")) == "30"
+    assert _display_number(Decimal("0.50")) == "0.5"
 
 
 def ingest(session: Session, tmp_path: Path, fixture_path: Path = FIXTURE):
@@ -676,6 +684,43 @@ def test_admin_decision_records_ledger_and_resolution_requires_prior_acceptance(
         assert decision.rationale.startswith("Matched the claim")
     finally:
         main.app.dependency_overrides.clear()
+
+
+def test_admin_rejection_closes_review_task_and_malformed_id_is_rejected(
+    session: Session, tmp_path: Path
+) -> None:
+    ingest(session, tmp_path)
+    claim = session.scalar(select(Claim).order_by(Claim.claim_type))
+    assert claim is not None
+    headers = {
+        "X-Development-Review-Token": main.settings.development_review_token
+    }
+    main.app.dependency_overrides[get_session] = override_session(session)
+    try:
+        malformed = TestClient(main.app).post(
+            "/api/v1/admin/claims/not-a-uuid/decision",
+            headers=headers,
+            json={"decision": "rejected", "rationale": "Invalid route test."},
+        )
+        response = TestClient(main.app).post(
+            f"/api/v1/admin/claims/{claim.id}/decision",
+            headers=headers,
+            json={
+                "decision": "rejected",
+                "rationale": "The candidate does not meet review requirements.",
+            },
+        )
+    finally:
+        main.app.dependency_overrides.clear()
+
+    assert malformed.status_code == 422
+    assert response.status_code == 200
+    task = session.scalar(
+        select(ReviewTask).where(ReviewTask.claim_id == claim.id)
+    )
+    assert task is not None
+    assert task.status == "dismissed"
+    assert task.completed_at is not None
 
 
 def test_subsecond_usgs_timestamp_fails_before_release_creation(

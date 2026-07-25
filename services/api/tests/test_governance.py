@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 from sqlalchemy import func, select, update
-from sqlalchemy.exc import DBAPIError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.orm import Session
 
 from app.governance import (
@@ -186,6 +186,21 @@ def test_editorial_decisions_append_a_versioned_history(
         )
         == 2
     )
+    session.add(
+        EditorialSelection(
+            profile_date=date(1964, 3, 28),
+            section_key="recorded_on_this_date",
+            resolved_claim_id=root.id,
+            status=EditorialSelectionStatus.REJECTED.value,
+            decision_version=2,
+            display_rank=None,
+            rationale="A concurrent duplicate version must fail.",
+            reviewed_by="concurrent-test-reviewer",
+        )
+    )
+    with pytest.raises(IntegrityError):
+        session.commit()
+    session.rollback()
 
 
 def test_latest_editorial_decision_controls_publication(

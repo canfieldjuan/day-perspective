@@ -438,14 +438,11 @@ class ClaimDecisionRequest(APIModel):
     dependencies=[Depends(development_review_guard)],
 )
 def admin_claim_decision(
-    claim_id: str,
+    claim_id: UUID,
     request: ClaimDecisionRequest,
     session: Annotated[Session, Depends(get_session)],
 ) -> dict[str, Any]:
-    try:
-        claim = session.get(Claim, claim_id)
-    except (TypeError, ValueError):
-        claim = None
+    claim = session.get(Claim, claim_id)
     if claim is None:
         raise HTTPException(status_code=404, detail="Claim not found.")
     try:

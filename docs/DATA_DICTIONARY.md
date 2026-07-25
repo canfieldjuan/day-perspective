@@ -151,7 +151,9 @@ in one date/section. It stores a monotonically increasing `decision_version`,
 status, display rank, rationale and reviewer. Publication eligibility uses the
 highest decision version for each date/section/root combination; a selection in
 one section cannot authorize use in another. Later selection, rejection or
-deferral never overwrites the earlier decision.
+deferral never overwrites the earlier decision. Partial unique indexes enforce
+one row per root and version; service writers serialize each root with a
+transaction-scoped PostgreSQL advisory lock.
 
 ### Temporal assignment addition
 

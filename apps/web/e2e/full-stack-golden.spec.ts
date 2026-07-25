@@ -9,7 +9,7 @@ test("serves the reviewed golden artifact through the complete runtime path", as
   );
 
   await page.goto("/day/1964-03-27");
-  await expect(page.getByText("USGS reports a magnitude of 9.2 Mw.")).toBeVisible();
+  await expect(page.getByText("USGS reports a magnitude of 9.2 MW.")).toBeVisible();
   await expect(
     page.getByText(
       "Historical America/Anchorage civil-time rules assign the occurrence to March 27, 1964 locally."

@@ -102,6 +102,19 @@ USGS_LICENSE_SNAPSHOT = (
 )
 
 
+def _display_number(value: object) -> str:
+    rendered = format(Decimal(str(value)), "f")
+    integer, separator, fractional = rendered.partition(".")
+    if not separator:
+        return integer
+    trimmed_fractional = fractional.rstrip("0")
+    return (
+        integer
+        if not trimmed_fractional
+        else f"{integer}.{trimmed_fractional}"
+    )
+
+
 def _register_usgs_license(session: Session, release_id: UUID) -> None:
     register_release_license(
         session,
@@ -1173,10 +1186,6 @@ def publish_golden_profile(
     if offset_remainder:
         offset_text += f":{offset_remainder:02d}"
 
-    def display_number(value: object) -> str:
-        rendered = format(Decimal(str(value)), "f").rstrip("0").rstrip(".")
-        return rendered or "0"
-
     definitions = [
         (
             "event-title",
@@ -1210,7 +1219,7 @@ def publish_golden_profile(
             "event-magnitude",
             "magnitude",
             "USGS reports a magnitude of "
-            f"{display_number(resolved_values['magnitude']['value'])} "
+            f"{_display_number(resolved_values['magnitude']['value'])} "
             f"{str(resolved_values['magnitude']['scale']).upper()}.",
             resolved_values["magnitude"],
         ),
@@ -1218,7 +1227,7 @@ def publish_golden_profile(
             "event-depth",
             "depth",
             "USGS reports a depth of "
-            f"{display_number(resolved_values['depth']['value'])} "
+            f"{_display_number(resolved_values['depth']['value'])} "
             f"{resolved_values['depth']['unit']}.",
             resolved_values["depth"],
         ),
@@ -1233,9 +1242,9 @@ def publish_golden_profile(
             "event-coordinates",
             "epicenter_coordinates",
             "USGS places the epicenter at "
-            f"{display_number(resolved_values['epicenter_coordinates']['latitude'])} "
+            f"{_display_number(resolved_values['epicenter_coordinates']['latitude'])} "
             "latitude, "
-            f"{display_number(resolved_values['epicenter_coordinates']['longitude'])} "
+            f"{_display_number(resolved_values['epicenter_coordinates']['longitude'])} "
             "longitude.",
             resolved_values["epicenter_coordinates"],
         ),
