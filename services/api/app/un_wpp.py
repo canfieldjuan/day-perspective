@@ -5,6 +5,7 @@ import csv
 import hashlib
 import io
 import urllib.request
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import ROUND_HALF_UP, Decimal
@@ -19,6 +20,7 @@ from sqlalchemy.orm import Session
 
 from app.adapters.base import LocalFilesystemRawSourceStore, RawSourceStore
 from app.governance import (
+    EditorialSelection,
     EditorialSelectionStatus,
     LicenseInput,
     ReviewDecisionValue,
@@ -33,6 +35,7 @@ from app.models import (
     ComparabilityStatus,
     DataStatus,
     DateRole,
+    DayProfile,
     DerivedValue,
     DerivedValueInput,
     LegalReviewStatus,
@@ -41,6 +44,9 @@ from app.models import (
     MetricCoverage,
     Observation,
     PipelineRun,
+    PublicationManifest,
+    PublicationStatus,
+    PublicationTier,
     QualityAssessment,
     QualityCheck,
     RawSourceRecord,
@@ -52,13 +58,16 @@ from app.models import (
     SourceRelease,
     TemporalAssignment,
     TemporalPrecision,
+    profile_type_for_date,
 )
 from app.services import (
+    LocalFilesystemPublishedProfileStore,
     PublicationStatementEvidenceInput,
     canonical_json_bytes,
     content_hash,
     create_claim,
     create_source_release,
+    publish_day_profile,
     resolve_claim,
 )
 
@@ -1133,7 +1142,15 @@ def build_un_wpp_profile_content(
     session: Session,
     *,
     profile_date: date = GOLDEN_DATE,
+    require_editorial_selection: bool = True,
 ) -> WPPProfileContent:
+    """Compose this date's annual context.
+
+    Callers that record editorial selections from the returned evidence must
+    pass require_editorial_selection=False and assert eligibility themselves
+    afterwards: the selection cannot exist before the content that names the
+    roots to select.
+    """
     profile_year = profile_date.year
     if profile_year not in SUPPORTED_YEARS:
         raise ValueError("UN WPP context is unavailable before 1950 or after 2025.")
@@ -1227,26 +1244,27 @@ def build_un_wpp_profile_content(
     required_derived = {"average_daily_births", "average_daily_deaths"}
     if not required_derived <= set(derived):
         raise ValueError("UN WPP daily equivalents have not been reviewed.")
-    assert_release_publication_eligible(
-        session,
-        source_release_id=release.id,
-        profile_date=profile_date,
-        resolved_root_ids_by_section={
-            "wider_historical_context": {
-                resolved_rows[key].id
-                for key in (
-                    "population_midyear",
-                    "life_expectancy",
-                    "under_five_mortality",
-                )
-            }
-        },
-        derived_root_ids_by_section={
-            "typical_day_in_this_year": {
-                derived[key].id for key in required_derived
-            }
-        },
-    )
+    if require_editorial_selection:
+        assert_release_publication_eligible(
+            session,
+            source_release_id=release.id,
+            profile_date=profile_date,
+            resolved_root_ids_by_section={
+                "wider_historical_context": {
+                    resolved_rows[key].id
+                    for key in (
+                        "population_midyear",
+                        "life_expectancy",
+                        "under_five_mortality",
+                    )
+                }
+            },
+            derived_root_ids_by_section={
+                "typical_day_in_this_year": {
+                    derived[key].id for key in required_derived
+                }
+            },
+        )
     typical: list[dict[str, object]] = []
     evidence: list[PublicationStatementEvidenceInput] = []
     for index, (predicate, label) in enumerate(
@@ -1410,4 +1428,177 @@ def build_un_wpp_profile_content(
         resolved_claims=tuple(
             sorted(resolved_rows.values(), key=lambda row: row.canonical_key)
         ),
+    )
+
+
+STANDING_ANNUAL_CONTEXT_RULE = "standing-rule:annual-context-v1"
+STANDING_ANNUAL_CONTEXT_RATIONALE = (
+    "Standing editorial rule: the reviewed annual context for a year is "
+    "selected for every date in that year, as period context rather than a "
+    "date-specific observation."
+)
+
+
+def _section_of(statement_path: str) -> str:
+    parts = statement_path.split("/")
+    if len(parts) < 3 or parts[1] != "sections":
+        raise ValueError(f"Unrecognized statement path: {statement_path}")
+    return parts[2]
+
+
+def ensure_annual_context_selections(
+    session: Session,
+    *,
+    profile_date: date,
+    evidence: Sequence[PublicationStatementEvidenceInput],
+) -> int:
+    """Apply the standing annual-context editorial rule to one date.
+
+    Editorial selection is per date, and the archive publishes tens of
+    thousands of dates whose only content is the reviewed annual context of
+    their year. Selecting that context by a named standing rule keeps every
+    published statement editorially accountable without pretending a human
+    considered each date individually (docs/DECISIONS.md D032).
+
+    Idempotent: record_editorial_selection returns the existing decision when
+    it is identical, so reruns append no versions.
+    """
+    ranks: dict[str, int] = {}
+    for item in evidence:
+        section = _section_of(item.statement_path)
+        ranks[section] = ranks.get(section, 0) + 1
+        # A standing rule must never reverse a human decision. If any prior
+        # decision exists for this date and root — selected, rejected, or
+        # deferred — it stands, and publication fails closed if it is not a
+        # selection.
+        conditions = [
+            EditorialSelection.profile_date == profile_date,
+            EditorialSelection.section_key == section,
+        ]
+        conditions.append(
+            EditorialSelection.resolved_claim_id == item.resolved_claim_id
+            if item.resolved_claim_id is not None
+            else EditorialSelection.derived_value_id == item.derived_value_id
+        )
+        if session.scalar(select(EditorialSelection.id).where(*conditions)) is not None:
+            continue
+        record_editorial_selection(
+            session,
+            profile_date=profile_date,
+            section_key=section,
+            resolved_claim_id=item.resolved_claim_id,
+            derived_value_id=item.derived_value_id,
+            status=EditorialSelectionStatus.SELECTED,
+            display_rank=ranks[section],
+            rationale=STANDING_ANNUAL_CONTEXT_RATIONALE,
+            reviewed_by=STANDING_ANNUAL_CONTEXT_RULE,
+        )
+    return len(list(evidence))
+
+
+def richer_published_profile(
+    session: Session, *, profile_date: date
+) -> DayProfile | None:
+    """The published profile for this date, if it already offers more than
+    annual context. Publishing context over it would hide evidence."""
+    latest = session.scalar(
+        select(PublicationManifest)
+        .where(
+            PublicationManifest.profile_date == profile_date,
+            PublicationManifest.status == PublicationStatus.PUBLISHED,
+        )
+        .order_by(PublicationManifest.version.desc())
+        .limit(1)
+    )
+    if latest is None or latest.publication_tier.rank <= PublicationTier.CONTEXT_ONLY.rank:
+        return None
+    return session.scalar(
+        select(DayProfile).where(DayProfile.publication_manifest_id == latest.id)
+    )
+
+
+def publish_context_profile(
+    session: Session,
+    *,
+    store: LocalFilesystemPublishedProfileStore,
+    profile_date: date,
+    force_new_version: bool = False,
+) -> DayProfile:
+    """Publish a date whose content is the reviewed annual context of its year.
+
+    Recorded events, curated material, and comparisons stay honestly empty:
+    the profile says what the evidence supports and nothing more. The
+    resulting publication tier is context_only (D031).
+    """
+    profile_type = profile_type_for_date(profile_date)
+    if profile_type is None:
+        raise ValueError("Context profiles require a date inside the public shell.")
+    existing_profile = richer_published_profile(session, profile_date=profile_date)
+    if existing_profile is not None:
+        # Publishing annual context over an enriched date would bury its
+        # recorded events behind a higher, sparser version.
+        return existing_profile
+    content = build_un_wpp_profile_content(
+        session, profile_date=profile_date, require_editorial_selection=False
+    )
+    ensure_annual_context_selections(
+        session, profile_date=profile_date, evidence=content.evidence
+    )
+
+    resolved_by_section: dict[str, set[UUID]] = {}
+    derived_by_section: dict[str, set[UUID]] = {}
+    for item in content.evidence:
+        section = _section_of(item.statement_path)
+        if item.resolved_claim_id is not None:
+            resolved_by_section.setdefault(section, set()).add(item.resolved_claim_id)
+        if item.derived_value_id is not None:
+            derived_by_section.setdefault(section, set()).add(item.derived_value_id)
+    assert_release_publication_eligible(
+        session,
+        source_release_id=content.source_release_id,
+        profile_date=profile_date,
+        resolved_root_ids_by_section=resolved_by_section,
+        derived_root_ids_by_section=derived_by_section,
+    )
+
+    supported = {"typical_day_in_this_year", "wider_historical_context"}
+    unsupported_reason = (
+        "This vertical slice does not publish this evidence class."
+    )
+    sections: dict[str, list[dict[str, object]]] = {
+        "recorded_on_this_date": [],
+        "typical_day_in_this_year": list(content.typical_statements),
+        "wider_historical_context": list(content.context_statements),
+        "curated_claims": [],
+        "derived_comparisons": [],
+        "wonder_and_progress": [],
+        "evidence_notes": [],
+    }
+    payload: dict[str, object] = {
+        "schema_version": "1",
+        "date": profile_date.isoformat(),
+        "profile_type": profile_type.value,
+        "sections": sections,
+        "section_states": {
+            key: (
+                {"status": "available"}
+                if key in supported or key == "recorded_on_this_date"
+                else {"status": "not_yet_supported", "reason": unsupported_reason}
+            )
+            for key in sections
+        },
+    }
+    return publish_day_profile(
+        session,
+        store=store,
+        profile_date=profile_date,
+        profile_type=profile_type,
+        payload=payload,
+        statement_evidence=content.evidence,
+        methodology_id=content.methodology.id,
+        force_new_version=force_new_version,
+        manifest_metadata={
+            "source_release_ids": [str(content.source_release_id)],
+            "editorial_rule": STANDING_ANNUAL_CONTEXT_RULE,
+        },
     )

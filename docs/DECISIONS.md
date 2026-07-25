@@ -697,3 +697,70 @@ contract vocabulary instead of rendering it.
 **Revisit trigger:** A per-date human editorial review becomes recorded
 data, at which point `reviewed_enriched` should require it and the current
 rule becomes `enriched`.
+
+## D032: A standing editorial rule selects annual context for every date
+
+**Decision:** Publishing a date whose only content is the reviewed annual
+context of its year records editorial selections attributed to a named
+standing rule (`standing-rule:annual-context-v1`) rather than to a person.
+The rule's rationale is recorded on every selection: the reviewed annual
+context for a year is selected for every date in that year, as period
+context rather than a date-specific observation. Publication gates are
+unchanged — license, pipeline, quality checks, and per-root editorial
+selection are all still required.
+
+**Context:** Editorial selection is per date, and the archive publishes
+tens of thousands of dates whose content is identical annual context.
+Selections existed for exactly one date (1964-03-27), so every other date
+failed the publication gate.
+
+**Alternatives considered:** Recording a human reviewer identity for each
+date (a lie at 27,759 dates); weakening the eligibility gate for
+context-only profiles (removes the accountability the gate exists for);
+selecting annual context once per year rather than per date (the schema and
+the product both treat selection as a per-date editorial act).
+
+**Reason:** The rule keeps every published statement traceable to an
+explicit, versioned editorial decision while being honest that the decision
+was made once, by rule, for a whole year — not individually for each day.
+
+**Consequences:** `ensure_annual_context_selections` is idempotent, so
+reruns append no decision versions; `build_un_wpp_profile_content` gained
+`require_editorial_selection=False` for callers that record selections from
+the evidence it returns and then assert eligibility themselves — the
+selection cannot exist before the content that names the roots to select.
+
+**Revisit trigger:** A date receives human editorial attention, at which
+point its selections should carry that reviewer and supersede the rule's.
+
+## D033: Batch publication is ledgered, resumable, and rerun-safe
+
+**Decision:** Batch publication records a run row and one entry per date
+(`publication_batch_runs`, `publication_batch_entries`). Each date is
+published in its own transaction; a failure is ledgered with its reason and
+the run continues. `--resume` re-attempts what the ledger still owes,
+`--retry-failed` re-attempts only failures, and `--dry-run` ledgers intent
+without publishing. Unsupported years are rejected when the run is planned
+rather than failing date by date.
+
+**Context:** The archive is ~27,759 dates. A run that dies at date 18,403
+must not restart from the beginning, and a rerun must not accumulate
+versions.
+
+**Alternatives considered:** A single transaction per run (one bad date
+loses everything); no ledger, inferring progress from published manifests
+(cannot distinguish "never attempted" from "attempted and failed", and
+loses failure reasons); failing the whole run on the first bad date.
+
+**Reason:** Rerun safety comes from publication itself being idempotent by
+content (D031/AA0); the ledger adds the operational memory an interrupted
+run needs to finish, and the failure record an operator needs to act.
+
+**Consequences:** A date whose publication committed before the process
+died is re-attempted on resume and recorded as `unchanged` — verified by
+killing a real 1972 run mid-flight and resuming it to 366 dates at version
+1. Ledger writes commit separately from publication, so the ledger can lag
+a crash by one entry but never overstate progress.
+
+**Revisit trigger:** Publication becomes parallel across dates, which would
+require the ledger to record worker ownership.

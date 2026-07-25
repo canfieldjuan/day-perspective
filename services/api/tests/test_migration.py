@@ -158,7 +158,11 @@ def test_publication_tier_backfill_derives_from_statement_evidence(
     # alembic_version, so restore the version record before exercising the
     # migration. The schema itself is at head.
     command.stamp(alembic_config, "head")
-    command.downgrade(alembic_config, "-1")
+    # Target the revision that introduced tiers explicitly: a relative step
+    # would follow whatever migration happens to be head today, and a failed
+    # assertion below must never leave the schema downgraded for the rest of
+    # the suite (hence the restoration in the finally block).
+    command.downgrade(alembic_config, "20260724_0011")
 
     engine = create_engine(migrated_database)
     try:
@@ -181,4 +185,5 @@ def test_publication_tier_backfill_derives_from_statement_evidence(
         assert observed[enriched_date.isoformat()] == "reviewed_enriched"
         assert observed[lookalike_date.isoformat()] == "context_only"
     finally:
+        command.upgrade(alembic_config, "head")
         engine.dispose()
