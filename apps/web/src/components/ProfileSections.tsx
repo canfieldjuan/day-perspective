@@ -1,8 +1,9 @@
-import React from "react";
+import React, { useState } from "react";
 
 import type { PublishedDayProfile } from "@day-perspective/contracts";
 import { DAY_PROFILE_SECTIONS } from "@/src/lib/day-profile";
 import { deriveEvidenceClass } from "@/src/lib/evidence-class";
+import { EvidencePanel } from "./EvidencePanel";
 
 export type SectionAvailability = "loading" | "unpublished" | "api-error" | "published";
 
@@ -20,6 +21,8 @@ type ProfileSectionsProps = {
   sourceAttribution?: PublishedDayProfile["source_attribution"];
   quality?: PublishedDayProfile["quality"];
   profileDate?: string;
+  publicationManifestId?: string;
+  publicationContentHash?: string;
 };
 
 export function ProfileSections({
@@ -28,28 +31,22 @@ export function ProfileSections({
   sectionStates,
   sourceAttribution,
   quality,
-  profileDate
+  profileDate,
+  publicationManifestId,
+  publicationContentHash
 }: ProfileSectionsProps) {
   const profileYear = profileDate?.slice(0, 4) ?? "";
+  const [evidenceStatement, setEvidenceStatement] = useState<
+    import("@day-perspective/contracts").ProfileStatement | null
+  >(null);
+  const showIntegrity =
+    availability === "published" &&
+    Boolean(
+      quality || sourceAttribution || publicationManifestId || publicationContentHash
+    );
 
   return (
     <>
-      {availability === "published" && quality ? (
-        <aside className="state-panel" aria-labelledby="publication-quality-title">
-          <p className="eyebrow">Publication quality</p>
-          <h2 id="publication-quality-title">Grade {quality.grade}</h2>
-          <p>{quality.explanation}</p>
-        </aside>
-      ) : null}
-      {availability === "published" && sourceAttribution ? (
-        <aside className="state-panel" aria-labelledby="source-attribution-title">
-          <p className="eyebrow">Source attribution</p>
-          <h2 id="source-attribution-title">
-            <a href={sourceAttribution.url}>{sourceAttribution.name}</a>
-          </h2>
-          <p>Published by {sourceAttribution.publisher}.</p>
-        </aside>
-      ) : null}
       <div className="strata" aria-label="Day profile sections">
         {DAY_PROFILE_SECTIONS.map((section) => {
         const headingId = section.id + "-heading";
@@ -136,59 +133,13 @@ export function ProfileSections({
                     </p>
                   ) : null}
                   {statement.provenance ? (
-                    <details className="provenance-view">
-                      <summary>Why can the app say this?</summary>
-                      <dl>
-                        {statement.provenance.resolved_claim ? (
-                          <>
-                            <dt>Resolved claim</dt>
-                            <dd>
-                              {statement.provenance.resolved_claim.canonical_key}, version{" "}
-                              {statement.provenance.resolved_claim.version}:{" "}
-                              {statement.provenance.resolved_claim.rationale}
-                            </dd>
-                          </>
-                        ) : null}
-                        {statement.provenance.derived_value ? (
-                          <>
-                            <dt>Derived value</dt>
-                            <dd>
-                              {statement.provenance.derived_value.kind}, calculation version{" "}
-                              {statement.provenance.derived_value.calculation_version}
-                            </dd>
-                          </>
-                        ) : null}
-                        <dt>Supporting claims</dt>
-                        <dd>
-                          {statement.provenance.supporting_claims.map((claim, claimIndex) => (
-                            <span
-                              key={`${claim.predicate}:${claim.source_record_hash_sha256}:${claimIndex}`}
-                            >
-                              {claim.predicate} from{" "}
-                              <a href={claim.source_record_locator}>
-                                the {statement.provenance?.source_release.source} source record
-                              </a>
-                            </span>
-                          ))}
-                        </dd>
-                        <dt>Dissenting claims</dt>
-                        <dd>
-                          {statement.provenance.dissenting_claims.length === 0
-                            ? "None in this publication."
-                            : `${statement.provenance.dissenting_claims.length} retained.`}
-                        </dd>
-                        <dt>Source release</dt>
-                        <dd>
-                          {statement.provenance.source_release.source}:{" "}
-                          {statement.provenance.source_release.release}
-                        </dd>
-                        <dt>Methodology</dt>
-                        <dd>
-                          {statement.provenance.methodology.name}, version{" "}
-                          {statement.provenance.methodology.version}
-                        </dd>
-                      </dl>
-                    </details>
+                    <button
+                      className="provenance-trigger"
+                      onClick={() => setEvidenceStatement(statement)}
+                      type="button"
+                    >
+                      Why can the app say this?
+                    </button>
                   ) : null}
                 </article>
                 );
@@ -215,10 +166,47 @@ export function ProfileSections({
                 ) : null}
               </>
             )}
+            {section.key === "evidence_notes" && showIntegrity ? (
+              <div
+                className="publication-integrity"
+                data-testid="publication-integrity"
+              >
+                <p className="eyebrow">Publication integrity</p>
+                {quality ? (
+                  <p>
+                    <span className="quality-grade">Grade {quality.grade}</span>{" "}
+                    {quality.explanation}
+                  </p>
+                ) : null}
+                {sourceAttribution ? (
+                  <p>
+                    Source:{" "}
+                    <a href={sourceAttribution.url}>{sourceAttribution.name}</a>,
+                    published by {sourceAttribution.publisher}.
+                  </p>
+                ) : null}
+                {publicationManifestId ? (
+                  <p className="integrity-mono">Manifest {publicationManifestId}</p>
+                ) : null}
+                {publicationContentHash ? (
+                  <details>
+                    <summary className="integrity-mono">
+                      Content hash {publicationContentHash.slice(0, 12)}…
+                    </summary>
+                    <p className="integrity-mono">{publicationContentHash}</p>
+                  </details>
+                ) : null}
+              </div>
+            ) : null}
           </section>
         );
         })}
       </div>
+      <EvidencePanel
+        onClose={() => setEvidenceStatement(null)}
+        open={evidenceStatement !== null}
+        statement={evidenceStatement ?? undefined}
+      />
     </>
   );
 }

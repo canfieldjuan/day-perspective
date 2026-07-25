@@ -1,0 +1,128 @@
+"use client";
+
+import React, { useEffect, useRef } from "react";
+
+import type { ProfileStatement } from "@day-perspective/contracts";
+import styles from "./EvidencePanel.module.css";
+
+type EvidencePanelProps = {
+  open: boolean;
+  statement?: ProfileStatement;
+  onClose: () => void;
+};
+
+/**
+ * Modal evidence panel (UI_UX_CONTRACT C-9): native <dialog> supplies focus
+ * containment, Esc handling, and focus restoration to the trigger. Renders
+ * only payload-provided provenance; dissenting records get the same
+ * completeness as supporting ones.
+ */
+export function EvidencePanel({ open, statement, onClose }: EvidencePanelProps) {
+  const dialogRef = useRef<HTMLDialogElement>(null);
+
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (!dialog) {
+      return;
+    }
+    if (open && !dialog.open) {
+      dialog.showModal();
+    } else if (!open && dialog.open) {
+      dialog.close();
+    }
+  }, [open]);
+
+  const provenance = statement?.provenance;
+
+  return (
+    <dialog
+      aria-label="Evidence for this statement"
+      className={styles.panel}
+      data-testid="evidence-panel"
+      onCancel={onClose}
+      onClose={onClose}
+      ref={dialogRef}
+    >
+      {statement && provenance ? (
+        <div className={styles.body}>
+          <p className="eyebrow">Evidence</p>
+          <p className={styles.statement}>{statement.statement}</p>
+          <dl className={styles.chain}>
+            {provenance.resolved_claim ? (
+              <>
+                <dt>Resolved claim</dt>
+                <dd>
+                  {provenance.resolved_claim.canonical_key}, version{" "}
+                  {provenance.resolved_claim.version}, method{" "}
+                  {provenance.resolved_claim.method}:{" "}
+                  {provenance.resolved_claim.rationale}
+                </dd>
+              </>
+            ) : null}
+            {provenance.derived_value ? (
+              <>
+                <dt>Derived value</dt>
+                <dd>
+                  {provenance.derived_value.kind}, calculation version{" "}
+                  {provenance.derived_value.calculation_version}
+                </dd>
+              </>
+            ) : null}
+            <dt>Why published</dt>
+            <dd>{provenance.published_statement}</dd>
+            <dt>Supporting claims</dt>
+            <dd>
+              {provenance.supporting_claims.length === 0
+                ? "None recorded."
+                : provenance.supporting_claims.map((claim, index) => (
+                    <span key={`s:${claim.predicate}:${index}`}>
+                      {claim.predicate} from{" "}
+                      <a href={claim.source_record_locator}>
+                        the {provenance.source_release.source} source record
+                      </a>
+                    </span>
+                  ))}
+            </dd>
+            <dt>Dissenting claims</dt>
+            <dd>
+              {provenance.dissenting_claims.length === 0
+                ? "None in this publication."
+                : provenance.dissenting_claims.map((claim, index) => (
+                    <span key={`d:${claim.predicate}:${index}`}>
+                      {claim.predicate} from{" "}
+                      <a href={claim.source_record_locator}>
+                        the dissenting {provenance.source_release.source} source
+                        record
+                      </a>
+                    </span>
+                  ))}
+            </dd>
+            <dt>Source release</dt>
+            <dd>
+              {provenance.source_release.source}:{" "}
+              {provenance.source_release.release}
+              {provenance.source_release.publisher
+                ? ", published by " + provenance.source_release.publisher
+                : ""}
+              . Retrieved {provenance.source_release.retrieved_at}.
+            </dd>
+            <dt>Methodology</dt>
+            <dd>
+              {provenance.methodology.name}, version{" "}
+              {provenance.methodology.version}:{" "}
+              {provenance.methodology.description}
+            </dd>
+          </dl>
+          <button
+            aria-label="Close evidence panel"
+            className="action-button"
+            onClick={onClose}
+            type="button"
+          >
+            Close
+          </button>
+        </div>
+      ) : null}
+    </dialog>
+  );
+}

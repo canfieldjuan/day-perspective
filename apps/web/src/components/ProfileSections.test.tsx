@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import React from "react";
 import { describe, expect, it } from "vitest";
 
@@ -61,6 +61,9 @@ describe("ProfileSections provenance", () => {
 
     render(<ProfileSections availability="published" sections={sections} />);
 
+    fireEvent.click(
+      screen.getByRole("button", { name: "Why can the app say this?" })
+    );
     const links = screen.getAllByRole("link", {
         name: "the UN World Population Prospects source record"
       });
@@ -244,11 +247,10 @@ describe("ProfileSections evidence classes", () => {
       />
     );
 
-    expect(screen.getByText("Publication quality")).toBeInTheDocument();
-    expect(screen.getByText("Grade B")).toBeInTheDocument();
-    expect(
-      screen.getByText("Single validated official source.")
-    ).toBeInTheDocument();
+    const integrity = screen.getByTestId("publication-integrity");
+    expect(integrity).toHaveTextContent("Publication integrity");
+    expect(integrity).toHaveTextContent("Grade B");
+    expect(integrity).toHaveTextContent("Single validated official source.");
     expect(
       screen.getByRole("link", { name: "USGS Earthquake Catalog" })
     ).toBeInTheDocument();
@@ -424,5 +426,35 @@ describe("ProfileSections seam-state precedence", () => {
     const recorded = screen.getByTestId("stratum-recorded_on_this_date");
     expect(recorded).toHaveTextContent("No reviewed event is published for this date.");
     expect(recorded).toHaveTextContent("Recorded events for this era await a pipeline.");
+  });
+});
+
+describe("ProfileSections publication integrity", () => {
+  it("renders manifest, truncated hash, quality, and attribution in the evidence stratum", () => {
+    render(
+      <ProfileSections
+        availability="published"
+        sections={emptySections}
+        profileDate="1964-03-27"
+        quality={{ grade: "B", explanation: "Single validated official source." }}
+        sourceAttribution={{
+          name: "USGS Earthquake Catalog",
+          publisher: "U.S. Geological Survey",
+          url: "https://earthquake.usgs.gov"
+        }}
+        publicationManifestId="manifest-42"
+        publicationContentHash={"a1b2c3d4e5f6".padEnd(64, "0")}
+      />
+    );
+
+    const integrity = screen.getByTestId("publication-integrity");
+    expect(integrity).toHaveTextContent("manifest-42");
+    expect(integrity).toHaveTextContent("a1b2c3d4e5f6…");
+    expect(integrity).toHaveTextContent("Grade B");
+    expect(integrity).toHaveTextContent("Single validated official source.");
+    expect(
+      screen.getByRole("link", { name: "USGS Earthquake Catalog" })
+    ).toBeInTheDocument();
+    expect(screen.getByText("a1b2c3d4e5f6".padEnd(64, "0"))).toBeInTheDocument();
   });
 });

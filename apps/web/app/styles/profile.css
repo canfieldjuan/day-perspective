@@ -37,29 +37,10 @@
 }
 
 
-.provenance-view {
-  margin-top: 1rem;
-  border-top: 1px solid color-mix(in srgb, currentColor 20%, transparent);
-  padding-top: 0.8rem;
-}
 
-.provenance-view summary {
-  cursor: pointer;
-  font-weight: 700;
-}
 
-.provenance-view dt {
-  margin-top: 0.75rem;
-  font-weight: 700;
-}
 
-.provenance-view dd {
-  margin-left: 0;
-}
 
-.provenance-view dd span {
-  display: block;
-}
 
 .quality-grade {
   font-weight: 800;
@@ -211,4 +192,40 @@
 .day-arrival h1 {
   font-family: var(--font-display), Georgia, "Times New Roman", serif;
   font-weight: 560;
+}
+
+.provenance-trigger {
+  align-items: flex-end;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--muted-ink);
+  color: var(--muted-ink);
+  display: inline-flex;
+  font-family: "Courier New", monospace;
+  font-size: 0.78rem;
+  font-weight: 700;
+  margin-top: 0.35rem;
+  min-height: 44px;
+  padding: 0 0 0.35rem;
+}
+
+.provenance-trigger:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.publication-integrity {
+  border-top: 1px solid var(--muted-ink);
+  margin-top: 1rem;
+  padding-top: 0.8rem;
+}
+
+.integrity-mono {
+  font-family: "Courier New", monospace;
+  font-size: 0.78rem;
+  overflow-wrap: anywhere;
+}
+
+.publication-integrity summary {
+  cursor: pointer;
 }
