@@ -8,6 +8,8 @@ import {
 } from "@/src/lib/day-profile";
 import type { PublishedDayProfile } from "@day-perspective/contracts";
 import { ProfileSections } from "./ProfileSections";
+import { entryKindForArrival, phaseForView } from "@/src/lib/travel-phase";
+import { recordArrival } from "@/src/lib/travel-store";
 
 type ViewState =
   | { kind: "loading" }
@@ -41,9 +43,14 @@ export function DayProfileClient({
   date: string;
   arrival?: ReactNode;
 }) {
-  const [state, setState] = useState<{ date: string; view: ViewState }>({
+  const [state, setState] = useState<{
+    date: string;
+    view: ViewState;
+    arrivals: number;
+  }>({
     date,
-    view: { kind: "loading" }
+    view: { kind: "loading" },
+    arrivals: 0
   });
   const [requestNumber, setRequestNumber] = useState(0);
 
@@ -69,27 +76,50 @@ export function DayProfileClient({
         }
 
         if (isProfileNotPublished(payload, date)) {
-          setState({ date, view: { kind: "unpublished" } });
+          {
+            const arrivalNumber = recordArrival();
+            setState({
+              date,
+              view: { kind: "unpublished" },
+              arrivals: arrivalNumber
+            });
+          }
           return;
         }
 
         if (!response.ok || !isPublishedProfileResponse(payload, date)) {
-          setState({ date, view: { kind: "api-error" } });
+          {
+            const arrivalNumber = recordArrival();
+            setState({
+              date,
+              view: { kind: "api-error" },
+              arrivals: arrivalNumber
+            });
+          }
           return;
         }
 
-        setState({
-          date,
-          view: {
-            kind: "published",
-            profile: payload.profile,
-            manifestId: payload.manifest_id,
-            contentHash: payload.content_hash
-          }
-        });
+        {
+          const arrivalNumber = recordArrival();
+          setState({
+            date,
+            view: {
+              kind: "published",
+              profile: payload.profile,
+              manifestId: payload.manifest_id,
+              contentHash: payload.content_hash
+            },
+            arrivals: arrivalNumber
+          });
+        }
       } catch {
         if (!controller.signal.aborted) {
-          setState({ date, view: { kind: "api-error" } });
+          const arrivalNumber = recordArrival();
+          setState({
+            date,
+            view: { kind: "api-error" },
+            arrivals: arrivalNumber
+          });
         }
       }
     }
@@ -103,6 +133,11 @@ export function DayProfileClient({
 
   const viewState: ViewState =
     state.date === date ? state.view : { kind: "loading" };
+
+  const phase = phaseForView(
+    isSupportedPublicDate(date) ? viewState.kind : "unpublished"
+  );
+  const entry = entryKindForArrival(state.arrivals > 1);
 
   const statusLine = !isSupportedPublicDate(date)
     ? "No profile request was made for this address."
@@ -123,7 +158,12 @@ export function DayProfileClient({
 
   if (!isSupportedPublicDate(date)) {
     return (
-      <>
+      <div
+        className="travel-shell"
+        data-entry={entry}
+        data-phase={phase}
+        data-testid="travel-shell"
+      >
         {arrivalPanel}
         <section className="state-panel state-panel--error" aria-labelledby="invalid-date-title">
           <p className="eyebrow">Date outside public shell</p>
@@ -131,13 +171,18 @@ export function DayProfileClient({
           <p>No profile request was made for this URL.</p>
         </section>
         <ProfileSections availability="unpublished" />
-      </>
+      </div>
     );
   }
 
   if (viewState.kind === "unpublished") {
     return (
-      <>
+      <div
+        className="travel-shell"
+        data-entry={entry}
+        data-phase={phase}
+        data-testid="travel-shell"
+      >
         {arrivalPanel}
         <section
           className="state-panel state-panel--unpublished"
@@ -151,13 +196,18 @@ export function DayProfileClient({
           </p>
         </section>
         <ProfileSections availability="unpublished" />
-      </>
+      </div>
     );
   }
 
   if (viewState.kind === "api-error") {
     return (
-      <>
+      <div
+        className="travel-shell"
+        data-entry={entry}
+        data-phase={phase}
+        data-testid="travel-shell"
+      >
         {arrivalPanel}
         <section className="state-panel state-panel--error" aria-labelledby="api-error-title">
           <p className="eyebrow">Profile service unavailable</p>
@@ -170,7 +220,11 @@ export function DayProfileClient({
             className="action-button"
             type="button"
             onClick={() => {
-              setState({ date, view: { kind: "loading" } });
+              setState((previous) => ({
+                date,
+                view: { kind: "loading" },
+                arrivals: previous.arrivals
+              }));
               setRequestNumber((value) => value + 1);
             }}
           >
@@ -178,13 +232,18 @@ export function DayProfileClient({
           </button>
         </section>
         <ProfileSections availability="api-error" />
-      </>
+      </div>
     );
   }
 
   if (viewState.kind === "published") {
     return (
-      <>
+      <div
+        className="travel-shell"
+        data-entry={entry}
+        data-phase={phase}
+        data-testid="travel-shell"
+      >
         {arrivalPanel}
         <ProfileSections
           availability="published"
@@ -196,12 +255,17 @@ export function DayProfileClient({
           publicationManifestId={viewState.manifestId}
           publicationContentHash={viewState.contentHash}
         />
-      </>
+      </div>
     );
   }
 
   return (
-    <>
+    <div
+      className="travel-shell"
+      data-entry={entry}
+      data-phase={phase}
+      data-testid="travel-shell"
+    >
       {arrivalPanel}
       <section className="state-panel" aria-busy="true" aria-live="polite">
         <p className="eyebrow">Checking publication status</p>
@@ -209,6 +273,6 @@ export function DayProfileClient({
         <div className="loading-line loading-line--short" data-testid="loading-line" />
       </section>
       <ProfileSections availability="loading" />
-    </>
+    </div>
   );
 }

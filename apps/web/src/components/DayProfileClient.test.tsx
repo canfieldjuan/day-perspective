@@ -2,10 +2,12 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DayProfileClient } from "./DayProfileClient";
+import { resetArrivalsForTests } from "@/src/lib/travel-store";
 
 describe("DayProfileClient", () => {
   beforeEach(() => {
     vi.stubGlobal("fetch", vi.fn());
+    resetArrivalsForTests();
   });
 
   afterEach(() => {
