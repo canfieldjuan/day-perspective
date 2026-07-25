@@ -119,6 +119,19 @@ function isSectionStates(value: unknown): boolean {
   );
 }
 
+function isSourceAttribution(value: unknown): boolean {
+  if (value === undefined) {
+    return true;
+  }
+  const attribution = asRecord(value);
+  return (
+    attribution !== undefined &&
+    typeof attribution.name === "string" &&
+    typeof attribution.publisher === "string" &&
+    typeof attribution.url === "string"
+  );
+}
+
 export function isProfileNotPublished(payload: unknown, expectedDate: string): payload is ProfileNotPublished {
   const response = asRecord(payload);
   const expectedProfileType = profileTypeForDate(expectedDate);
@@ -162,6 +175,7 @@ export function isPublishedProfileResponse(
   return (
     sections !== undefined &&
     isSectionStates(profile.section_states) &&
+    isSourceAttribution(profile.source_attribution) &&
     Object.entries(sections).every(
       ([key, statements]) =>
         isSectionKey(key) &&

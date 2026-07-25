@@ -179,6 +179,17 @@ def test_idempotent_rerun_refuses_corrupt_raw_storage(
     )
     assert [run.status for run in runs] == ["succeeded", "failed"]
     assert session.scalar(select(func.count()).select_from(SourceRelease)) == 1
+    failed_check = session.scalar(
+        select(QualityCheck).where(QualityCheck.pipeline_run_id == runs[-1].id)
+    )
+    assert failed_check is not None
+    assert failed_check.subject_type == "source_release"
+    assert failed_check.subject_id == release.id
+    with pytest.raises(ValueError, match="latest source-release quality check"):
+        publish_golden_profile(
+            session,
+            store=LocalFilesystemPublishedProfileStore(tmp_path / "published"),
+        )
 
 
 def test_duplicate_source_record_handling_reuses_the_release(
@@ -256,6 +267,17 @@ def test_event_time_conversion_and_local_civil_date_assignment(
     assert event_time.utc_offset_minutes == -600
     assert event_time.timezone_name == "America/Anchorage"
     assert "historical" in (event_time.interpretation or "").lower()
+    local_date_resolution = session.scalar(
+        select(ResolvedClaim).where(
+            ResolvedClaim.canonical_key
+            == "usgs:official19640328033616_30:local_civil_date"
+        )
+    )
+    assert local_date_resolution is not None
+    assert (
+        event_time.local_date_provenance_resolved_claim_id
+        == local_date_resolution.id
+    )
 
 
 def test_geography_assignment_retains_version_and_point(

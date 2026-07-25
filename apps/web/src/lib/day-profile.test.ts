@@ -87,4 +87,29 @@ describe("isPublishedProfileResponse", () => {
       )
     ).toBe(false);
   });
+
+  it("rejects malformed optional source attribution before rendering", () => {
+    expect(
+      isPublishedProfileResponse(
+        {
+          status: "published",
+          date: "1964-03-27",
+          profile_type: "standard_statistical",
+          manifest_id: "manifest-source-attribution",
+          content_hash: "e".repeat(64),
+          profile: {
+            schema_version: "1",
+            date: "1964-03-27",
+            profile_type: "standard_statistical",
+            sections: {},
+            source_attribution: {
+              name: "USGS",
+              publisher: "U.S. Geological Survey"
+            }
+          }
+        },
+        "1964-03-27"
+      )
+    ).toBe(false);
+  });
 });

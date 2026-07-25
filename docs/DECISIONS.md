@@ -332,3 +332,26 @@ Future multi-record adapters must compute and supply each record hash.
 
 **Revisit trigger:** Raw-record storage adopts a standardized byte-preserving
 record serialization shared by every adapter.
+
+## D018: Keep occurrence-instant and local-date projection provenance separate
+
+**Decision:** `event_times` retains one resolved-claim reference for the
+recorded UTC occurrence and a second reference for the historical local
+civil-date assignment. Publication eligibility uses the newest integrity check
+targeting a reused source release, not only the run that first created it.
+
+**Context:** A single projection row contains facts resolved from two separate
+claims, and a later idempotent read can discover corruption in the immutable
+raw object without creating a new release.
+
+**Alternatives considered:** Attribute the entire projection to the occurrence
+claim; ignore rerun failures because the original ingestion passed.
+
+**Reason:** Both approaches sever the evidence chain from current known state.
+
+**Consequences:** Local-date projections require explicit provenance, and a
+failed integrity reread blocks publication until a later release-scoped check
+passes.
+
+**Revisit trigger:** Event time and civil-date assignments become separate
+canonical projection tables.

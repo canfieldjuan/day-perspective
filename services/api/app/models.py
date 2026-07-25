@@ -387,6 +387,9 @@ class EventTime(Base):
     provenance_resolved_claim_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("resolved_claims.id", ondelete="RESTRICT")
     )
+    local_date_provenance_resolved_claim_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("resolved_claims.id", ondelete="RESTRICT")
+    )
     start_date: Mapped[date] = mapped_column(Date)
     end_date: Mapped[date | None] = mapped_column(Date)
     temporal_precision: Mapped[TemporalPrecision] = mapped_column(enum_type(TemporalPrecision, "temporal_precision"))

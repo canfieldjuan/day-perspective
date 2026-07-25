@@ -361,6 +361,7 @@ def ingest_usgs(
     )
     session.add(run)
     session.flush()
+    quality_subject_release_id: UUID | None = None
     try:
         payload = adapter.retrieve(fixture_path=fixture_path)
         checksum = hashlib.sha256(payload).hexdigest()
@@ -403,6 +404,7 @@ def ingest_usgs(
                 )
             )
             if existing_release is not None:
+                quality_subject_release_id = existing_release.id
                 raw_store.read(
                     existing_release.raw_storage_uri,
                     existing_release.raw_checksum_sha256,
@@ -534,7 +536,12 @@ def ingest_usgs(
                 pipeline_run_id=run.id,
                 check_name="usgs_schema_and_golden_record",
                 status="failed",
-                subject_type="pipeline_run",
+                subject_type=(
+                    "source_release"
+                    if quality_subject_release_id is not None
+                    else "pipeline_run"
+                ),
+                subject_id=quality_subject_release_id or run.id,
                 details={"error": str(error)},
             )
         )
@@ -769,6 +776,9 @@ def accept_and_resolve_release(session: Session, source_release_id: UUID) -> dic
         event_time = EventTime(event_id=event.id)
         session.add(event_time)
     event_time.provenance_resolved_claim_id = resolved["occurrence_timestamp"].id
+    event_time.local_date_provenance_resolved_claim_id = resolved[
+        "local_civil_date"
+    ].id
     event_time.start_date = local_date
     event_time.end_date = local_date
     event_time.exact_timestamp = timestamp
@@ -920,14 +930,20 @@ def publish_golden_profile(
     )
     if release is None:
         raise ValueError("USGS fixture has no source release.")
-    failed_check = session.scalar(
-        select(QualityCheck).where(
-            QualityCheck.pipeline_run_id == release.pipeline_run_id,
-            QualityCheck.status == "failed",
+    latest_release_check = session.scalar(
+        select(QualityCheck)
+        .join(PipelineRun, QualityCheck.pipeline_run_id == PipelineRun.id)
+        .where(
+            QualityCheck.subject_type == "source_release",
+            QualityCheck.subject_id == release.id,
+            QualityCheck.check_name == "usgs_schema_and_golden_record",
         )
+        .order_by(PipelineRun.started_at.desc())
     )
-    if failed_check is not None:
-        raise ValueError("A failed ingestion quality check blocks publication.")
+    if latest_release_check is None or latest_release_check.status != "passed":
+        raise ValueError(
+            "The latest source-release quality check must pass before publication."
+        )
     resolved = accept_and_resolve_release(session, release.id)
     methodology = _methodology(session)
     claims = {

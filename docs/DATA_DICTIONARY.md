@@ -119,6 +119,8 @@ is restricted.
 
 - `exact_timestamp`: timezone-aware occurrence instant.
 - `local_date`: separately assigned civil date.
+- `local_date_provenance_resolved_claim_id`: resolved local-date claim that
+  supports the civil-date projection, distinct from the UTC occurrence claim.
 - `timezone_name`: IANA rule set used for conversion.
 - `utc_offset_minutes`: offset at the historical instant.
 - `interpretation`: public explanation of the assignment.
