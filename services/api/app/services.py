@@ -7,11 +7,12 @@ import tempfile
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Protocol
 from uuid import UUID
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import event, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
@@ -25,6 +26,7 @@ from app.models import (
     DerivedValueInput,
     Geography,
     GeographyVersion,
+    LegalReviewStatus,
     Methodology,
     Metric,
     Observation,
@@ -56,6 +58,10 @@ def content_hash(payload: dict[str, Any]) -> str:
 class PublishedProfileStore(Protocol):
     def write(self, profile_date: date, profile_type: ProfileType, payload: dict[str, Any]) -> str: ...
 
+    def stage_versioned(
+        self, profile_date: date, version: int, payload: dict[str, Any]
+    ) -> StagedProfileWrite: ...
+
     def read(self, storage_uri: str, expected_hash: str) -> dict[str, Any]: ...
 
 
@@ -71,6 +77,56 @@ class SnapshottedStatementEvidence:
     evidence: PublicationStatementEvidenceInput
     snapshot: dict[str, Any]
     snapshot_hash: str
+
+
+@dataclass
+class StagedProfileWrite:
+    storage_uri: str
+    temporary_path: Path | None
+    destination: Path
+    expected_hash: str
+    store: LocalFilesystemPublishedProfileStore
+    created_destination: bool = False
+
+    def finalize(self) -> None:
+        if self.temporary_path is None:
+            return
+        try:
+            try:
+                os.link(self.temporary_path, self.destination)
+                self.created_destination = True
+            except FileExistsError:
+                self.store.read(self.storage_uri, self.expected_hash)
+        finally:
+            self.temporary_path.unlink(missing_ok=True)
+            self.temporary_path = None
+
+    def discard(self) -> None:
+        if self.temporary_path is not None:
+            self.temporary_path.unlink(missing_ok=True)
+            self.temporary_path = None
+        if self.created_destination:
+            self.destination.unlink(missing_ok=True)
+            self.created_destination = False
+
+
+_PENDING_PROFILE_WRITES = "pending_profile_writes"
+
+
+@event.listens_for(Session, "after_commit")
+def _finalize_profile_writes(session: Session) -> None:
+    if session.in_transaction():
+        return
+    pending = session.info.pop(_PENDING_PROFILE_WRITES, [])
+    for staged in pending:
+        staged.finalize()
+
+
+@event.listens_for(Session, "after_rollback")
+def _discard_profile_writes(session: Session) -> None:
+    pending = session.info.pop(_PENDING_PROFILE_WRITES, [])
+    for staged in pending:
+        staged.discard()
 
 
 class LocalFilesystemPublishedProfileStore:
@@ -102,6 +158,45 @@ class LocalFilesystemPublishedProfileStore:
                 os.unlink(temporary_path)
         return relative.as_posix()
 
+    def write_versioned(
+        self,
+        profile_date: date,
+        version: int,
+        payload: dict[str, Any],
+    ) -> str:
+        staged = self.stage_versioned(profile_date, version, payload)
+        staged.finalize()
+        return staged.storage_uri
+
+    def stage_versioned(
+        self,
+        profile_date: date,
+        version: int,
+        payload: dict[str, Any],
+    ) -> StagedProfileWrite:
+        digest = content_hash(payload)
+        relative = Path("day") / profile_date.isoformat() / f"profile-v{version}.json"
+        destination = (self.root / relative).resolve()
+        if not destination.is_relative_to(self.root):
+            raise RuntimeError("Refused profile write outside the configured storage root.")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if destination.exists():
+            try:
+                self.read(relative.as_posix(), digest)
+                return StagedProfileWrite(
+                    relative.as_posix(), None, destination, digest, self
+                )
+            except RuntimeError:
+                destination.unlink()
+        descriptor, temporary_path = tempfile.mkstemp(prefix=".profile-", dir=destination.parent)
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(canonical_json_bytes(payload))
+            handle.flush()
+            os.fsync(handle.fileno())
+        return StagedProfileWrite(
+            relative.as_posix(), Path(temporary_path), destination, digest, self
+        )
+
     def read(self, storage_uri: str, expected_hash: str) -> dict[str, Any]:
         candidate = (self.root / storage_uri).resolve()
         if not candidate.is_relative_to(self.root):
@@ -122,6 +217,9 @@ def create_source_release(
     raw_record_count: int,
     raw_bytes: bytes | None = None,
     raw_checksum_sha256: str | None = None,
+    pipeline_run_id: UUID | None = None,
+    metadata_json: dict[str, Any] | None = None,
+    legal_review_status: LegalReviewStatus = LegalReviewStatus.PENDING,
 ) -> SourceRelease:
     calculated_checksum = hashlib.sha256(raw_bytes).hexdigest() if raw_bytes is not None else None
     if raw_checksum_sha256 is not None and calculated_checksum is not None:
@@ -137,6 +235,9 @@ def create_source_release(
         raw_storage_uri=raw_storage_uri,
         raw_checksum_sha256=checksum,
         raw_record_count=raw_record_count,
+        pipeline_run_id=pipeline_run_id,
+        metadata_json=metadata_json or {},
+        legal_review_status=legal_review_status,
     )
     session.add(release)
     session.flush()
@@ -152,7 +253,20 @@ def create_claim(
     assertion_text: str | None,
     assertion_json: dict[str, Any] | None = None,
     assertion_status: ClaimAssertionStatus = ClaimAssertionStatus.IMPORTED,
+    source_record_hash_sha256: str | None = None,
+    unit: str | None = None,
+    lower_bound: Decimal | None = None,
+    upper_bound: Decimal | None = None,
 ) -> Claim:
+    if source_record_hash_sha256 is None:
+        release = session.get(SourceRelease, source_release_id)
+        if release is None:
+            raise ValueError("A claim requires an existing source release.")
+        if release.raw_record_count != 1:
+            raise ValueError(
+                "Claims from multi-record releases require a source-record hash."
+            )
+        source_record_hash_sha256 = release.raw_checksum_sha256
     claim = Claim(
         source_release_id=source_release_id,
         source_record_locator=source_record_locator,
@@ -160,6 +274,10 @@ def create_claim(
         assertion_text=assertion_text,
         assertion_json=assertion_json,
         assertion_status=assertion_status,
+        source_record_hash_sha256=source_record_hash_sha256,
+        unit=unit,
+        lower_bound=lower_bound,
+        upper_bound=upper_bound,
     )
     session.add(claim)
     session.flush()
@@ -172,6 +290,9 @@ def supersede_claim(
     prior_claim: Claim,
     assertion_text: str | None,
     assertion_json: dict[str, Any] | None = None,
+    unit: str | None = None,
+    lower_bound: Decimal | None = None,
+    upper_bound: Decimal | None = None,
 ) -> Claim:
     prior_claim.assertion_status = ClaimAssertionStatus.SUPERSEDED
     replacement = Claim(
@@ -182,6 +303,16 @@ def supersede_claim(
         assertion_json=assertion_json,
         assertion_status=ClaimAssertionStatus.CANDIDATE,
         supersedes_claim_id=prior_claim.id,
+        source_record_hash_sha256=prior_claim.source_record_hash_sha256,
+        pipeline_run_id=prior_claim.pipeline_run_id,
+        temporal_precision=prior_claim.temporal_precision,
+        temporal_assignment=prior_claim.temporal_assignment,
+        temporal_start=prior_claim.temporal_start,
+        temporal_end=prior_claim.temporal_end,
+        date_role=prior_claim.date_role,
+        unit=unit,
+        lower_bound=lower_bound,
+        upper_bound=upper_bound,
     )
     session.add(replacement)
     session.flush()
@@ -196,6 +327,9 @@ def resolve_claim(
     rationale: str,
     supporting_claim_ids: Iterable[UUID],
     dissenting_claim_ids: Iterable[UUID] = (),
+    resolution_method: ResolutionMethod = ResolutionMethod.EDITORIAL_REVIEW,
+    methodology_id: UUID | None = None,
+    supersedes_resolved_claim_id: UUID | None = None,
 ) -> ResolvedClaim:
     supporting = list(supporting_claim_ids)
     dissenting = list(dissenting_claim_ids)
@@ -203,21 +337,33 @@ def resolve_claim(
         raise ValueError("A resolved claim requires at least one supporting claim.")
     if set(supporting) & set(dissenting):
         raise ValueError("Evidence cannot be both supporting and dissenting.")
-    next_version = (
-        session.scalar(
-            select(func.coalesce(func.max(ResolvedClaim.version), 0)).where(
-                ResolvedClaim.canonical_key == canonical_key
+    latest = session.scalar(
+        select(ResolvedClaim)
+        .where(ResolvedClaim.canonical_key == canonical_key)
+        .order_by(ResolvedClaim.version.desc())
+    )
+    if latest is None:
+        if supersedes_resolved_claim_id is not None:
+            raise ValueError(
+                "A first resolved-claim version cannot supersede a predecessor."
             )
-        )
-        or 0
-    ) + 1
+        next_version = 1
+    else:
+        if supersedes_resolved_claim_id != latest.id:
+            raise ValueError(
+                "A resolved claim must supersede the latest version of the same "
+                "canonical key."
+            )
+        next_version = latest.version + 1
     resolved = ResolvedClaim(
         canonical_key=canonical_key,
         version=next_version,
         resolved_value=resolved_value,
-        resolution_method=ResolutionMethod.EDITORIAL_REVIEW,
+        resolution_method=resolution_method,
         comparability_status=ComparabilityStatus.UNKNOWN,
         rationale=rationale,
+        methodology_id=methodology_id,
+        supersedes_resolved_claim_id=supersedes_resolved_claim_id,
     )
     session.add(resolved)
     session.flush()
@@ -400,6 +546,8 @@ def _quality_assessment_snapshots(
                 "assessment_kind": assessment.assessment_kind,
                 "score": str(assessment.score) if assessment.score is not None else None,
                 "findings": assessment.findings,
+                "public_grade": assessment.public_grade,
+                "public_explanation": assessment.public_explanation,
                 "legal_review_status": assessment.legal_review_status.value,
                 "assessed_at": assessment.assessed_at.isoformat(),
                 "assessment_methodology": _methodology_core_snapshot(
@@ -518,10 +666,14 @@ def _claim_snapshot(session: Session, claim: Claim) -> dict[str, Any]:
     return {
         "id": str(claim.id),
         "source_record_locator": claim.source_record_locator,
+        "source_record_hash_sha256": claim.source_record_hash_sha256,
         "claim_type": claim.claim_type,
         "assertion_status": claim.assertion_status.value,
         "assertion_text": claim.assertion_text,
         "assertion": claim.assertion_json,
+        "unit": claim.unit,
+        "lower_bound": str(claim.lower_bound) if claim.lower_bound is not None else None,
+        "upper_bound": str(claim.upper_bound) if claim.upper_bound is not None else None,
         "temporal_start": _optional_date(claim.temporal_start),
         "temporal_end": _optional_date(claim.temporal_end),
         "temporal_precision": claim.temporal_precision.value,
@@ -829,9 +981,24 @@ def publish_day_profile(
     statement_evidence: Iterable[PublicationStatementEvidenceInput],
     supersedes_manifest_id: UUID | None = None,
     supersedes_day_profile_id: UUID | None = None,
+    methodology_id: UUID | None = None,
+    editorial_revision: int = 1,
+    manifest_metadata: dict[str, Any] | None = None,
 ) -> DayProfile:
     if profile_type_for_date(profile_date) != profile_type:
         raise ValueError("The profile type does not match the public date band.")
+    reserved_metadata_keys = {
+        "evidence_snapshot_schema_version",
+        "statement_evidence_hashes",
+    }
+    conflicting_metadata_keys = reserved_metadata_keys.intersection(
+        manifest_metadata or {}
+    )
+    if conflicting_metadata_keys:
+        raise ValueError(
+            "Manifest metadata contains publisher-reserved keys: "
+            + ", ".join(sorted(conflicting_metadata_keys))
+        )
     evidence = _validate_statement_evidence(
         session,
         payload,
@@ -861,13 +1028,16 @@ def publish_day_profile(
         profile_date=profile_date,
         profile_type=profile_type,
         version=version,
+        editorial_revision=editorial_revision,
         status=PublicationStatus.DRAFT,
         content_hash=digest,
         source_snapshot_hash=_source_snapshot_hash(snapshotted_evidence),
         storage_uri="pending://local-filesystem-write",
         code_version=get_settings().service_version,
+        methodology_id=methodology_id,
         supersedes_manifest_id=supersedes_manifest_id,
         metadata_json={
+            **(manifest_metadata or {}),
             "evidence_snapshot_schema_version": "1",
             "statement_evidence_hashes": [
                 {
@@ -894,7 +1064,10 @@ def publish_day_profile(
         ]
     )
     session.flush()
-    manifest.storage_uri = store.write(profile_date, profile_type, payload)
+    staged = store.stage_versioned(profile_date, version, payload)
+    staged.finalize()
+    manifest.storage_uri = staged.storage_uri
+    session.info.setdefault(_PENDING_PROFILE_WRITES, []).append(staged)
     manifest.status = PublicationStatus.PUBLISHED
     manifest.published_at = datetime.now(UTC)
     session.flush()

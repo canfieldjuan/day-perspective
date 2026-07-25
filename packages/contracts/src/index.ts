@@ -22,6 +22,45 @@ export interface ProfileStatement {
   statement_id: string;
   statement: string;
   provenance_note?: string;
+  details?: Record<string, unknown>;
+  provenance?: {
+    root_type?: "resolved_claim" | "derived_value";
+    published_statement: string;
+    resolved_claim?: {
+      canonical_key: string;
+      version: number;
+      method: string;
+      rationale: string;
+    };
+    derived_value?: {
+      kind: string;
+      calculation_version: string;
+      value?: Record<string, unknown> | null;
+    };
+    supporting_claims: Array<{
+      predicate: string;
+      value: Record<string, unknown> | null;
+      source_record_locator: string;
+      source_record_hash_sha256: string;
+    }>;
+    dissenting_claims: Array<{
+      predicate?: string;
+      value?: Record<string, unknown> | null;
+    }>;
+    source_release: {
+      source: string;
+      publisher: string | null;
+      release: string;
+      source_url: string;
+      raw_checksum_sha256: string;
+      retrieved_at: string;
+    };
+    methodology: {
+      name: string;
+      version: string;
+      description: string;
+    };
+  };
 }
 
 export interface PublishedDayProfile {
@@ -29,6 +68,14 @@ export interface PublishedDayProfile {
   date: string;
   profile_type: ProfileType;
   sections: Partial<Record<DayProfileSectionKey, ProfileStatement[]>>;
+  section_states?: Partial<
+    Record<
+      DayProfileSectionKey,
+      { status: "available" | "not_yet_supported"; reason?: string }
+    >
+  >;
+  quality?: { grade: string; explanation: string };
+  source_attribution?: { name: string; publisher: string; url: string };
 }
 
 export interface ProfileNotPublished {

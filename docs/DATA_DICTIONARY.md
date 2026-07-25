@@ -92,3 +92,50 @@ cascade-deleted.
 `enhanced_structured` only from 1989 through 2025. Both manifests and day
 profiles enforce those bands. Publication status is distinct from data status,
 and temporal assignment is distinct from temporal precision.
+
+## Phase 2 Schema Additions (`20260724_0007`)
+
+### `raw_source_records`
+
+One immutable source record retained inside one immutable source release.
+`source_record_id` is unique within its release. `source_record_locator` is the
+public record URL; `raw_storage_uri` is an internal storage key;
+`raw_checksum_sha256` identifies the canonical validated record payload, while
+the release checksum identifies the exact retrieved file bytes.
+`schema_version` identifies the adapter validation contract; `payload_json`
+retains the validated record. Update and delete are rejected. Release deletion
+is restricted. `raw_storage_uri` points to the canonical record bytes whose
+SHA-256 is stored on the same row; it is not the enclosing release object.
+
+### `claims` additions
+
+- `source_record_hash_sha256`: required 64-character SHA-256. A database insert
+  trigger may derive it from the immutable release checksum only for a
+  single-record release. Migration `0007` and direct inserts fail closed for
+  multi-record releases unless the actual record hash is supplied.
+- `unit`: predicate unit or measurement scale; nullable for nonnumeric predicates.
+- `lower_bound`, `upper_bound`: optional numeric uncertainty bounds. When both exist, lower must not exceed upper.
+
+### `event_times` additions
+
+- `exact_timestamp`: timezone-aware occurrence instant.
+- `local_date`: separately assigned civil date.
+- `local_date_provenance_resolved_claim_id`: resolved local-date claim that
+  supports the civil-date projection, distinct from the UTC occurrence claim.
+- `timezone_name`: IANA rule set used for conversion.
+- `utc_offset_minutes`: offset at the historical instant.
+- `interpretation`: public explanation of the assignment.
+
+A local date requires the complete timestamp/timezone/offset/interpretation tuple. `temporal_precision=second` was added to the existing enum; temporal assignment remains a separate field.
+
+### `quality_assessments` additions
+
+`public_grade` and `public_explanation` are an all-or-none pair. The USGS slice stores eight named quality dimensions in `findings` and uses the pair for the public result.
+
+### `publication_manifests` addition
+
+`editorial_revision` is a positive integer independent of profile version and publication status.
+
+### New and changed constraints
+
+`source_releases(source_id, raw_checksum_sha256)` is unique for idempotent imports. Raw records are immutable. Claim hashes and raw checksums must be lowercase SHA-256. Stable profile locations are version-addressed and protected by the existing published-manifest/day-profile immutability triggers.

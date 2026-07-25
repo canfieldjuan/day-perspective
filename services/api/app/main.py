@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime
 from typing import Annotated, Any, Literal
+from uuid import UUID
 
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
@@ -15,15 +16,20 @@ from app.database import get_session
 from app.models import (
     PUBLIC_DATE_MAX,
     PUBLIC_DATE_MIN,
+    Claim,
+    ClaimAssertionStatus,
     DayProfile,
     Methodology,
     ProfileType,
     PublicationManifest,
     PublicationStatus,
+    ResolvedClaimEvidence,
+    ReviewTask,
     Source,
     profile_type_for_date,
 )
 from app.services import LocalFilesystemPublishedProfileStore
+from app.usgs import accept_and_resolve_release, publish_golden_profile
 
 settings = get_settings()
 app = FastAPI(title="Day Perspective API", version=settings.service_version)
@@ -31,8 +37,8 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[settings.web_origin],
     allow_credentials=False,
-    allow_methods=["GET"],
-    allow_headers=["Content-Type"],
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type", "X-Development-Review-Token"],
 )
 
 
@@ -110,6 +116,19 @@ class PublishedProfileResponse(APIModel):
 
 def profile_store() -> LocalFilesystemPublishedProfileStore:
     return LocalFilesystemPublishedProfileStore(settings.published_profile_root)
+
+
+def development_review_guard(
+    token: Annotated[str | None, Header(alias="X-Development-Review-Token")] = None,
+) -> None:
+    if token != settings.development_review_token:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Development-only review guard rejected the request. "
+                "This mechanism is not production authentication."
+            ),
+        )
 
 
 @app.get("/health", response_model=HealthResponse)
@@ -224,3 +243,184 @@ def day_profile(
         content_hash=manifest.content_hash,
         profile=profile_payload,
     )
+
+
+@app.get(
+    "/api/v1/admin/claims",
+    dependencies=[Depends(development_review_guard)],
+)
+def admin_claims(
+    session: Annotated[Session, Depends(get_session)],
+) -> dict[str, Any]:
+    rows = session.scalars(select(Claim).order_by(Claim.imported_at, Claim.claim_type)).all()
+    return {
+        "development_only": True,
+        "claims": [
+            {
+                "claim_id": str(row.id),
+                "predicate": row.claim_type,
+                "value": row.assertion_json,
+                "status": row.assertion_status.value,
+                "source_record_locator": row.source_record_locator,
+            }
+            for row in rows
+        ],
+    }
+
+
+@app.get(
+    "/api/v1/admin/conflicts",
+    dependencies=[Depends(development_review_guard)],
+)
+def admin_conflicts(
+    session: Annotated[Session, Depends(get_session)],
+) -> dict[str, Any]:
+    rows = session.scalars(
+        select(ResolvedClaimEvidence).where(ResolvedClaimEvidence.stance == "dissenting")
+    ).all()
+    return {
+        "development_only": True,
+        "dissenting_evidence": [
+            {
+                "resolved_claim_id": str(row.resolved_claim_id),
+                "claim_id": str(row.claim_id),
+                "note": row.note,
+            }
+            for row in rows
+        ],
+    }
+
+
+@app.get(
+    "/api/v1/admin/review-tasks",
+    dependencies=[Depends(development_review_guard)],
+)
+def admin_review_tasks(
+    session: Annotated[Session, Depends(get_session)],
+) -> dict[str, Any]:
+    rows = session.scalars(select(ReviewTask).order_by(ReviewTask.created_at)).all()
+    return {
+        "development_only": True,
+        "tasks": [
+            {
+                "task_id": str(row.id),
+                "claim_id": str(row.claim_id) if row.claim_id else None,
+                "status": row.status,
+                "rationale": row.rationale,
+            }
+            for row in rows
+        ],
+    }
+
+
+class ClaimDecisionRequest(APIModel):
+    decision: Literal["accepted", "rejected"]
+
+
+@app.post(
+    "/api/v1/admin/claims/{claim_id}/decision",
+    dependencies=[Depends(development_review_guard)],
+)
+def admin_claim_decision(
+    claim_id: str,
+    request: ClaimDecisionRequest,
+    session: Annotated[Session, Depends(get_session)],
+) -> dict[str, Any]:
+    try:
+        claim = session.get(Claim, claim_id)
+    except (TypeError, ValueError):
+        claim = None
+    if claim is None:
+        raise HTTPException(status_code=404, detail="Claim not found.")
+    if claim.assertion_status not in {
+        ClaimAssertionStatus.CANDIDATE,
+        ClaimAssertionStatus.IN_REVIEW,
+    }:
+        raise HTTPException(
+            status_code=409,
+            detail="Only candidate or in-review claims can receive a decision.",
+        )
+    claim.assertion_status = (
+        ClaimAssertionStatus.ACCEPTED
+        if request.decision == "accepted"
+        else ClaimAssertionStatus.REJECTED
+    )
+    if claim.assertion_status == ClaimAssertionStatus.REJECTED:
+        for task in session.scalars(
+            select(ReviewTask).where(
+                ReviewTask.claim_id == claim.id,
+                ReviewTask.status.in_(("open", "in_progress")),
+            )
+        ):
+            task.status = "resolved"
+            task.completed_at = datetime.now(UTC)
+    session.commit()
+    return {"claim_id": str(claim.id), "status": claim.assertion_status.value}
+
+
+@app.post(
+    "/api/v1/admin/releases/{release_id}/resolve",
+    dependencies=[Depends(development_review_guard)],
+)
+def admin_resolve_release(
+    release_id: str,
+    session: Annotated[Session, Depends(get_session)],
+) -> dict[str, Any]:
+    try:
+        resolved = accept_and_resolve_release(session, UUID(release_id))
+    except (TypeError, ValueError) as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    session.commit()
+    return {
+        "resolved": [
+            {"predicate": key, "canonical_key": row.canonical_key, "version": row.version}
+            for key, row in sorted(resolved.items())
+        ]
+    }
+
+
+@app.post(
+    "/api/v1/admin/day/1964-03-27/publish",
+    dependencies=[Depends(development_review_guard)],
+)
+def admin_publish_golden(
+    session: Annotated[Session, Depends(get_session)],
+) -> dict[str, Any]:
+    try:
+        profile = publish_golden_profile(session, store=profile_store())
+    except (OSError, RuntimeError, ValueError) as error:
+        session.rollback()
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    session.commit()
+    manifest = session.get(PublicationManifest, profile.publication_manifest_id)
+    return {
+        "day_profile_id": str(profile.id),
+        "manifest_id": str(profile.publication_manifest_id),
+        "version": manifest.version if manifest else None,
+    }
+
+
+@app.get(
+    "/api/v1/admin/manifests/{manifest_id}",
+    dependencies=[Depends(development_review_guard)],
+)
+def admin_manifest(
+    manifest_id: str,
+    session: Annotated[Session, Depends(get_session)],
+) -> dict[str, Any]:
+    try:
+        manifest = session.get(PublicationManifest, UUID(manifest_id))
+    except (TypeError, ValueError):
+        manifest = None
+    if manifest is None:
+        raise HTTPException(status_code=404, detail="Manifest not found.")
+    return {
+        "manifest_id": str(manifest.id),
+        "date": manifest.profile_date.isoformat(),
+        "version": manifest.version,
+        "editorial_revision": manifest.editorial_revision,
+        "status": manifest.status.value,
+        "content_hash": manifest.content_hash,
+        "object_location": f"/{manifest.storage_uri}",
+        "metadata": manifest.metadata_json,
+    }

@@ -107,3 +107,11 @@ versions as needed. It never overwrites published bytes or a manifest hash. A
 corrected profile supersedes or withdraws the prior artifact while retaining a
 navigable, linear provenance path; a predecessor has at most one direct
 successor.
+
+## USGS Slice Application
+
+For `official19640328033616_30`, one immutable release produces separate candidate claims for identity, type, title, UTC occurrence, Alaska local civil date, coordinates, named geography, magnitude, and depth. Each claim carries the release, public record locator, record SHA-256, temporal precision/assignment, unit, and numeric bounds when applicable.
+
+Ingestion creates open review tasks. Editorial acceptance changes candidates to accepted, closes tasks as resolved, and creates versioned resolved claims using the `single_source` method. The rationale explicitly records that official-source acceptance is not independent corroboration. A changed resolution supersedes rather than overwrites its predecessor. Dissent is retained in `resolved_claim_evidence`; dependent copies share a lineage root and count once in deterministic agreement logic.
+
+Publication snapshots the evidence chain before the manifest becomes published. Profile v1 is never rewritten. A subsequent publication must create a new manifest and `/day/{date}/profile-v{n}.json` object linked to both predecessor manifest and day profile.

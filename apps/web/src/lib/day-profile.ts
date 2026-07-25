@@ -32,18 +32,116 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value as Record<string, unknown>;
 }
 
+function isClaimEvidence(value: unknown): boolean {
+  const claim = asRecord(value);
+  return (
+    claim !== undefined &&
+    typeof claim.predicate === "string" &&
+    (claim.value === null || asRecord(claim.value) !== undefined) &&
+    typeof claim.source_record_locator === "string" &&
+    typeof claim.source_record_hash_sha256 === "string"
+  );
+}
+
+function isDissentingClaimEvidence(value: unknown): boolean {
+  const claim = asRecord(value);
+  return (
+    claim !== undefined &&
+    (claim.predicate === undefined || typeof claim.predicate === "string") &&
+    (claim.value === undefined || claim.value === null || asRecord(claim.value) !== undefined)
+  );
+}
+
+function isProvenance(value: unknown): boolean {
+  const provenance = asRecord(value);
+  if (provenance === undefined || typeof provenance.published_statement !== "string") {
+    return false;
+  }
+  const resolvedClaim = asRecord(provenance.resolved_claim);
+  const derivedValue = asRecord(provenance.derived_value);
+  const sourceRelease = asRecord(provenance.source_release);
+  const methodology = asRecord(provenance.methodology);
+  const hasResolvedRoot =
+    resolvedClaim !== undefined &&
+    typeof resolvedClaim.canonical_key === "string" &&
+    typeof resolvedClaim.version === "number" &&
+    typeof resolvedClaim.method === "string" &&
+    typeof resolvedClaim.rationale === "string";
+  const hasDerivedRoot =
+    derivedValue !== undefined &&
+    typeof derivedValue.kind === "string" &&
+    typeof derivedValue.calculation_version === "string" &&
+    (derivedValue.value === undefined ||
+      derivedValue.value === null ||
+      asRecord(derivedValue.value) !== undefined);
+  return (
+    hasResolvedRoot !== hasDerivedRoot &&
+    (provenance.root_type === undefined ||
+      provenance.root_type === (hasDerivedRoot ? "derived_value" : "resolved_claim")) &&
+    Array.isArray(provenance.supporting_claims) &&
+    provenance.supporting_claims.every(isClaimEvidence) &&
+    Array.isArray(provenance.dissenting_claims) &&
+    provenance.dissenting_claims.every(isDissentingClaimEvidence) &&
+    sourceRelease !== undefined &&
+    typeof sourceRelease.source === "string" &&
+    (sourceRelease.publisher === null || typeof sourceRelease.publisher === "string") &&
+    typeof sourceRelease.release === "string" &&
+    typeof sourceRelease.source_url === "string" &&
+    typeof sourceRelease.raw_checksum_sha256 === "string" &&
+    typeof sourceRelease.retrieved_at === "string" &&
+    methodology !== undefined &&
+    typeof methodology.name === "string" &&
+    typeof methodology.version === "string" &&
+    typeof methodology.description === "string"
+  );
+}
+
 function isProfileStatement(value: unknown): value is ProfileStatement {
   const statement = asRecord(value);
   return (
     statement !== undefined &&
     typeof statement.statement_id === "string" &&
     typeof statement.statement === "string" &&
-    (statement.provenance_note === undefined || typeof statement.provenance_note === "string")
+    (statement.provenance_note === undefined || typeof statement.provenance_note === "string") &&
+    (statement.details === undefined || asRecord(statement.details) !== undefined) &&
+    (statement.provenance === undefined || isProvenance(statement.provenance))
   );
 }
 
 function isSectionKey(value: string): value is DayProfileSectionKey {
   return (DAY_PROFILE_SECTION_KEYS as readonly string[]).includes(value);
+}
+
+function isSectionStates(value: unknown): boolean {
+  if (value === undefined) {
+    return true;
+  }
+  const states = asRecord(value);
+  return (
+    states !== undefined &&
+    Object.entries(states).every(([key, value]) => {
+      const state = asRecord(value);
+      return (
+        isSectionKey(key) &&
+        state !== undefined &&
+        (state.status === "available" || state.status === "not_yet_supported") &&
+        (state.reason === undefined || typeof state.reason === "string")
+      );
+    })
+  );
+}
+
+function isSourceAttribution(value: unknown): boolean {
+  if (value === undefined) {
+    return true;
+  }
+  const attribution = asRecord(value);
+  return (
+    attribution !== undefined &&
+    typeof attribution.name === "string" &&
+    typeof attribution.publisher === "string" &&
+    typeof attribution.url === "string"
+  );
 }
 
 export function isProfileNotPublished(payload: unknown, expectedDate: string): payload is ProfileNotPublished {
@@ -88,6 +186,8 @@ export function isPublishedProfileResponse(
   const sections = asRecord(profile.sections);
   return (
     sections !== undefined &&
+    isSectionStates(profile.section_states) &&
+    isSourceAttribution(profile.source_attribution) &&
     Object.entries(sections).every(
       ([key, statements]) =>
         isSectionKey(key) &&

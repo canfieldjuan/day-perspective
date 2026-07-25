@@ -303,3 +303,160 @@ below and in `docs/HANDOFF.md`.
 - Final review-fix `make check`: passed from `2026-07-24T00:06:33-05:00`
   through `00:06:52`. Ruff and strict mypy passed; pytest passed 33 tests;
   contracts and web lint, type checks, and Vitest suites passed.
+
+---
+
+## Phase 2: Official USGS Evidence-to-Publication Vertical Slice
+
+### Ground-truth reconciliation (2026-07-24)
+
+#### Confirmed
+
+- The repository is on `agent/usgs-earthquake-vertical-slice`, based on merged readiness commit `46dffaa`; the readiness working tree was clean when this branch was created.
+- Alembic migration head is `20260724_0006`. The foundation schema and its integrity rules are implemented in `services/api/alembic/versions/`, not merely described in documentation.
+- The publication subsystem can freeze statement evidence as canonical JSON, hash it, preserve a transitive evidence closure, and derive a manifest source snapshot hash. This behavior is implemented by `services/api/app/publication/service.py` and covered by `services/api/tests/test_foundation.py`.
+- Source-release immutability, claim provenance, support/dissent links, publication-manifest hashing, profile versioning, correction versioning, and local published-object storage are implemented and tested in the backend foundation.
+- The API currently exposes the foundation health/metadata/day endpoints. A supported date without a stored profile returns `profile_not_published`; it does not fabricate a profile.
+- The frontend currently renders the date shell and explicit unpublished/error/loading states. It does not contain a hardcoded Alaska profile.
+- The readiness gate passed Ruff, strict mypy, 33 backend pytest tests, contracts lint/type/Vitest, and web lint/type/Vitest. The earlier foundation browser acceptance test and production build also passed.
+
+#### Contradicted or incomplete foundation expectations
+
+- No source-adapter interface or USGS implementation exists yet. Existing `sources` and `source_releases` tables model provenance but do not retrieve, validate, or transform records.
+- Raw source bytes are not yet persisted through a raw-record storage abstraction. A release checksum alone does not prove retention of the record that produced each claim.
+- Imported claims do not yet expose all fields required by this slice: a source-record content hash, numeric lower/upper bounds, and a unit reference where applicable.
+- Event times support multiple dates but not the full distinction needed here among exact UTC occurrence timestamp, local civil date, timezone/offset interpretation, temporal precision, and temporal assignment.
+- Quality assessments can preserve structured findings but do not yet provide an explicit public grade and public explanation contract.
+- The local publication store uses content-addressed objects; it does not yet expose the required stable profile object location `/day/1964-03-27/profile-v1.json` while retaining immutable-version semantics.
+- No deterministic earthquake claim resolver, editorial selection workflow, golden-date publisher, fixture-ingestion command, or minimal review/admin surface exists.
+- The current day-profile contract and UI model only the foundation unpublished response; they do not yet model populated recorded-event evidence, unavailable section states, or the public-safe provenance chain.
+- No tests yet prove fixture ingestion, USGS transformation, local civil-date assignment, independent-versus-dependent evidence handling, quality grading, failed-validation publication blocking, golden API output, or frontend provenance rendering.
+
+#### Could not determine before implementation
+
+- A separate authoritative casualty source is not part of this narrow source slice. Fatality claims will therefore be omitted and explicitly reported as unavailable, never stored as zero.
+- The official USGS catalog can revise historical product metadata. The committed fixture will represent one immutable retrieved release, while live ingestion will create a new release when bytes change rather than rewriting the fixture release.
+- Production authentication requirements for review actions remain undecided. This phase will use an explicit development-only guard and will not represent it as secure authentication.
+
+### Authoritative golden record
+
+- Source: USGS Earthquake Hazards Program FDSN Event Web Service.
+- Dataset identity: FDSN Event Web Service v1 GeoJSON query/detail record.
+- Source-record identity: `official19640328033616_30`.
+- Record locator: `https://earthquake.usgs.gov/earthquakes/eventpage/official19640328033616_30`.
+- Occurrence timestamp: `1964-03-28T03:36:16Z`.
+- Public local civil date: `1964-03-27`, interpreted using historical Alaska Standard Time (`UTC-10`) for the event instant.
+- Supported facts for this slice: earthquake identity/type/title, occurrence time, local civil date and interpretation, epicenter coordinates, depth `25 km`, magnitude `9.2 Mw`, and Prince William Sound/Alaska location wording.
+- Unsupported impact facts: casualties and other human impacts. They will be absent with a public missing-data explanation.
+
+### Implementation contract
+
+#### This phase will create or change
+
+1. Add only the schema fields and constraints proven necessary by the USGS chain: immutable raw-record identity/hash/location, claim record hash/unit/bounds, exact event timestamp and local-date interpretation, explicit public quality grade/explanation, editorial decision state, and immutable stable publication object location.
+2. Add a small reusable source-adapter protocol covering metadata registration, release creation, retrieval, raw persistence, checksum, validation, source-record identity, transformation, idempotent runs, run/check recording, dry-run, fixture mode, and terminal failure.
+3. Implement one USGS adapter using official FDSN GeoJSON. Tests will use a committed minimal fixture; live retrieval will occur only in an explicit offline command.
+4. Transform the golden record into separate imported claims for identity, type, title, UTC occurrence timestamp, local civil date, coordinates, geography, magnitude, and depth. No casualty value will be invented.
+5. Materialize the canonical event, multiple event-time roles, geography/version/location link, and predicate-specific resolved claims while retaining supporting and dissenting references.
+6. Implement deterministic, versioned resolution rules for authoritative single-source acceptance, agreement, dependent lineage, bounded disagreement, and unresolved disagreement. Decisions will expose reasons, not a weighted truth score.
+7. Derive and persist an eight-dimension quality assessment with a public grade and explanation, including the explicit consequence of single-source acceptance.
+8. Add the smallest development-only review surface for listing imported/conflicting claims and tasks, accepting/rejecting candidates, recording resolution, publishing the golden date, and viewing a manifest.
+9. Publish immutable canonical JSON at `/day/1964-03-27/profile-v1.json`, with all seven product sections present. Only recorded-event and evidence sections will contain earthquake evidence; other sections will use explicit unavailable states.
+10. Extend the day API to distinguish published, unpublished, outside-range, invalid-date, and corrupt/missing-object outcomes by reading and hash-verifying the stored artifact rather than rebuilding it from joins.
+11. Render the golden profile and one-click public-safe provenance chain in the Next.js app without exposing filesystem paths, credentials, or irrelevant internal identifiers.
+12. Add the required backend, frontend, browser, migration, startup, failure-path, idempotency, hashing, republish, and provenance tests.
+13. Finish `docs/HANDOFF.md` in the required 17-section takeover format and reconcile all governing documentation with implemented behavior.
+
+#### Why each change is required
+
+- Raw bytes, record hashes, and release immutability make the imported claim reproducible rather than merely attributable.
+- Predicate-specific claims and deterministic resolution preserve disagreement and prevent event rows from becoming unquestioned truth containers.
+- Exact UTC time plus a separately explained local civil date enforces the product distinction between temporal precision and temporal assignment.
+- Explicit quality dimensions and explanation make single-source limitations visible instead of burying them in an opaque score.
+- Stable immutable profile paths, content hashes, and versioned manifests prove publication and correction semantics.
+- The review surface proves that editorial selection is an explicit lifecycle transition rather than an automatic side effect of ingestion.
+- The API and UI prove the architecture through the public request path without live USGS calls or large runtime joins.
+
+#### This phase will not build
+
+- Additional source adapters, casualty ingestion, GDELT, EM-DAT, UCDP, Wikidata, UN demographic data, apocalypse claims, wonder datasets, annual statistics, generalized metric scoring, ranking automation, accounts, production authentication, deployment, or profiles beyond the single golden date.
+- A message queue, vector database, graph database, runtime third-party fetch, or universal quality/badness score.
+- Fictional placeholder facts for unimplemented profile sections.
+
+### Acceptance criteria
+
+- A fixture and a live-mode command use the same USGS adapter contract; automated tests never require network access.
+- Reingesting identical bytes is idempotent; changed bytes create a new immutable release; duplicate records do not duplicate claims.
+- Every populated public earthquake statement traces through a resolved claim, source claim, source release, raw record, and methodology/editorial rule.
+- UTC occurrence time and Alaska local civil date are both present and their relationship is explained.
+- Missing casualty data remains missing and is never represented as zero.
+- Dependent lineage is not counted as independent agreement; disagreements remain visible.
+- Failed validation or failed quality gates cannot create a manifest or publication object.
+- Profile version 1 cannot be rewritten; changed publication creates version 2.
+- `GET /api/v1/day/1964-03-27` returns the verified stored profile, and all error classes have distinct contracts.
+- The frontend renders the golden event, quality, attribution, missing states, and complete public-safe provenance control.
+- A new engineer can reproduce ingestion, publication, API, frontend, and tests from exact README commands.
+
+### Verification commands
+
+```bash
+pnpm install --frozen-lockfile
+make db-down
+make db-up
+make db-migrate
+make seed
+make ingest-usgs-fixture
+make publish-golden
+make check
+make test-integration
+make test-e2e
+make build
+make verify
+```
+
+Manual startup and inspection:
+
+```bash
+make api
+make web
+curl --fail http://localhost:8000/api/v1/day/1964-03-27
+```
+
+### Known risks
+
+- Historical timezone interpretation must be explicit and deterministic; relying on a modern fixed offset without recording the rule would be unacceptable.
+- USGS can revise the live historical record; release identity must be content-sensitive and reruns must not mutate prior evidence.
+- SQLite test behavior cannot substitute for PostgreSQL/PostGIS migration verification; both fast unit coverage and an empty PostGIS migration run are required.
+- Development review guards are intentionally insecure for production and must be unmistakably labeled.
+- Public provenance must be complete while excluding internal storage paths and credentials.
+
+### Phase progress
+
+- Current: authoritative record identified and implementation contract written.
+- In progress: schema and adapter foundation.
+- Blocked: none.
+- Deliberately deferred: all sources and product sections outside the single USGS recorded-event/evidence slice.
+
+### Phase 2 completion update (2026-07-24 13:04 CDT)
+
+- Completed: migration `20260724_0007`, raw record storage, USGS adapter/CLI, committed official fixture, nine claims, event/time/geography projections, deterministic resolution, eight-dimension quality grade, review API, versioned publication, verified day API, frontend provenance, and required test coverage.
+- In progress: none in this slice.
+- Blocked: none.
+- Not implemented: additional sources, casualty source, non-recorded profile content, production authentication, deployment, and broader date coverage.
+- Acceptance criteria: satisfied for the single golden event, subject to the documented lineage-integration and full-stack-browser test gaps in `docs/HANDOFF.md`.
+
+Latest verification:
+
+- `make check`: passed; Ruff, strict mypy (19 source files), 55 pytest tests, contracts lint/type/1 Vitest, web lint/type/4 Vitest.
+- Empty database: `make db-reset && make db-up && make db-migrate` passed through `20260724_0007`.
+- `make ingest-usgs-fixture`: passed; SHA-256 `32beb46bd6d5fd5b06943c08e32f4a83ad4a90a28690bea49c42f3da59210c8b`.
+- `make publish-golden`: passed; object `day/1964-03-27/profile-v1.json`.
+- Live API inspection: passed; status published, five recorded statements, grade B, all seven sections, casualties unavailable, provenance chain complete.
+- `make web-build`: passed with Next.js 15.5.21.
+- `make web-e2e`: passed, 2 Chromium tests. Warning: Playwright web server reports `NO_COLOR` ignored because `FORCE_COLOR` is set.
+
+Final aggregate verification (2026-07-24 13:08 CDT):
+
+- `corepack pnpm install --frozen-lockfile`: passed. Warning: pnpm reported ignored dependency build scripts for `esbuild`, `sharp`, and `unrs-resolver`; the subsequent Next production build passed.
+- `.venv/bin/python -m pip install -e 'services/api[dev]'`: passed.
+- `make verify`: passed in full: contracts checks/1 test, Ruff, strict mypy, 55 pytest tests, web checks/4 tests, Next production build, and 2 Playwright tests.
