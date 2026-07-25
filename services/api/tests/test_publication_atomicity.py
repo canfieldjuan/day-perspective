@@ -8,13 +8,15 @@ without silently destroying artifacts."""
 
 from __future__ import annotations
 
+import os
 import threading
 import time
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pytest
 from sqlalchemy import create_engine, select, text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.governance import (
@@ -301,8 +303,6 @@ def test_reconcile_reports_orphans_mismatches_and_stale_temps(
     stale = tmp_path / "day" / PROFILE_DATE.isoformat() / ".profile-stale"
     stale.write_text("partial", encoding="utf-8")
     old = time.time() - 7200
-    import os
-
     os.utime(stale, (old, old))
 
     report = reconcile_publications(
@@ -515,3 +515,376 @@ def test_identical_republish_is_a_no_op_even_when_supersession_is_offered(
             )
         )
     ) == [1, 2]
+
+
+def _crash_pending_publication(
+    session: Session,
+    store: LocalFilesystemPublishedProfileStore,
+    evidence: list[PublicationStatementEvidenceInput],
+    statement: str,
+    monkeypatch: pytest.MonkeyPatch,
+    **kwargs: object,
+) -> None:
+    """Leave a durable DRAFT manifest by crashing before artifact promotion."""
+    from app import services as services_module
+
+    def explode(*args: object, **inner: object) -> None:
+        raise RuntimeError("Simulated crash before artifact promotion.")
+
+    monkeypatch.setattr(services_module.StagedProfileWrite, "finalize", explode)
+    with pytest.raises(RuntimeError, match="Simulated crash"):
+        publish_day_profile(
+            session,
+            store=store,
+            profile_date=PROFILE_DATE,
+            profile_type=PROFILE_TYPE,
+            payload=payload(statement),
+            statement_evidence=evidence,
+            **kwargs,  # type: ignore[arg-type]
+        )
+    monkeypatch.undo()
+    session.rollback()
+
+
+@pytest.mark.integration
+def test_reconcile_completes_an_interrupted_correction(
+    session: Session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A correction's manifest carries supersedes_manifest_id, and the
+    lifecycle trigger rejects a day profile that omits the matching profile
+    predecessor, so reconciliation must derive it from the manifest."""
+    store = LocalFilesystemPublishedProfileStore(tmp_path)
+    evidence = statement_evidence(session)
+    first = publish(session, store, evidence, "Original before correction.")
+
+    _crash_pending_publication(
+        session,
+        store,
+        evidence,
+        "Corrected content.",
+        monkeypatch,
+        supersedes_manifest_id=first.publication_manifest_id,
+        supersedes_day_profile_id=first.id,
+    )
+
+    report = reconcile_publications(session, store=store, repair=True)
+    session.commit()
+
+    assert report.completed_pending == 1
+    assert report.abandoned_pending == 0
+    corrected = session.scalar(
+        select(PublicationManifest)
+        .where(PublicationManifest.profile_date == PROFILE_DATE)
+        .order_by(PublicationManifest.version.desc())
+        .limit(1)
+    )
+    assert corrected is not None and corrected.version == 2
+    assert corrected.status == PublicationStatus.PUBLISHED
+    corrected_profile = session.scalar(
+        select(DayProfile).where(DayProfile.publication_manifest_id == corrected.id)
+    )
+    assert corrected_profile is not None
+    assert corrected_profile.supersedes_day_profile_id == first.id
+
+
+@pytest.mark.integration
+def test_reconcile_survives_a_corrupt_pending_artifact(
+    session: Session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Truncated JSON raises ValueError from the store, which must be
+    reported and quarantined rather than aborting the whole run."""
+    store = LocalFilesystemPublishedProfileStore(tmp_path)
+    evidence = statement_evidence(session)
+    _crash_pending_publication(
+        session, store, evidence, "Corrupt pending publication.", monkeypatch
+    )
+
+    pending = session.scalar(
+        select(PublicationManifest).where(
+            PublicationManifest.status == PublicationStatus.DRAFT
+        )
+    )
+    assert pending is not None
+    destination = tmp_path / pending.storage_uri
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text("{not valid json", encoding="utf-8")
+    (destination.with_name(destination.name + ".tmp")).unlink(missing_ok=True)
+
+    report = reconcile_publications(session, store=store, repair=True)
+    session.commit()
+
+    assert report.hash_mismatches == 1
+    assert report.abandoned_pending == 1
+    assert (tmp_path / "quarantine").exists()
+
+
+@pytest.mark.integration
+def test_report_only_reconcile_recognizes_recoverable_temps(
+    session: Session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Report-only mode must assess recoverability honestly instead of
+    calling a recoverable publication abandoned."""
+    store = LocalFilesystemPublishedProfileStore(tmp_path)
+    evidence = statement_evidence(session)
+    _crash_pending_publication(
+        session, store, evidence, "Recoverable pending publication.", monkeypatch
+    )
+
+    report = reconcile_publications(session, store=store, repair=False)
+
+    assert report.completed_pending == 1
+    assert report.abandoned_pending == 0
+    still_pending = session.scalar(
+        select(PublicationManifest).where(
+            PublicationManifest.status == PublicationStatus.DRAFT
+        )
+    )
+    assert still_pending is not None, "Report-only mode must not mutate state."
+
+
+@pytest.mark.integration
+def test_reconcile_repair_serializes_against_publication(
+    session: Session, migrated_database: str, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Repair must take the per-profile publication lock before inspecting or
+    changing pending state, or it can withdraw a manifest a publisher is
+    about to complete."""
+    store = LocalFilesystemPublishedProfileStore(tmp_path)
+    evidence = statement_evidence(session)
+    _crash_pending_publication(
+        session, store, evidence, "Pending during repair.", monkeypatch
+    )
+    session.commit()
+    # Drive the abandonment path specifically: it decides a manifest is
+    # unrecoverable and must not do so while a publisher holds the lock and is
+    # about to promote its artifact.
+    pending = session.scalar(
+        select(PublicationManifest).where(
+            PublicationManifest.status == PublicationStatus.DRAFT
+        )
+    )
+    assert pending is not None
+    (tmp_path / pending.storage_uri).with_name(
+        Path(pending.storage_uri).name + ".tmp"
+    ).unlink(missing_ok=True)
+
+    lock_key = publication_advisory_lock_key(PROFILE_DATE, PROFILE_TYPE)
+    blocker_engine = create_engine(migrated_database)
+    worker_engine = create_engine(migrated_database)
+    finished = threading.Event()
+    failure: list[BaseException] = []
+    try:
+        blocker = blocker_engine.connect()
+        blocker.begin()
+        blocker.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+            {"key": lock_key},
+        )
+
+        def repair() -> None:
+            factory = sessionmaker(bind=worker_engine, expire_on_commit=False)
+            try:
+                with factory() as worker:
+                    reconcile_publications(worker, store=store, repair=True)
+                    worker.commit()
+                finished.set()
+            except BaseException as error:  # pragma: no cover - surfaced below
+                failure.append(error)
+                finished.set()
+
+        thread = threading.Thread(target=repair, daemon=True)
+        thread.start()
+        time.sleep(0.6)
+        assert not finished.is_set(), (
+            "Reconciliation repaired pending state while the publication lock "
+            "for that date was held."
+        )
+        blocker.rollback()
+        blocker.close()
+        assert finished.wait(timeout=10)
+        thread.join(timeout=5)
+        if failure:
+            raise failure[0]
+    finally:
+        blocker_engine.dispose()
+        worker_engine.dispose()
+
+
+@pytest.mark.integration
+def test_quarantine_retains_every_bad_artifact(
+    session: Session, tmp_path: Path
+) -> None:
+    """Quarantine must never overwrite an artifact it previously retained."""
+    store = LocalFilesystemPublishedProfileStore(tmp_path)
+    evidence = statement_evidence(session)
+    published = publish(session, store, evidence, "Healthy publication.")
+    manifest = session.get(PublicationManifest, published.publication_manifest_id)
+    assert manifest is not None
+    artifact = tmp_path / manifest.storage_uri
+
+    artifact.write_text('{"tampered": 1}', encoding="utf-8")
+    reconcile_publications(session, store=store, repair=True)
+    artifact.write_text('{"tampered": 2}', encoding="utf-8")
+    reconcile_publications(session, store=store, repair=True)
+
+    quarantined = sorted(
+        path for path in (tmp_path / "quarantine").rglob("*") if path.is_file()
+    )
+    assert len(quarantined) == 2, (
+        "The second quarantine overwrote the first retained artifact."
+    )
+    assert {path.read_text(encoding="utf-8") for path in quarantined} == {
+        '{"tampered": 1}',
+        '{"tampered": 2}',
+    }
+
+
+@pytest.mark.integration
+def test_failed_retry_preserves_a_pre_existing_staged_payload(
+    session: Session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A retry reuses the deterministic temp path; if the retry's own commit
+    fails it must not delete the payload the earlier interrupted transaction
+    left behind."""
+    store = LocalFilesystemPublishedProfileStore(tmp_path)
+    evidence = statement_evidence(session)
+    _crash_pending_publication(
+        session, store, evidence, "Pending payload to preserve.", monkeypatch
+    )
+    pending = session.scalar(
+        select(PublicationManifest).where(
+            PublicationManifest.status == PublicationStatus.DRAFT
+        )
+    )
+    assert pending is not None
+    temp = (tmp_path / pending.storage_uri).with_name(
+        Path(pending.storage_uri).name + ".tmp"
+    )
+    assert temp.exists()
+
+    from app.models import ResolvedClaim
+
+    session.add(
+        ResolvedClaim(
+            canonical_key="test:force-retry-commit-failure",
+            version=1,
+            resolved_value={"invalid": True},
+            resolution_method="editorial_review",
+            comparability_status="unknown",
+            rationale="Missing evidence forces the retry commit to fail.",
+        )
+    )
+    with pytest.raises(DBAPIError):
+        publish(session, store, evidence, "Pending payload to preserve.")
+    session.rollback()
+
+    assert temp.exists(), (
+        "The failed retry deleted a staged payload it did not create, "
+        "turning a recoverable publication into an abandoned one."
+    )
+
+
+@pytest.mark.integration
+def test_promotion_is_idempotent_when_a_peer_swept_the_shared_temp(
+    session: Session, tmp_path: Path
+) -> None:
+    """Two publishers of identical content share the deterministic temp path;
+    the loser must still complete rather than raising FileNotFoundError."""
+    store = LocalFilesystemPublishedProfileStore(tmp_path)
+    body = payload("Concurrent identical content.")
+    first = store.stage_versioned(PROFILE_DATE, 1, body)
+    second = store.stage_versioned(PROFILE_DATE, 1, body)
+
+    first.finalize()
+    assert not (tmp_path / "day" / PROFILE_DATE.isoformat()).joinpath(
+        "profile-v1.json.tmp"
+    ).exists()
+
+    second.finalize()
+    assert store.read(second.storage_uri, second.expected_hash) == body
+
+
+@pytest.mark.integration
+def test_report_only_reconcile_flags_a_missing_day_profile(
+    session: Session, tmp_path: Path
+) -> None:
+    """The default report must not describe the exact state repair exists to
+    fix as healthy."""
+    from app.services import content_hash
+
+    store = LocalFilesystemPublishedProfileStore(tmp_path)
+    evidence = statement_evidence(session)
+    publish(session, store, evidence, "Healthy neighbour publication.")
+
+    # Day profiles attached to published manifests are immutable, so the
+    # orphan state is built the only way it can legitimately arise: a
+    # published manifest whose profile row was never created.
+    orphan_date = date(1970, 1, 2)
+    orphan_payload: dict[str, object] = {
+        "schema_version": "1",
+        "date": orphan_date.isoformat(),
+        "profile_type": PROFILE_TYPE.value,
+        "sections": {"evidence_notes": []},
+    }
+    staged = store.stage_versioned(orphan_date, 1, orphan_payload)
+    staged.finalize()
+    session.add(
+        PublicationManifest(
+            profile_date=orphan_date,
+            profile_type=PROFILE_TYPE,
+            version=1,
+            editorial_revision=1,
+            status=PublicationStatus.PUBLISHED,
+            published_at=datetime.now(UTC),
+            content_hash=content_hash(orphan_payload),
+            source_snapshot_hash="0" * 64,
+            storage_uri=staged.storage_uri,
+            code_version="test",
+            metadata_json={},
+        )
+    )
+    session.commit()
+
+    report = reconcile_publications(session, store=store, repair=False)
+
+    assert report.missing_profiles == 1
+    assert report.healthy_published == 1
+    assert not list(
+        session.scalars(
+            select(DayProfile).where(DayProfile.profile_date == orphan_date)
+        )
+    ), "Report-only mode must not restore rows."
+
+    repaired = reconcile_publications(session, store=store, repair=True)
+    session.commit()
+    assert repaired.missing_profiles == 1
+    assert list(
+        session.scalars(
+            select(DayProfile).where(DayProfile.profile_date == orphan_date)
+        )
+    )
+
+
+@pytest.mark.integration
+def test_staging_makes_the_directory_entry_durable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A committed pending manifest promises a durable staged payload, which
+    requires fsyncing the parent directory, not just the file."""
+    store = LocalFilesystemPublishedProfileStore(tmp_path)
+    synced: list[int] = []
+    real_fsync = os.fsync
+
+    def recording_fsync(fd: int) -> None:
+        synced.append(fd)
+        real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", recording_fsync)
+    staged = store.stage_versioned(PROFILE_DATE, 1, payload("Durable staging."))
+    monkeypatch.undo()
+
+    assert len(synced) >= 2, (
+        "Staging fsynced the file but not the directory entry that names it."
+    )
+    assert staged.temporary_path is not None and staged.temporary_path.exists()

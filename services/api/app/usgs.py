@@ -52,6 +52,7 @@ from app.models import (
     PipelineRun,
     ProfileType,
     PublicationManifest,
+    PublicationStatus,
     QualityAssessment,
     QualityCheck,
     RawSourceRecord,
@@ -1357,9 +1358,15 @@ def publish_golden_profile(
             derived_value_id=quality_derived.id,
         )
     )
+    # Only a published manifest can be superseded: an abandoned (withdrawn)
+    # manifest has no day profile, and offering it as a predecessor would
+    # permanently block republication after reconciliation.
     previous_manifest = session.scalar(
         select(PublicationManifest)
-        .where(PublicationManifest.profile_date == GOLDEN_DATE)
+        .where(
+            PublicationManifest.profile_date == GOLDEN_DATE,
+            PublicationManifest.status == PublicationStatus.PUBLISHED,
+        )
         .order_by(PublicationManifest.version.desc())
     )
     from app.models import DayProfile

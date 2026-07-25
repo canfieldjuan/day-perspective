@@ -57,6 +57,20 @@ def content_hash(payload: dict[str, Any]) -> str:
     return hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
 
 
+def _fsync_directory(path: Path) -> None:
+    """Make a directory entry durable.
+
+    Fsyncing a file descriptor does not guarantee its name is durable; a
+    crash could otherwise leave a committed DRAFT manifest whose staged
+    payload has vanished.
+    """
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 class PublishedProfileStore(Protocol):
     def write(self, profile_date: date, profile_type: ProfileType, payload: dict[str, Any]) -> str: ...
 
@@ -89,6 +103,7 @@ class StagedProfileWrite:
     expected_hash: str
     store: LocalFilesystemPublishedProfileStore
     created_destination: bool = False
+    created_temporary: bool = True
 
     def finalize(self) -> None:
         if self.temporary_path is None:
@@ -98,14 +113,28 @@ class StagedProfileWrite:
                 os.link(self.temporary_path, self.destination)
                 self.created_destination = True
             except FileExistsError:
+                # A concurrent publisher of identical content promoted first.
+                self.store.read(self.storage_uri, self.expected_hash)
+            except FileNotFoundError:
+                # ... and also swept the shared deterministic temp. Promotion
+                # is idempotent as long as the destination holds the payload
+                # this write staged.
+                if not self.destination.exists():
+                    raise
                 self.store.read(self.storage_uri, self.expected_hash)
         finally:
-            self.temporary_path.unlink(missing_ok=True)
+            if self.temporary_path is not None:
+                self.temporary_path.unlink(missing_ok=True)
+            _fsync_directory(self.destination.parent)
             self.temporary_path = None
 
     def discard(self) -> None:
         if self.temporary_path is not None:
-            self.temporary_path.unlink(missing_ok=True)
+            # Only remove a staged payload this transaction created: a retry
+            # reuses the deterministic temp path, and the file may be the sole
+            # surviving payload of an earlier interrupted publication.
+            if self.created_temporary:
+                self.temporary_path.unlink(missing_ok=True)
             self.temporary_path = None
         if self.created_destination:
             self.destination.unlink(missing_ok=True)
@@ -163,12 +192,19 @@ class LocalFilesystemPublishedProfileStore:
         # Deterministic temp path so reconciliation can pair an interrupted
         # publication's payload with its pending manifest.
         temporary_path = destination.with_name(destination.name + ".tmp")
+        created_temporary = not temporary_path.exists()
         with open(temporary_path, "wb") as handle:
             handle.write(canonical_json_bytes(payload))
             handle.flush()
             os.fsync(handle.fileno())
+        _fsync_directory(destination.parent)
         return StagedProfileWrite(
-            relative.as_posix(), temporary_path, destination, digest, self
+            relative.as_posix(),
+            temporary_path,
+            destination,
+            digest,
+            self,
+            created_temporary=created_temporary,
         )
 
     def read(self, storage_uri: str, expected_hash: str) -> dict[str, Any]:
@@ -934,7 +970,7 @@ def _validate_profile_supersession(
 class PublicationReconcileReport:
     completed_pending: int = 0
     abandoned_pending: int = 0
-    completed_missing_profiles: int = 0
+    missing_profiles: int = 0
     orphan_artifacts: int = 0
     hash_mismatches: int = 0
     stale_temps_removed: int = 0
@@ -970,6 +1006,22 @@ def reconcile_publications(
         )
     )
     for manifest in pending_manifests:
+        if repair:
+            # Take the per-profile lock before inspecting or changing pending
+            # state: a publisher may be between its phases, and deciding
+            # "unrecoverable" against a half-observed filesystem would strand
+            # its artifact and permanently fail its publication.
+            _acquire_publication_lock(
+                session, manifest.profile_date, manifest.profile_type
+            )
+            session.refresh(manifest)
+            if manifest.status != PublicationStatus.DRAFT:
+                report.details.append(
+                    f"pending manifest {manifest.id} was completed by a "
+                    "concurrent publisher"
+                )
+                session.commit()
+                continue
         destination = root / manifest.storage_uri
         temp = destination.with_name(destination.name + ".tmp")
         payload_ready = False
@@ -977,17 +1029,28 @@ def reconcile_publications(
             try:
                 store.read(manifest.storage_uri, manifest.content_hash)
                 payload_ready = True
-            except RuntimeError:
+            except (RuntimeError, OSError, ValueError):
                 report.hash_mismatches += 1
                 report.details.append(
-                    f"pending manifest {manifest.id} artifact hash mismatch: "
-                    f"{manifest.storage_uri}"
+                    f"pending manifest {manifest.id} artifact failed "
+                    f"verification: {manifest.storage_uri}"
                 )
                 if repair:
                     _quarantine(root, destination)
         if not payload_ready and temp.exists():
-            staged_payload = json.loads(temp.read_text(encoding="utf-8"))
-            if content_hash(staged_payload) == manifest.content_hash:
+            staged_ready = False
+            try:
+                staged_payload = json.loads(temp.read_text(encoding="utf-8"))
+                staged_ready = (
+                    isinstance(staged_payload, dict)
+                    and content_hash(staged_payload) == manifest.content_hash
+                )
+            except (OSError, ValueError):
+                staged_ready = False
+            if staged_ready:
+                # Recoverability is a property of the payload, not of whether
+                # promotion was requested, so report-only runs assess it too.
+                payload_ready = True
                 if repair:
                     staged = StagedProfileWrite(
                         manifest.storage_uri,
@@ -998,10 +1061,9 @@ def reconcile_publications(
                     )
                     staged.finalize()
                     store.read(manifest.storage_uri, manifest.content_hash)
-                    payload_ready = True
             else:
                 report.details.append(
-                    f"pending manifest {manifest.id} staged payload mismatch: "
+                    f"pending manifest {manifest.id} staged payload unusable: "
                     f"{temp}"
                 )
                 if repair:
@@ -1009,9 +1071,6 @@ def reconcile_publications(
         if payload_ready:
             report.completed_pending += 1
             if repair:
-                _acquire_publication_lock(
-                    session, manifest.profile_date, manifest.profile_type
-                )
                 _mark_manifest_published(session, manifest)
                 _ensure_day_profile(session, manifest)
                 session.commit()
@@ -1051,10 +1110,24 @@ def reconcile_publications(
             if repair and destination.exists():
                 _quarantine(root, destination)
             continue
-        created = _ensure_day_profile(session, manifest) if repair else False
-        if created:
-            report.completed_missing_profiles += 1
-            session.commit()
+        # Detect the missing-profile state regardless of whether mutation is
+        # enabled: a report-only run must not call it healthy.
+        has_profile = session.scalar(
+            select(DayProfile.id).where(
+                DayProfile.publication_manifest_id == manifest.id
+            )
+        )
+        if has_profile is None:
+            report.missing_profiles += 1
+            report.details.append(
+                f"published manifest {manifest.id} has no day profile row"
+            )
+            if repair:
+                _acquire_publication_lock(
+                    session, manifest.profile_date, manifest.profile_type
+                )
+                _ensure_day_profile(session, manifest)
+                session.commit()
         else:
             report.healthy_published += 1
 
@@ -1106,12 +1179,28 @@ def _ensure_day_profile(session: Session, manifest: PublicationManifest) -> bool
     )
     if existing is not None:
         return False
+    # A correction's manifest names its predecessor manifest; the lifecycle
+    # trigger requires the matching predecessor day profile, so derive it
+    # rather than inserting an unsupersed profile the database will reject.
+    predecessor_profile_id: UUID | None = None
+    if manifest.supersedes_manifest_id is not None:
+        predecessor_profile_id = session.scalar(
+            select(DayProfile.id).where(
+                DayProfile.publication_manifest_id == manifest.supersedes_manifest_id
+            )
+        )
+        if predecessor_profile_id is None:
+            raise RuntimeError(
+                "Cannot complete a correction whose predecessor day profile is "
+                "missing; reconcile the predecessor manifest first."
+            )
     session.add(
         DayProfile(
             profile_date=manifest.profile_date,
             profile_type=manifest.profile_type,
             publication_manifest_id=manifest.id,
             content_hash=manifest.content_hash,
+            supersedes_day_profile_id=predecessor_profile_id,
         )
     )
     session.flush()
@@ -1122,6 +1211,16 @@ def _quarantine(root: Path, target: Path) -> None:
     relative = target.relative_to(root)
     destination = root / "quarantine" / relative
     destination.parent.mkdir(parents=True, exist_ok=True)
+    # Deterministic, collision-resistant: retaining a bad artifact must never
+    # destroy one retained earlier.
+    if destination.exists():
+        suffix = 1
+        while True:
+            candidate = destination.with_name(f"{destination.name}.{suffix}")
+            if not candidate.exists():
+                destination = candidate
+                break
+            suffix += 1
     os.replace(target, destination)
 
 
