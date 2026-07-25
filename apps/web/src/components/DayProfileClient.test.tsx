@@ -287,3 +287,24 @@ describe("DayProfileClient arrival panel", () => {
     }
   });
 });
+
+describe("DayProfileClient invalid-date variants", () => {
+  it("tells a real out-of-range date apart from a malformed address", () => {
+    const { unmount } = render(<DayProfileClient date="1899-12-31" />);
+    expect(
+      screen.getByRole("heading", { name: "This date is outside the public range." })
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Records span 1900-01-01 through 2025-12-31.")
+    ).toBeInTheDocument();
+    unmount();
+
+    render(<DayProfileClient date="1964-02-30" />);
+    expect(
+      screen.getByRole("heading", { name: "This address is not a calendar date." })
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Use the form YYYY-MM-DD, between 1900-01-01 and 2025-12-31.")
+    ).toBeInTheDocument();
+  });
+});

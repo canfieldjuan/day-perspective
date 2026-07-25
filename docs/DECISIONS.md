@@ -601,3 +601,57 @@ classes.
 
 **Revisit trigger:** Issue #18 lands a typed vocabulary, or a source
 publishes statements whose class the current signals cannot distinguish.
+
+## D029: Evidence panel is a native modal dialog
+
+**Decision:** The per-statement evidence interaction (UI_UX_CONTRACT C-9)
+is a native `<dialog>` opened by the canonical trigger, with jsdom's
+missing showModal/close polyfilled in the shared test setup.
+
+**Context:** C-9.2 requires focus containment while open, Esc closing, and
+focus restoration to the trigger.
+
+**Alternatives considered:** Styled `<details>` (no containment or focus
+restoration); a hand-rolled focus-trap drawer (reimplements native
+semantics); a third-party dialog library (new dependency, barred by C-12).
+
+**Reason:** The native element supplies all three required behaviors plus
+`::backdrop` without code or dependencies; styling covers the desktop
+side-panel and mobile bottom-sheet presentations.
+
+**Consequences:** Tests exercise the real open/close lifecycle; browsers
+without `<dialog>` are outside the support matrix (Playwright's Chromium
+projects define it).
+
+**Revisit trigger:** A requirement for non-modal (parallel-reading)
+evidence display.
+
+## D030: Arrival numbering lives in client-module state
+
+**Decision:** The travel choreography's initial-vs-adjacent distinction
+(UI_UX_CONTRACT C-7.3) reads a counter in a client module
+(`src/lib/travel-store.ts`), incremented inside the fetch callback, with
+an exported test reset.
+
+**Context:** App Router keys dynamic segments by param and remounts the
+page subtree per date, so per-mount React state cannot distinguish a
+first journey from an adjacent step; the eslint `react-hooks/refs` rule
+correctly bars the ref-during-render alternative, and effect-set state
+would flip the animation attribute after first paint.
+
+**Alternatives considered:** Ref read during render (lint-barred, and
+rightly); effect-set state (post-paint attribute flip restarts the
+animation); context provider in the layout (same post-paint problem);
+sessionStorage (persists across full reloads, which should replay the
+initial reveal).
+
+**Reason:** Module state survives soft navigation exactly as long as the
+loaded bundle — the precise lifetime the distinction needs — and the
+value is computed before setState so the attribute is stable from first
+paint.
+
+**Consequences:** Unit tests must reset the counter; a full page reload
+replays the initial reveal, which is the intended behavior.
+
+**Revisit trigger:** A router change that preserves page-subtree state
+across dynamic-param navigation.

@@ -503,3 +503,53 @@ MVP work is listed in Sections 12 through 15 and the release checklist.
 - What should an inheritor distrust? Fixture breadth, the development auth
   boundary, absent human review, non-atomic DB/object finalization and every
   red release gate.
+
+## Time-Travel UI arc handoff (2026-07-25)
+
+**Direction:** "Strata" — the date as a place you descend to; evidence
+classes as visually distinct layers (chosen over the Ledger Leaf document
+and Signal Room concepts; rationale in `docs/UI_UX_DIRECTIONS.md`).
+`docs/UI_UX_CONTRACT.md` (clauses C-1..C-15) is the binding referee for
+UI review threads per `CLAUDE.md` §11.
+
+**Routes:** `/` (era-horizon landing), `/day/[date]` (arrival + strata;
+segment `layout.tsx` owns the page shell and persistent `DayNavigation`
+so loading/error fallbacks keep navigation; `middleware.ts` issues the
+canonical 308), `/admin/review` (untouched by the arc).
+
+**Component map:** `DateInputForm` (live era line, unchanged props),
+`DayProfileClient` (view-state machine; arrival slot from the server
+page; threads envelope manifest/hash; travel phase + focus management),
+`ProfileSections` (strata, chips/caveats via `deriveEvidenceClass`,
+seams, integrity strip, panel trigger), `EvidencePanel` (native modal
+dialog), `DayNavigation`. Libs: `evidence-class`, `date`
+(format/adjacent/random/canonicalize/classify), `day-profile`
+(validators, era lines/bands), `travel-phase`, `travel-store`.
+
+**State approach:** React state in `DayProfileClient` for the per-date
+view; one client-module counter (`travel-store`) for cross-navigation
+arrival numbering (D030). No state library.
+
+**Animation:** CSS-only, keyed off `data-phase`/`data-entry` attributes
+inside `prefers-reduced-motion: no-preference`; no artificial delay —
+the traveling phase is exactly the real request (C-7).
+
+**Accessibility:** skip link, landmark structure, focusable arrival
+heading with focus moved on nav-initiated date changes plus a polite
+arrival announcement, 44px targets, canonical strings for every state,
+reduced-motion equivalence asserted in e2e.
+
+**Known compromises / distrust list:** the strata loading reservation is
+9rem per stratum, so long profiles still shift on arrival (accepted
+residual under C-12.2, noted on PR #25); disputed display and the
+date-modeled class have zero real data instances and are mock-tested
+only; the landing horizon's era-band widths are proportional to years,
+not data density; `wonder_and_progress` statements without markers
+classify as `unclassified` by design (C-4.6); post-merge Codex rounds on
+#25 and #27 were absorbed into the next open PR — check any future
+post-merge threads the same way.
+
+**Deferred (issues):** typed evidence-class vocabulary in contracts
+(#18), published-dates index endpoint for sighted navigation (#19), CI
+docs-only fast path (#20); dark theme, maps/timelines, search,
+bookmarks per UI_UX_CONTRACT C-15.

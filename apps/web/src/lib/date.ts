@@ -90,3 +90,25 @@ export function canonicalizePublicDatePath(value: string): string | null {
   }
   return isSupportedPublicDate(padded) ? padded : null;
 }
+
+export type PublicDateInputClass = "supported" | "out-of-range" | "malformed";
+
+/**
+ * Distinguish a real calendar date outside the shell from a value that is
+ * not a calendar date at all (UI_UX_CONTRACT C-8.2 renders them
+ * differently — the old single message misled about in-range malformed
+ * values, audit §3.4).
+ */
+export function classifyPublicDateInput(value: string): PublicDateInputClass {
+  if (isSupportedPublicDate(value)) {
+    return "supported";
+  }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return "malformed";
+  }
+  const parsed = new Date(value + "T00:00:00.000Z");
+  const isRealDate =
+    !Number.isNaN(parsed.getTime()) &&
+    parsed.toISOString().slice(0, 10) === value;
+  return isRealDate ? "out-of-range" : "malformed";
+}

@@ -35,7 +35,7 @@ export default async function DayProfilePage({ params }: DayPageProps) {
       arrival={
         <>
           <p className="eyebrow">Historical perspective</p>
-          <h1>{monument ?? "Day profile: " + date}</h1>
+          <h1 tabIndex={-1}>{monument ?? "Day profile: " + date}</h1>
           {eraLine ? <p className="day-arrival__era">{eraLine}</p> : null}
           <DateInputForm initialDate={date} />
         </>

@@ -7,7 +7,7 @@ function bandYears(band: { start: string; end: string }): number {
 
 export default function HomePage() {
   return (
-    <main className="page-shell">
+    <main className="page-shell" id="main-content">
       <header className="masthead landing-masthead">
         <p className="eyebrow">Historical perspective</p>
         <h1 className="landing-title">Stand inside one day of the record.</h1>
