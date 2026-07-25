@@ -158,3 +158,45 @@ describe("ERA_BANDS", () => {
     }
   });
 });
+
+describe("publication tier validation", () => {
+  function envelope(profileExtras: Record<string, unknown>) {
+    return {
+      status: "published",
+      date: "1964-03-27",
+      profile_type: "standard_statistical",
+      manifest_id: "manifest-tier",
+      content_hash: "a".repeat(64),
+      profile: {
+        schema_version: "1",
+        date: "1964-03-27",
+        profile_type: "standard_statistical",
+        sections: { evidence_notes: [] },
+        ...profileExtras
+      }
+    };
+  }
+
+  it("accepts every tier in the contract vocabulary", () => {
+    for (const tier of ["context_only", "partially_enriched", "reviewed_enriched"]) {
+      expect(
+        isPublishedProfileResponse(
+          envelope({ publication_tier: tier }),
+          "1964-03-27"
+        )
+      ).toBe(true);
+    }
+  });
+
+  it("rejects a tier outside the vocabulary instead of rendering it", () => {
+    expect(
+      isPublishedProfileResponse(
+        envelope({ publication_tier: "fully_amazing" }),
+        "1964-03-27"
+      )
+    ).toBe(false);
+    expect(
+      isPublishedProfileResponse(envelope({ publication_tier: 3 }), "1964-03-27")
+    ).toBe(false);
+  });
+});

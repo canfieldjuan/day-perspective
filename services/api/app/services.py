@@ -37,6 +37,7 @@ from app.models import (
     PublicationManifest,
     PublicationStatementEvidence,
     PublicationStatus,
+    PublicationTier,
     QualityAssessment,
     ResolutionMethod,
     ResolvedClaim,
@@ -1224,6 +1225,39 @@ def _quarantine(root: Path, target: Path) -> None:
     os.replace(target, destination)
 
 
+RECORDED_SECTION = "recorded_on_this_date"
+EDITORIAL_SECTIONS = (
+    "curated_claims",
+    "derived_comparisons",
+    "wonder_and_progress",
+)
+
+
+def derive_publication_tier(payload: dict[str, Any]) -> PublicationTier:
+    """Classify how much a profile offers, from the payload alone.
+
+    Pure and never-raising: a malformed payload degrades to the most modest
+    tier rather than overstating what the archive holds. A recorded event is
+    the strongest signal available today because publication already gates
+    it behind claim review and editorial selection; the tier does not yet
+    encode a per-date human editorial review, which does not exist as data
+    (see docs/DECISIONS.md D031).
+    """
+    sections = payload.get("sections")
+    if not isinstance(sections, dict):
+        return PublicationTier.CONTEXT_ONLY
+
+    def populated(key: str) -> bool:
+        statements = sections.get(key)
+        return isinstance(statements, list) and len(statements) > 0
+
+    if populated(RECORDED_SECTION):
+        return PublicationTier.REVIEWED_ENRICHED
+    if any(populated(key) for key in EDITORIAL_SECTIONS):
+        return PublicationTier.PARTIALLY_ENRICHED
+    return PublicationTier.CONTEXT_ONLY
+
+
 class PendingPublicationError(RuntimeError):
     """A pending publication with different content blocks this attempt."""
 
@@ -1273,6 +1307,10 @@ def publish_day_profile(
     """
     if profile_type_for_date(profile_date) != profile_type:
         raise ValueError("The profile type does not match the public date band.")
+    tier = derive_publication_tier(payload)
+    # The tier travels inside the hashed artifact so the stored profile, its
+    # manifest, and every consumer describe the same thing.
+    payload = {**payload, "publication_tier": tier.value}
     digest = content_hash(payload)
 
     staged: StagedProfileWrite | None = None
@@ -1361,6 +1399,7 @@ def publish_day_profile(
                 version=version,
                 editorial_revision=editorial_revision,
                 status=PublicationStatus.DRAFT,
+                publication_tier=tier,
                 content_hash=digest,
                 source_snapshot_hash=_source_snapshot_hash(snapshotted_evidence),
                 storage_uri="pending://local-filesystem-write",

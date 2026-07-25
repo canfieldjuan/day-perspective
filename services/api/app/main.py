@@ -243,6 +243,15 @@ def day_profile(
             status_code=503,
             content=storage_unavailable.model_dump(mode="json"),
         )
+    # The manifest is the authority for the publication tier: artifacts
+    # published before the tier existed are byte-immutable and carry none,
+    # and their backfilled tier would otherwise be invisible to the API and
+    # interface while coverage queries reported it (D031). Verification above
+    # still runs against the untouched artifact bytes.
+    profile_payload = {
+        **profile_payload,
+        "publication_tier": manifest.publication_tier.value,
+    }
     return PublishedProfileResponse(
         status="published",
         date=profile_date,

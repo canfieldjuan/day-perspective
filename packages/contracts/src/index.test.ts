@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { profileTypeForDate } from "./index";
+import { PUBLICATION_TIERS, profileTypeForDate } from "./index";
 
 describe("profileTypeForDate", () => {
   it("keeps the public date shell and profile bands explicit", () => {
@@ -12,3 +12,13 @@ describe("profileTypeForDate", () => {
   });
 });
 
+
+describe("publication tiers", () => {
+  it("orders the vocabulary from sparse to rich", () => {
+    expect(PUBLICATION_TIERS).toEqual([
+      "context_only",
+      "partially_enriched",
+      "reviewed_enriched"
+    ]);
+  });
+});
