@@ -160,8 +160,8 @@ export function DayProfileClient({ date }: { date: string }) {
     <>
       <section className="state-panel" aria-busy="true" aria-live="polite">
         <p className="eyebrow">Checking publication status</p>
-        <div className="loading-line" />
-        <div className="loading-line loading-line--short" />
+        <div className="loading-line" data-testid="loading-line" />
+        <div className="loading-line loading-line--short" data-testid="loading-line" />
       </section>
       <ProfileSections availability="loading" />
     </>

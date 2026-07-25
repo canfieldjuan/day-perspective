@@ -35,4 +35,4 @@ fi
 cd "$project_root/apps/web"
 DAY_PERSPECTIVE_FULL_STACK=1 \
 API_BASE_URL="http://127.0.0.1:$api_port" \
-  corepack pnpm exec playwright test e2e/full-stack-golden.spec.ts
+  corepack pnpm exec playwright test e2e/full-stack-golden.spec.ts --project=chromium
