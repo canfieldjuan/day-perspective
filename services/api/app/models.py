@@ -826,3 +826,63 @@ class PublicationStatementEvidence(Base):
     evidence_snapshot: Mapped[dict[str, Any]] = mapped_column(JSONB)
     evidence_snapshot_hash: Mapped[str] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class BatchRunStatus(str, Enum):
+    RUNNING = "running"
+    COMPLETED = "completed"
+    INTERRUPTED = "interrupted"
+
+
+class BatchEntryStatus(str, Enum):
+    PUBLISHED = "published"
+    UNCHANGED = "unchanged"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+
+
+class PublicationBatchRun(Base):
+    __tablename__ = "publication_batch_runs"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    kind: Mapped[str] = mapped_column(String(64))
+    status: Mapped[BatchRunStatus] = mapped_column(
+        enum_type(BatchRunStatus, "batch_run_status"),
+        default=BatchRunStatus.RUNNING,
+    )
+    requested: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+class PublicationBatchEntry(Base):
+    __tablename__ = "publication_batch_entries"
+    __table_args__ = (
+        UniqueConstraint(
+            "batch_run_id", "profile_date", name="publication_batch_entries_unique"
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    batch_run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("publication_batch_runs.id")
+    )
+    profile_date: Mapped[date] = mapped_column(Date)
+    status: Mapped[BatchEntryStatus] = mapped_column(
+        enum_type(BatchEntryStatus, "batch_entry_status")
+    )
+    detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    publication_manifest_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("publication_manifests.id"), nullable=True
+    )
+    recorded_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )

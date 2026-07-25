@@ -1,9 +1,20 @@
 from __future__ import annotations
 
 import argparse
+from datetime import date
 
+from app.batch_publication import (
+    CONTEXT_BATCH_KIND,
+    BatchPlanError,
+    latest_batch_run,
+    outstanding_dates,
+    plan_context_dates,
+    run_context_batch,
+    start_batch_run,
+)
 from app.config import get_settings
 from app.database import SessionLocal
+from app.models import BatchRunStatus
 from app.services import LocalFilesystemPublishedProfileStore, reconcile_publications
 
 
@@ -24,6 +35,35 @@ def main() -> None:
         type=int,
         default=3600,
         help="Age after which an abandoned staging temp is swept.",
+    )
+    context = subparsers.add_parser(
+        "publish-context",
+        help="Publish context profiles for supported dates, resumably.",
+    )
+    selection = context.add_argument_group("date selection")
+    selection.add_argument("--date", type=date.fromisoformat)
+    selection.add_argument("--year", type=int)
+    selection.add_argument("--from-date", type=date.fromisoformat)
+    selection.add_argument("--to-date", type=date.fromisoformat)
+    context.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Plan and ledger the run without publishing.",
+    )
+    context.add_argument(
+        "--resume",
+        action="store_true",
+        help="Continue the most recent run's unfinished and failed dates.",
+    )
+    context.add_argument(
+        "--retry-failed",
+        action="store_true",
+        help="Re-attempt only the most recent run's failed dates.",
+    )
+    context.add_argument(
+        "--force-new-version",
+        action="store_true",
+        help="Publish a superseding version even when content is unchanged.",
     )
     args = parser.parse_args()
     settings = get_settings()
@@ -51,6 +91,59 @@ def main() -> None:
             )
             for detail in report.details:
                 print(f"detail={detail}")
+        elif args.command == "publish-context":
+            store = LocalFilesystemPublishedProfileStore(
+                settings.published_profile_root
+            )
+            if args.resume or args.retry_failed:
+                run = latest_batch_run(session, kind=CONTEXT_BATCH_KIND)
+                if run is None:
+                    raise SystemExit("No context batch run exists to resume.")
+                dates = outstanding_dates(
+                    session, batch_run=run, only_failed=args.retry_failed
+                )
+                run.status = BatchRunStatus.RUNNING
+                run.completed_at = None
+                session.commit()
+            else:
+                try:
+                    dates = plan_context_dates(
+                        single_date=args.date,
+                        year=args.year,
+                        from_date=args.from_date,
+                        to_date=args.to_date,
+                    )
+                except BatchPlanError as error:
+                    raise SystemExit(str(error)) from error
+                run = start_batch_run(
+                    session,
+                    kind=CONTEXT_BATCH_KIND,
+                    requested={
+                        "dates": [value.isoformat() for value in dates],
+                        "dry_run": args.dry_run,
+                        "force_new_version": args.force_new_version,
+                    },
+                )
+            batch_report = run_context_batch(
+                session,
+                store=store,
+                dates=dates,
+                batch_run=run,
+                dry_run=args.dry_run,
+                force_new_version=args.force_new_version,
+            )
+            print(
+                f"batch_run_id={batch_report.batch_run_id} "
+                f"requested={batch_report.requested} "
+                f"published={batch_report.published} "
+                f"unchanged={batch_report.unchanged} "
+                f"skipped={batch_report.skipped} "
+                f"failed={batch_report.failed}"
+            )
+            for failed_date, reason in batch_report.failures:
+                print(f"failure date={failed_date.isoformat()} reason={reason}")
+            if batch_report.failed:
+                raise SystemExit(1)
 
 
 if __name__ == "__main__":
