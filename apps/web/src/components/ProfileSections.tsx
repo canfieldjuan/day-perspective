@@ -42,7 +42,7 @@ export function ProfileSections({
   const evidenceQualityGrade =
     typeof evidenceStatement?.details?.quality_grade === "string"
       ? evidenceStatement.details.quality_grade
-      : undefined;
+      : quality?.grade;
   const showIntegrity =
     availability === "published" &&
     Boolean(

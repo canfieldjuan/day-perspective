@@ -35,7 +35,9 @@ export function DateInputForm({ initialDate = "" }: DateInputFormProps) {
     }
 
     setError(null);
-    markNavigation();
+    if (initialDate) {
+      markNavigation();
+    }
     router.push("/day/" + date);
   }
 
