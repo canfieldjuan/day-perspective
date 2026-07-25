@@ -83,7 +83,7 @@ cascade-deleted.
 | `publication_manifests` | Date/type/version, status, content and source-snapshot SHA-256 hashes, storage URI, methodology/code version, superseded manifest, metadata, timestamps. | Date/type band and hashes are checked. Final manifest updates/deletes are rejected by trigger; a supersession must point to one published manifest of the same date and profile type, yielding a linear correction chain. |
 | `publication_statement_evidence` | Required manifest and statement JSON path, exactly one resolved-claim or derived-value FK, canonical `evidence_snapshot` JSON, and `evidence_snapshot_hash`. | Unique manifest/path and target exclusivity enforce one provenance root per published statement. Snapshot JSON must be an object and its hash must be SHA-256 shaped. The publication service derives both the statement hash and manifest source-snapshot hash. The trigger protects both the old and new manifest on update, so a final mapping or snapshot cannot be retargeted, rewritten, or removed. Migration `20260723_0005` refuses to invent snapshots if legacy evidence rows exist. |
 | `day_profiles` | Date/type, required publication-manifest FK, content hash, predecessor profile, time. | Trigger requires a matching published manifest and content hash, checks matching predecessor identity, permits one successor per predecessor, then rejects subsequent updates/deletes. |
-| `corrections` | Optional correction claim plus required original/replacement manifest FKs and rationale. | Original/replacement differ. Trigger requires both manifests be published, same date/type, explicit manifest supersession, and matching day-profile supersession. |
+| `corrections` | Optional correction claim plus required original/replacement manifest FKs and rationale. | Original/replacement differ. Trigger requires both manifests be published, same date/type, explicit manifest supersession, and matching day-profile supersession. Repeating the same pair and rationale returns the existing row; a conflicting rationale is rejected. |
 
 ## Date-band and cross-table rules
 
@@ -139,3 +139,48 @@ A local date requires the complete timestamp/timezone/offset/interpretation tupl
 ### New and changed constraints
 
 `source_releases(source_id, raw_checksum_sha256)` is unique for idempotent imports. Raw records are immutable. Claim hashes and raw checksums must be lowercase SHA-256. Stable profile locations are version-addressed and protected by the existing published-manifest/day-profile immutability triggers.
+
+## Senior Takeover Schema Additions
+
+### `source_release_licenses`
+
+One immutable license snapshot per source release. It stores the identifier,
+verbatim policy snapshot, terms URL, commercial-use, redistribution,
+derivatives, attribution, public-display and raw-download permissions,
+attribution text, terms-check date and legal-review status. The release foreign
+key is the primary key. Update and delete are rejected.
+
+### `claim_review_decisions`
+
+Append-only accept/reject/defer decisions for imported claims. Important
+columns are claim, decision, rationale, reviewer identity and decision time.
+Rows cannot be updated or deleted. Claim status is advanced through governance
+services that create this record.
+
+### `editorial_selections`
+
+Append-only selection decisions for exactly one resolved claim or derived value
+in one date/section. It stores a monotonically increasing `decision_version`,
+status, display rank, rationale and reviewer. Publication eligibility uses the
+highest decision version for each date/section/root combination; a selection in
+one section cannot authorize use in another. Later selection, rejection or
+deferral never overwrites the earlier decision. Partial unique indexes enforce
+one row per root and version; service writers serialize each root with a
+transaction-scoped PostgreSQL advisory lock.
+
+### Temporal assignment addition
+
+`period_context` identifies an aggregate that describes a period without
+allocating it to individual dates. It is distinct from `direct_record`,
+`uniform_period_allocation`, `modeled_period_allocation` and
+`editorial_context`.
+
+### Current structured metric records
+
+UN WPP review materializes five metrics, annual observations and coverage for
+the selected fixture years. Average daily births and deaths are separate
+derived metrics with `uniform_period_allocation`. UCDP review materializes an
+active state-based-conflict count derived from 25 resolved conflict-year inputs
+using `period_context`. UCDP GED fatalities are stored in `event_impacts` with
+directness `direct`; low and high bounds remain on the source claim and resolved
+value rather than being collapsed into the event row.

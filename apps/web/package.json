@@ -19,20 +19,19 @@
   },
   "dependencies": {
     "@day-perspective/contracts": "workspace:*",
-    "next": "15.5.21",
+    "next": "16.2.11",
     "react": "19.2.4",
     "react-dom": "19.2.4"
   },
   "devDependencies": {
-    "@eslint/eslintrc": "3.3.1",
-    "@playwright/test": "1.55.0",
+    "@playwright/test": "1.61.1",
     "@testing-library/jest-dom": "6.8.0",
     "@testing-library/react": "16.3.0",
     "@types/node": "22.15.30",
     "@types/react": "19.2.17",
     "@types/react-dom": "19.2.3",
     "eslint": "9.35.0",
-    "eslint-config-next": "15.5.21",
+    "eslint-config-next": "16.2.11",
     "jsdom": "26.1.0",
     "typescript": "5.9.2",
     "vitest": "3.2.4"

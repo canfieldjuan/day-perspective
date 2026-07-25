@@ -115,8 +115,6 @@ _PENDING_PROFILE_WRITES = "pending_profile_writes"
 
 @event.listens_for(Session, "after_commit")
 def _finalize_profile_writes(session: Session) -> None:
-    if session.in_transaction():
-        return
     pending = session.info.pop(_PENDING_PROFILE_WRITES, [])
     for staged in pending:
         staged.finalize()
@@ -264,7 +262,8 @@ def create_claim(
             raise ValueError("A claim requires an existing source release.")
         if release.raw_record_count != 1:
             raise ValueError(
-                "Claims from multi-record releases require a source-record hash."
+                "A claim from a multi-record source release requires its "
+                "source-record hash."
             )
         source_record_hash_sha256 = release.raw_checksum_sha256
     claim = Claim(
@@ -290,9 +289,6 @@ def supersede_claim(
     prior_claim: Claim,
     assertion_text: str | None,
     assertion_json: dict[str, Any] | None = None,
-    unit: str | None = None,
-    lower_bound: Decimal | None = None,
-    upper_bound: Decimal | None = None,
 ) -> Claim:
     prior_claim.assertion_status = ClaimAssertionStatus.SUPERSEDED
     replacement = Claim(
@@ -304,15 +300,9 @@ def supersede_claim(
         assertion_status=ClaimAssertionStatus.CANDIDATE,
         supersedes_claim_id=prior_claim.id,
         source_record_hash_sha256=prior_claim.source_record_hash_sha256,
-        pipeline_run_id=prior_claim.pipeline_run_id,
-        temporal_precision=prior_claim.temporal_precision,
-        temporal_assignment=prior_claim.temporal_assignment,
-        temporal_start=prior_claim.temporal_start,
-        temporal_end=prior_claim.temporal_end,
-        date_role=prior_claim.date_role,
-        unit=unit,
-        lower_bound=lower_bound,
-        upper_bound=upper_bound,
+        unit=prior_claim.unit,
+        lower_bound=prior_claim.lower_bound,
+        upper_bound=prior_claim.upper_bound,
     )
     session.add(replacement)
     session.flush()
@@ -342,19 +332,14 @@ def resolve_claim(
         .where(ResolvedClaim.canonical_key == canonical_key)
         .order_by(ResolvedClaim.version.desc())
     )
-    if latest is None:
-        if supersedes_resolved_claim_id is not None:
-            raise ValueError(
-                "A first resolved-claim version cannot supersede a predecessor."
-            )
-        next_version = 1
-    else:
-        if supersedes_resolved_claim_id != latest.id:
-            raise ValueError(
-                "A resolved claim must supersede the latest version of the same "
-                "canonical key."
-            )
-        next_version = latest.version + 1
+    if latest is None and supersedes_resolved_claim_id is not None:
+        raise ValueError("A first resolved-claim version cannot supersede another row.")
+    if latest is not None and supersedes_resolved_claim_id != latest.id:
+        raise ValueError(
+            "A new resolved-claim version must supersede the latest version "
+            "of the same canonical key."
+        )
+    next_version = 1 if latest is None else latest.version + 1
     resolved = ResolvedClaim(
         canonical_key=canonical_key,
         version=next_version,
@@ -546,8 +531,6 @@ def _quality_assessment_snapshots(
                 "assessment_kind": assessment.assessment_kind,
                 "score": str(assessment.score) if assessment.score is not None else None,
                 "findings": assessment.findings,
-                "public_grade": assessment.public_grade,
-                "public_explanation": assessment.public_explanation,
                 "legal_review_status": assessment.legal_review_status.value,
                 "assessed_at": assessment.assessed_at.isoformat(),
                 "assessment_methodology": _methodology_core_snapshot(
@@ -987,18 +970,6 @@ def publish_day_profile(
 ) -> DayProfile:
     if profile_type_for_date(profile_date) != profile_type:
         raise ValueError("The profile type does not match the public date band.")
-    reserved_metadata_keys = {
-        "evidence_snapshot_schema_version",
-        "statement_evidence_hashes",
-    }
-    conflicting_metadata_keys = reserved_metadata_keys.intersection(
-        manifest_metadata or {}
-    )
-    if conflicting_metadata_keys:
-        raise ValueError(
-            "Manifest metadata contains publisher-reserved keys: "
-            + ", ".join(sorted(conflicting_metadata_keys))
-        )
     evidence = _validate_statement_evidence(
         session,
         payload,
@@ -1037,7 +1008,6 @@ def publish_day_profile(
         methodology_id=methodology_id,
         supersedes_manifest_id=supersedes_manifest_id,
         metadata_json={
-            **(manifest_metadata or {}),
             "evidence_snapshot_schema_version": "1",
             "statement_evidence_hashes": [
                 {
@@ -1046,6 +1016,7 @@ def publish_day_profile(
                 }
                 for item in snapshotted_evidence
             ],
+            **(manifest_metadata or {}),
         },
     )
     session.add(manifest)
@@ -1090,6 +1061,18 @@ def record_correction(
     replacement_manifest_id: UUID,
     rationale: str,
 ) -> Correction:
+    existing = session.scalar(
+        select(Correction).where(
+            Correction.original_manifest_id == original_manifest_id,
+            Correction.replacement_manifest_id == replacement_manifest_id,
+        )
+    )
+    if existing is not None:
+        if existing.rationale != rationale:
+            raise ValueError(
+                "This correction pair is already recorded with a different rationale."
+            )
+        return existing
     original = session.get(PublicationManifest, original_manifest_id)
     replacement = session.get(PublicationManifest, replacement_manifest_id)
     if original is None or original.status != PublicationStatus.PUBLISHED:

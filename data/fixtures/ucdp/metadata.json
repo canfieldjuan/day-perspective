@@ -1,0 +1,21 @@
+{
+  "fixture_notice": "TEST FIXTURE: verbatim selected columns and records from official UCDP 26.1 releases; not a complete dataset.",
+  "retrieved_at": "2026-07-24T13:45:00-05:00",
+  "license": "CC-BY-4.0",
+  "terms_url": "https://creativecommons.org/licenses/by/4.0/",
+  "download_page": "https://ucdp.uu.se/downloads/",
+  "annual": {
+    "identity": "UCDP/PRIO Armed Conflict Dataset 26.1",
+    "source_url": "https://ucdp.uu.se/downloads/ucdpprio/ucdp-prio-acd-261-csv.zip",
+    "upstream_sha256": "5f951743222964674a446e32a5a871077b29bd13349588d85fc59953d89c878a",
+    "fixture_sha256": "ae3a7487ce6c3587ba9ef6e7f9f410f5931333119ae62015440e2f970b8562f7",
+    "record_count": 25
+  },
+  "event": {
+    "identity": "UCDP GED Global 26.1",
+    "source_url": "https://ucdp.uu.se/downloads/ged/ged261-csv.zip",
+    "upstream_sha256": "8c941d84954e555ee2e54f40fa04d9203bf1e2f962203d0a9930966c4947c667",
+    "fixture_sha256": "90ad87776ed2efff8d4bda348f775968f8e8976f8d87f6933f202cc98877e456",
+    "record_count": 1
+  }
+}

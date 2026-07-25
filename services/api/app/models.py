@@ -60,6 +60,7 @@ class TemporalAssignment(str, Enum):
     DIRECT_RECORD = "direct_record"
     REPORTED = "reported"
     INFERRED = "inferred"
+    PERIOD_CONTEXT = "period_context"
     UNIFORM_PERIOD_ALLOCATION = "uniform_period_allocation"
     MODELED_PERIOD_ALLOCATION = "modeled_period_allocation"
     EDITORIAL_CONTEXT = "editorial_context"

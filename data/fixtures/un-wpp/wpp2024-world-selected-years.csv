@@ -1,0 +1,5 @@
+location,location_code,year,variant,population_july_thousands,births_thousands,deaths_thousands,life_expectancy_years,under_five_mortality_per_1000
+World,900,1950,Estimates,2493092.848,91823.936,48486.892,46.394,227.187
+World,900,1964,Estimates,3264487.339,117292.2,46822.882,54.26,162.035
+World,900,1989,Estimates,5234431.732,142249.031,49178.262,63.782,94.759
+World,900,2023,Estimates,8091734.93,132110.264,61651.608,73.169,36.326

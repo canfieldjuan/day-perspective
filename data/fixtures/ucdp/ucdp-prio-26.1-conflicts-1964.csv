@@ -1,0 +1,26 @@
+conflict_id,location,side_a,side_b,year,intensity_level,type_of_conflict,start_date,start_prec,region,version
+218,"India, Pakistan",Government of India,Government of Pakistan,1964,1,2,1948-12-31,5,3,26.1
+221,Myanmar (Burma),Government of Myanmar (Burma),KNUP,1964,1,3,1948-12-31,3,3,26.1
+222,Myanmar (Burma),Government of Myanmar (Burma),CPB,1964,1,3,1948-02-29,4,3,26.1
+223,Myanmar (Burma),Government of Myanmar (Burma),"ANLP, CPA",1964,1,3,1948-01-31,4,3,26.1
+230,Yemen (North Yemen),Government of Yemen (North Yemen),Royalists,1964,2,4,1948-03-15,1,2,26.1
+231,Myanmar (Burma),Government of Myanmar (Burma),KIO,1964,2,3,1949-12-31,6,3,26.1
+234,Israel,Government of Israel,Palestinian insurgents,1964,1,3,1948-05-15,1,2,26.1
+249,South Vietnam,Government of South Vietnam,FNL,1964,2,4,1955-04-30,3,3,26.1
+251,India,Government of India,NNC,1964,1,3,1955-07-20,2,3,26.1
+262,Laos,Government of Laos,Pathet Lao,1964,2,4,1959-11-12,1,3,26.1
+263,Angola,Government of Portugal,"FNLA, MPLA",1964,1,1,1961-02-04,1,4,26.1
+264,Myanmar (Burma),Government of Myanmar (Burma),SSA,1964,2,3,1959-11-22,1,3,26.1
+268,"Ethiopia, Somalia",Government of Ethiopia,Government of Somalia,1964,1,2,1964-02-10,2,4,26.1
+271,Iraq,Government of Iraq,KDP,1964,1,3,1945-08-30,3,2,26.1
+275,Ethiopia,Government of Ethiopia,ELF,1964,1,3,1961-09-30,3,4,26.1
+279,Guinea-Bissau,Government of Portugal,PAIGC,1964,1,1,1963-02-28,3,4,26.1
+280,Malaysia,Government of Malaysia,CCO,1964,1,3,1963-12-31,7,3,26.1
+281,"Indonesia, Malaysia",Government of Indonesia,Government of Malaysia,1964,1,2,1962-12-08,1,3,26.1
+282,Sudan,Government of Sudan,SSLM,1964,2,3,1963-12-31,5,4,26.1
+283,DR Congo (Zaire),Government of DR Congo (Zaire),CNL,1964,2,3,1964-01-03,1,4,26.1
+284,Gabon,Government of Gabon,Military faction (forces loyal to Léon M'Ba),1964,1,4,1964-02-18,1,4,26.1
+285,Mozambique,Government of Portugal,Frelimo,1964,1,1,1964-11-19,1,4,26.1
+286,South Yemen,Government of United Kingdom,FLOSY,1964,1,1,1964-11-25,1,2,26.1
+289,Colombia,Government of Colombia,FARC,1964,1,3,1964-12-31,5,5,26.1
+329,Ethiopia,Government of Ethiopia,Ogaden Liberation Front,1964,1,3,1964-01-11,2,4,26.1

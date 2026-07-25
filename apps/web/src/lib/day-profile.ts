@@ -32,7 +32,7 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value as Record<string, unknown>;
 }
 
-function isClaimEvidence(value: unknown): boolean {
+function isClaimProvenance(value: unknown): boolean {
   const claim = asRecord(value);
   return (
     claim !== undefined &&
@@ -43,57 +43,64 @@ function isClaimEvidence(value: unknown): boolean {
   );
 }
 
-function isDissentingClaimEvidence(value: unknown): boolean {
-  const claim = asRecord(value);
-  return (
-    claim !== undefined &&
-    (claim.predicate === undefined || typeof claim.predicate === "string") &&
-    (claim.value === undefined || claim.value === null || asRecord(claim.value) !== undefined)
-  );
-}
-
-function isProvenance(value: unknown): boolean {
+function isStatementProvenance(value: unknown): boolean {
   const provenance = asRecord(value);
-  if (provenance === undefined || typeof provenance.published_statement !== "string") {
+  if (
+    provenance === undefined ||
+    typeof provenance.published_statement !== "string" ||
+    !Array.isArray(provenance.supporting_claims) ||
+    !provenance.supporting_claims.every(isClaimProvenance) ||
+    !Array.isArray(provenance.dissenting_claims) ||
+    !provenance.dissenting_claims.every(isClaimProvenance)
+  ) {
     return false;
   }
-  const resolvedClaim = asRecord(provenance.resolved_claim);
-  const derivedValue = asRecord(provenance.derived_value);
   const sourceRelease = asRecord(provenance.source_release);
   const methodology = asRecord(provenance.methodology);
-  const hasResolvedRoot =
-    resolvedClaim !== undefined &&
-    typeof resolvedClaim.canonical_key === "string" &&
-    typeof resolvedClaim.version === "number" &&
-    typeof resolvedClaim.method === "string" &&
-    typeof resolvedClaim.rationale === "string";
-  const hasDerivedRoot =
-    derivedValue !== undefined &&
-    typeof derivedValue.kind === "string" &&
-    typeof derivedValue.calculation_version === "string" &&
-    (derivedValue.value === undefined ||
-      derivedValue.value === null ||
-      asRecord(derivedValue.value) !== undefined);
-  return (
-    hasResolvedRoot !== hasDerivedRoot &&
-    (provenance.root_type === undefined ||
-      provenance.root_type === (hasDerivedRoot ? "derived_value" : "resolved_claim")) &&
-    Array.isArray(provenance.supporting_claims) &&
-    provenance.supporting_claims.every(isClaimEvidence) &&
-    Array.isArray(provenance.dissenting_claims) &&
-    provenance.dissenting_claims.every(isDissentingClaimEvidence) &&
-    sourceRelease !== undefined &&
-    typeof sourceRelease.source === "string" &&
-    (sourceRelease.publisher === null || typeof sourceRelease.publisher === "string") &&
-    typeof sourceRelease.release === "string" &&
-    typeof sourceRelease.source_url === "string" &&
-    typeof sourceRelease.raw_checksum_sha256 === "string" &&
-    typeof sourceRelease.retrieved_at === "string" &&
-    methodology !== undefined &&
-    typeof methodology.name === "string" &&
-    typeof methodology.version === "string" &&
-    typeof methodology.description === "string"
-  );
+  if (
+    sourceRelease === undefined ||
+    typeof sourceRelease.source !== "string" ||
+    !(
+      sourceRelease.publisher === null ||
+      typeof sourceRelease.publisher === "string"
+    ) ||
+    typeof sourceRelease.release !== "string" ||
+    typeof sourceRelease.source_url !== "string" ||
+    typeof sourceRelease.raw_checksum_sha256 !== "string" ||
+    typeof sourceRelease.retrieved_at !== "string" ||
+    methodology === undefined ||
+    typeof methodology.name !== "string" ||
+    typeof methodology.version !== "string" ||
+    typeof methodology.description !== "string"
+  ) {
+    return false;
+  }
+  const resolved = provenance.resolved_claim;
+  if (resolved !== undefined) {
+    const row = asRecord(resolved);
+    if (
+      row === undefined ||
+      typeof row.canonical_key !== "string" ||
+      typeof row.version !== "number" ||
+      typeof row.method !== "string" ||
+      typeof row.rationale !== "string"
+    ) {
+      return false;
+    }
+  }
+  const derived = provenance.derived_value;
+  if (derived !== undefined) {
+    const row = asRecord(derived);
+    if (
+      row === undefined ||
+      typeof row.kind !== "string" ||
+      typeof row.calculation_version !== "string" ||
+      !(row.value === null || asRecord(row.value) !== undefined)
+    ) {
+      return false;
+    }
+  }
+  return resolved !== undefined || derived !== undefined;
 }
 
 function isProfileStatement(value: unknown): value is ProfileStatement {
@@ -104,7 +111,8 @@ function isProfileStatement(value: unknown): value is ProfileStatement {
     typeof statement.statement === "string" &&
     (statement.provenance_note === undefined || typeof statement.provenance_note === "string") &&
     (statement.details === undefined || asRecord(statement.details) !== undefined) &&
-    (statement.provenance === undefined || isProvenance(statement.provenance))
+    (statement.provenance === undefined ||
+      isStatementProvenance(statement.provenance))
   );
 }
 
@@ -128,19 +136,6 @@ function isSectionStates(value: unknown): boolean {
         (state.reason === undefined || typeof state.reason === "string")
       );
     })
-  );
-}
-
-function isSourceAttribution(value: unknown): boolean {
-  if (value === undefined) {
-    return true;
-  }
-  const attribution = asRecord(value);
-  return (
-    attribution !== undefined &&
-    typeof attribution.name === "string" &&
-    typeof attribution.publisher === "string" &&
-    typeof attribution.url === "string"
   );
 }
 
@@ -187,7 +182,6 @@ export function isPublishedProfileResponse(
   return (
     sections !== undefined &&
     isSectionStates(profile.section_states) &&
-    isSourceAttribution(profile.source_attribution) &&
     Object.entries(sections).every(
       ([key, statements]) =>
         isSectionKey(key) &&

@@ -192,8 +192,10 @@ version at read time; keep a mutable current-version pointer.
 prevents ambiguous published versions, and preserves the append-only chain.
 
 **Consequences:** A later correction supersedes the latest successor rather
-than returning to an earlier version. Branching would require an explicit
-canonical-successor product rule before being enabled.
+than returning to an earlier version. An exact retry returns the existing
+correction, while the same pair with a different rationale is rejected.
+Branching would require an explicit canonical-successor product rule before
+being enabled.
 
 **Revisit trigger:** Revisit only if editorial policy requires intentional
 parallel correction branches and a public selection rule is approved.
@@ -289,93 +291,213 @@ JSONB unsuitable; never weaken historical reconstructability.
 
 **Revisit trigger:** Any deployment or multi-user review workflow.
 
-## D016: Couple local publication artifacts to transaction rollback
+## D016: Gate publication with immutable release-level license records
 
-**Decision:** Stage each versioned profile, finalize it for pre-commit
-inspection, and register the created artifact with the SQLAlchemy transaction
-so rollback or commit failure removes it.
+**Decision:** Every public source release must have an immutable
+`source_release_licenses` row that explicitly records commercial use,
+redistribution, derivatives, attribution, public display, raw download, terms
+date and legal status.
 
-**Context:** A database commit failure after a filesystem write could leave an
-unreferenced `profile-v1.json` that blocked a corrected retry.
+**Context:** Source-level legal status was too coarse and could not prove the
+terms that applied to an immutable release.
 
-**Alternatives considered:** Finalize only after commit; overwrite the object;
-store publication bytes in PostgreSQL.
+**Alternatives considered:** Free-text source notes; one license per source;
+publication-time configuration.
 
-**Reason:** Existing callers inspect the artifact before commit, but failed
-transactions must not reserve publication versions.
+**Reason:** Release-level snapshots make the publication decision reproducible
+when upstream terms later change.
 
-**Consequences:** Rollback and commit-failure paths remove only their newly
-created object, and the retry reuses version 1. A process crash in the gap
-remains recoverable on retry but is not fully transactional.
+**Consequences:** Missing or restricted license records block publication.
+Machine-readable standard licenses do not replace human launch approval.
 
-**Revisit trigger:** Production storage provides a durable prepare/finalize
-protocol or transactional outbox.
+**Revisit trigger:** Human counsel requires a separate approval workflow or
+license inheritance policy.
 
-## D017: Keep release-file and source-record hashes distinct
+## D017: Separate review decisions, resolution and editorial selection
 
-**Decision:** Hash exact retrieved bytes for the immutable source release and
-hash the canonical validated feature payload for its raw record and claims.
-Reject multi-record hash inference during migration and direct database writes.
+**Decision:** Record accept/reject actions in an append-only ledger; resolution
+requires already accepted claims; publication requires explicit editorial
+selection.
 
-**Context:** Reusing one collection checksum for multiple source records would
-make every claim appear to identify a record that was never independently
-hashed.
+**Context:** The inherited admin resolve action could accept candidates as a
+side effect and claim status could be mutated without a decision record.
 
-**Alternatives considered:** Reuse the release checksum; store only the
-selected feature; allow callers to omit hashes for multi-record releases.
+**Alternatives considered:** Direct claim status mutation; resolution as
+implicit acceptance; publication-time auto-review.
 
-**Reason:** The provenance chain must identify both the immutable acquired file
-and the exact record supporting each claim.
+**Reason:** Each epistemic transition must be explainable and attributable.
 
-**Consequences:** The USGS slice accepts exactly one feature per release.
-Future multi-record adapters must compute and supply each record hash.
+**Consequences:** Development fixture commands perform an explicit review step
+before resolution. The admin resolution endpoint rejects candidates.
 
-**Revisit trigger:** Raw-record storage adopts a standardized byte-preserving
-record serialization shared by every adapter.
+**Revisit trigger:** Product defines multi-reviewer quorum or appeal workflows.
 
-## D018: Keep occurrence-instant and local-date projection provenance separate
+## D018: Model annual conflict aggregates as period context
 
-**Decision:** `event_times` retains one resolved-claim reference for the
-recorded UTC occurrence and a second reference for the historical local
-civil-date assignment. Publication eligibility uses the newest integrity check
-targeting a reused source release, not only the run that first created it.
+**Decision:** Add `period_context` to temporal assignment and use it for the
+UCDP 1964 conflict-year count.
 
-**Context:** A single projection row contains facts resolved from two separate
-claims, and a later idempotent read can discover corruption in the immutable
-raw object without creating a new release.
+**Context:** `direct_record`, `uniform_period_allocation` and
+`editorial_context` each misdescribe an aggregate count over a calendar year.
 
-**Alternatives considered:** Attribute the entire projection to the occurrence
-claim; ignore rerun failures because the original ingestion passed.
+**Alternatives considered:** Reuse an existing enum; store the distinction only
+in prose.
 
-**Reason:** Both approaches sever the evidence chain from current known state.
+**Reason:** The distinction must survive database, artifact and UI boundaries.
 
-**Consequences:** Local-date projections require explicit provenance, and a
-failed integrity reread blocks publication until a later release-scoped check
-passes.
+**Consequences:** Public language states that the count describes the year, not
+the selected date.
 
-**Revisit trigger:** Event time and civil-date assignments become separate
-canonical projection tables.
+**Revisit trigger:** A broader typed derivation taxonomy replaces temporal
+assignment.
 
-## D019: Root aggregate quality statements in an explicit derived value
+## D019: Treat Wikidata as candidate discovery, not confirmation
 
-**Decision:** The public USGS quality statement uses a
-`public_event_evidence_quality` derived value with all nine current resolved
-claims as durable inputs. Raw record URIs address the canonical bytes hashed by
-their row, and claim resolution selects only leaves of supersession chains.
+**Decision:** Pinned Wikidata entity JSON creates candidate claims and review
+tasks only.
 
-**Context:** A quality grade assesses more than event identity, a corrected
-claim must replace rather than coexist with its predecessor, and a checksum can
-verify only the bytes identified by its own URI.
+**Context:** Q749610 includes values without displayed references, including a
+fatality count. Import success is not evidence acceptance, and Wikipedia-derived
+claims are not independent of their republishers.
 
-**Alternatives considered:** Point quality at event identity; ignore
-superseded rows by count; retain the release URI on raw records.
+**Alternatives considered:** Automatic event merge; use Wikidata as second
+source; exclude it entirely.
 
-**Reason:** Each alternative breaks reconstruction at a different edge of the
-evidence chain.
+**Reason:** Candidate discovery is useful while preserving the claim-first
+review contract.
 
-**Consequences:** Public provenance identifies derived quality explicitly,
-record integrity is directly verifiable, and same-release corrections remain
-resolvable.
+**Consequences:** The adapter creates no resolved claim, canonical event or
+public statement.
 
-**Revisit trigger:** Quality assessment becomes its own publication evidence
-root type with equivalent immutable input snapshots.
+**Revisit trigger:** Entity-resolution and reference-quality workflows are
+implemented.
+
+## D020: Separate Golden 100 selection from review and publication
+
+**Decision:** Store 100 candidate dates with selection rationale, manual-review
+status and publication status as separate fields.
+
+**Context:** A version-controlled list is required, but automated selection
+cannot honestly claim human editorial review.
+
+**Alternatives considered:** Mark generated candidates reviewed; defer the file;
+publish empty profiles.
+
+**Reason:** Release dashboards must remain red until the real gate is met.
+
+**Consequences:** The validator proves count, era and stress-category coverage
+while reporting zero reviewed and zero published.
+
+**Revisit trigger:** Editorial review begins.
+
+## D021: Resolve dependency advisories at framework and lockfile boundaries
+
+**Decision:** Upgrade maintained Next/FastAPI toolchains and pin vulnerable
+transitives through lockfiles rather than suppressing audits.
+
+**Context:** Playwright, Sharp/libvips, PostCSS, pytest and Starlette advisories
+were present in inherited pins.
+
+**Alternatives considered:** Audit ignores; direct incompatible transitive
+pins; document accepted risk.
+
+**Reason:** Vulnerability-free dependency resolution is a release gate.
+
+**Consequences:** Next 16 required native flat ESLint configuration and exposed
+an existing React effect issue that was corrected.
+
+**Revisit trigger:** A new audit finding or framework compatibility issue.
+
+## D022: Make editorial review transitions append-only and explicitly ordered
+
+**Decision:** Store every changed editorial decision as a new row with a
+monotonic `decision_version`, and use only the latest version for publication
+eligibility.
+
+**Context:** The original one-row uniqueness rule made a deferred or rejected
+root impossible to select later. Ordering replacement rows by transaction
+timestamps would be ambiguous because PostgreSQL `now()` is stable within a
+transaction.
+
+**Alternatives considered:** Mutate the original row; order by timestamps and
+UUIDs; maintain only the latest state.
+
+**Reason:** Editorial history is evidence and must remain reconstructable with
+deterministic ordering.
+
+**Consequences:** Migration `0010` removes one-shot indexes, adds
+`decision_version`, and blocks unsafe downgrade when history exists.
+
+**Revisit trigger:** A generalized workflow ledger replaces editorial
+selections.
+
+## D023: Couple local publication artifacts to transaction rollback
+
+**Decision:** Stage a versioned artifact, finalize it for pre-commit inspection,
+and register ownership with the SQLAlchemy session so rollback or commit failure
+removes only the artifact created by that transaction.
+
+**Context:** Writing the immutable final object before the database commit could
+leave an orphan that blocked a retry at the same version.
+
+**Alternatives considered:** Finalize only after commit; overwrite conflicts;
+store artifacts inside PostgreSQL.
+
+**Reason:** Existing publication callers inspect the artifact before commit,
+while retries must not inherit failed transaction output.
+
+**Consequences:** Ordinary rollback and commit-failure paths are clean and
+retry version 1 successfully. A process crash between object finalization and
+database commit remains a documented local-storage limitation; an unreferenced
+version is recoverable on retry.
+
+**Revisit trigger:** Production object storage provides a durable
+prepare/finalize protocol or transactional outbox.
+
+## D024: Scope editorial publication authority to section and evidence root
+
+**Decision:** Publication eligibility evaluates the latest decision for each
+date, section, root type and root identifier. Publishers declare required
+resolved and derived roots grouped by their actual public section.
+
+**Context:** A root can be appropriate for evidence notes while being rejected
+from the recorded-event section. Collapsing those decisions by root alone lets
+one section silently authorize another.
+
+**Alternatives considered:** Treat selection as profile-wide; infer sections
+from root types.
+
+**Reason:** Section placement is an epistemic claim and is already explicit in
+the editorial ledger and published artifact.
+
+**Consequences:** Every publication builder must declare the exact section for
+each statement root, and cross-section approval substitution fails closed.
+
+**Revisit trigger:** A richer editorial policy engine replaces direct section
+selection without weakening section-level authority.
+
+## D025: Serialize editorial versions and terminate review work atomically
+
+**Decision:** Editorial writers take a transaction-scoped advisory lock for
+the date/section/root identity before assigning the next version, while partial
+unique indexes enforce one row per version. Accepting or rejecting a claim
+closes its active review task in the same governance transaction, and claim IDs
+are parsed by FastAPI before database access.
+
+**Context:** Read-then-increment alone races for both first and later
+decisions; terminal claims otherwise leave unactionable queue entries; raw
+strings can reach PostgreSQL UUID operators.
+
+**Alternatives considered:** Rely only on a unique-index retry; lock only an
+existing latest row; catch DBAPI errors in the route.
+
+**Reason:** The service must serialize even the first decision, the database
+must remain a final backstop, and malformed identifiers should never reach
+persistence.
+
+**Consequences:** Competing writers wait rather than create ambiguous latest
+versions, direct duplicate inserts fail, and review/API state remains
+consistent.
+
+**Revisit trigger:** A distributed editorial command service owns sequencing
+with equivalent database guarantees.

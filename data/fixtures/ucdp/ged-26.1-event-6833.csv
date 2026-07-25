@@ -1,0 +1,2 @@
+id,relid,year,active_year,type_of_violence,conflict_new_id,conflict_name,dyad_new_id,dyad_name,side_a,side_b,country,country_id,region,date_start,date_end,date_prec,where_prec,where_coordinates,where_description,latitude,longitude,best,low,high,deaths_a,deaths_b,deaths_civilians,deaths_unknown
+6833,SUD-1989-1-641-1,1989,true,1,309,Sudan: Government,663,Government of Sudan - SPLM/A,Government of Sudan,SPLM/A,Sudan,625,Africa,1989-01-26 00:00:00.000,1989-01-26 00:00:00.000,1,1,Nasir town,Nasir town,8.600000,33.066667,100,100,1100,100,0,0,0

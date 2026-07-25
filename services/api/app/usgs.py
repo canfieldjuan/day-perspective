@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 import hashlib
-import os
-import tempfile
+import math
 import urllib.request
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import Any, Literal
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
@@ -17,13 +16,30 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.adapters.base import (
+    ClaimDraft,
+    IngestionResult,
+    LocalFilesystemRawSourceStore,
+    RawSourceStore,
+    SourceMetadata,
+)
+from app.governance import (
+    EditorialSelectionStatus,
+    LicenseInput,
+    ReviewDecisionValue,
+    assert_release_publication_eligible,
+    lineage_root_ids,
+    record_claim_review,
+    record_editorial_selection,
+    register_release_license,
+    reviewed_resolutions_for_release,
+)
 from app.models import (
     Claim,
     ClaimAssertionStatus,
     ComparabilityStatus,
     DataStatus,
     DateRole,
-    DayProfile,
     DerivedValue,
     DerivedValueInput,
     Event,
@@ -36,7 +52,6 @@ from app.models import (
     PipelineRun,
     ProfileType,
     PublicationManifest,
-    PublicationStatus,
     QualityAssessment,
     QualityCheck,
     RawSourceRecord,
@@ -59,6 +74,10 @@ from app.services import (
     publish_day_profile,
     resolve_claim,
 )
+from app.ucdp import build_ucdp_annual_profile_content
+from app.un_wpp import build_un_wpp_profile_content
+
+__all__ = ["LocalFilesystemRawSourceStore"]
 
 USGS_SOURCE_SLUG = "usgs-earthquake-catalog"
 USGS_EVENT_ID = "official19640328033616_30"
@@ -72,24 +91,49 @@ USGS_QUERY_URL = (
 )
 GOLDEN_DATE = date(1964, 3, 27)
 ALASKA_TIMEZONE = "America/Anchorage"
+USGS_TERMS_URL = (
+    "https://www.usgs.gov/information-policies-and-instructions/"
+    "copyrights-and-credits"
+)
+USGS_LICENSE_SNAPSHOT = (
+    "USGS-authored catalog data are United States public-domain government data; "
+    "USGS requests source credit and notes that unrelated third-party website "
+    "assets can have different rights."
+)
 
 
-def _current_claims_for_release(
-    session: Session, source_release_id: UUID
-) -> list[Claim]:
-    all_claims = list(
-        session.scalars(
-            select(Claim)
-            .where(Claim.source_release_id == source_release_id)
-            .order_by(Claim.claim_type, Claim.id)
-        )
+def _display_number(value: object) -> str:
+    rendered = format(Decimal(str(value)), "f")
+    integer, separator, fractional = rendered.partition(".")
+    if not separator:
+        return integer
+    trimmed_fractional = fractional.rstrip("0")
+    return (
+        integer
+        if not trimmed_fractional
+        else f"{integer}.{trimmed_fractional}"
     )
-    superseded_ids = {
-        claim.supersedes_claim_id
-        for claim in all_claims
-        if claim.supersedes_claim_id is not None
-    }
-    return [claim for claim in all_claims if claim.id not in superseded_ids]
+
+
+def _register_usgs_license(session: Session, release_id: UUID) -> None:
+    register_release_license(
+        session,
+        source_release_id=release_id,
+        license_input=LicenseInput(
+            license_identifier="US-PD-USGS",
+            license_snapshot=USGS_LICENSE_SNAPSHOT,
+            terms_url=USGS_TERMS_URL,
+            commercial_use_permission=True,
+            redistribution_permission=True,
+            derivatives_permission=True,
+            attribution_required=True,
+            attribution_text="Credit: U.S. Geological Survey.",
+            public_display_permission=True,
+            raw_download_permission=True,
+            terms_checked_at=date(2026, 7, 24),
+            legal_review_status=LegalReviewStatus.NOT_REQUIRED,
+        ),
+    )
 
 
 class USGSProperties(BaseModel):
@@ -118,7 +162,12 @@ class USGSGeometry(BaseModel):
     @model_validator(mode="after")
     def validate_ranges(self) -> USGSGeometry:
         longitude, latitude, depth = self.coordinates
-        if not -180 <= longitude <= 180 or not -90 <= latitude <= 90 or depth < 0:
+        if (
+            not all(math.isfinite(value) for value in (longitude, latitude, depth))
+            or not -180 <= longitude <= 180
+            or not -90 <= latitude <= 90
+            or depth < 0
+        ):
             raise ValueError("USGS point coordinates or depth are outside valid ranges.")
         return self
 
@@ -137,91 +186,6 @@ class USGSFeatureCollection(BaseModel):
 
     type: Literal["FeatureCollection"]
     features: list[USGSFeature]
-
-
-@dataclass(frozen=True)
-class SourceMetadata:
-    slug: str
-    name: str
-    publisher: str
-    canonical_url: str
-    usage_notes: str
-
-
-@dataclass(frozen=True)
-class ClaimDraft:
-    predicate: str
-    text: str
-    value: dict[str, Any]
-    temporal_precision: TemporalPrecision = TemporalPrecision.UNKNOWN
-    temporal_assignment: TemporalAssignment = TemporalAssignment.DIRECT_RECORD
-    date_role: DateRole | None = None
-    unit: str | None = None
-    lower_bound: Decimal | None = None
-    upper_bound: Decimal | None = None
-
-
-@dataclass(frozen=True)
-class IngestionResult:
-    pipeline_run_id: UUID | None
-    source_release_id: UUID | None
-    claim_ids: tuple[UUID, ...]
-    checksum: str
-    idempotent: bool
-    dry_run: bool
-
-
-class RawSourceStore(Protocol):
-    def write(self, source_slug: str, checksum: str, payload: bytes) -> str: ...
-
-    def read(self, storage_uri: str, expected_checksum: str) -> bytes: ...
-
-
-class LocalFilesystemRawSourceStore:
-    def __init__(self, root: Path) -> None:
-        self.root = root.resolve()
-
-    def write(self, source_slug: str, checksum: str, payload: bytes) -> str:
-        relative = Path(source_slug) / f"{checksum}.json"
-        destination = (self.root / relative).resolve()
-        if not destination.is_relative_to(self.root):
-            raise RuntimeError("Refused raw-source write outside configured storage.")
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        if destination.exists():
-            self.read(relative.as_posix(), checksum)
-            return relative.as_posix()
-        descriptor, temporary_path = tempfile.mkstemp(prefix=".raw-", dir=destination.parent)
-        try:
-            with os.fdopen(descriptor, "wb") as handle:
-                handle.write(payload)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.link(temporary_path, destination)
-        finally:
-            if os.path.exists(temporary_path):
-                os.unlink(temporary_path)
-        return relative.as_posix()
-
-    def read(self, storage_uri: str, expected_checksum: str) -> bytes:
-        candidate = (self.root / storage_uri).resolve()
-        if not candidate.is_relative_to(self.root):
-            raise RuntimeError("Refused raw-source read outside configured storage.")
-        payload = candidate.read_bytes()
-        if hashlib.sha256(payload).hexdigest() != expected_checksum:
-            raise RuntimeError("Raw source content did not match its release checksum.")
-        return payload
-
-
-class SourceAdapter(Protocol):
-    metadata: SourceMetadata
-
-    def retrieve(self, *, fixture_path: Path | None = None) -> bytes: ...
-
-    def validate(self, payload: bytes) -> USGSFeature: ...
-
-    def source_record_identity(self, record: USGSFeature) -> str: ...
-
-    def record_to_claims(self, record: USGSFeature) -> tuple[ClaimDraft, ...]: ...
 
 
 class USGSEarthquakeAdapter:
@@ -248,10 +212,6 @@ class USGSEarthquakeAdapter:
 
     def validate(self, payload: bytes) -> USGSFeature:
         parsed = USGSFeatureCollection.model_validate_json(payload)
-        if len(parsed.features) != 1:
-            raise ValueError(
-                "The USGS release must contain exactly one source record."
-            )
         matches = [feature for feature in parsed.features if feature.id == USGS_EVENT_ID]
         if len(matches) != 1:
             raise ValueError("The USGS release must contain exactly one golden source record.")
@@ -369,6 +329,67 @@ def ingest_usgs(
     fixture_path: Path | None = None,
     dry_run: bool = False,
 ) -> IngestionResult:
+    payload = adapter.retrieve(fixture_path=fixture_path)
+    checksum = hashlib.sha256(payload).hexdigest()
+    if dry_run:
+        run = PipelineRun(
+            pipeline_name="usgs-earthquake-adapter",
+            code_version="0.3.0",
+            configuration_hash=hashlib.sha256(
+                canonical_json_bytes(
+                    {
+                        "dry_run": True,
+                        "fixture": fixture_path is not None,
+                        "query_url": USGS_QUERY_URL,
+                    }
+                )
+            ).hexdigest(),
+            status="running",
+            details={
+                "dry_run": True,
+                "mode": "fixture" if fixture_path is not None else "live",
+            },
+        )
+        session.add(run)
+        session.flush()
+        try:
+            record = adapter.validate(payload)
+            drafts = adapter.record_to_claims(record)
+            record_hash = hashlib.sha256(
+                canonical_json_bytes(record.model_dump(mode="json"))
+            ).hexdigest()
+            run.status = "succeeded"
+            run.completed_at = datetime.now(UTC)
+            session.add(
+                QualityCheck(
+                    pipeline_run_id=run.id,
+                    check_name="usgs_dry_run_validation",
+                    status="passed",
+                    subject_type="pipeline_run",
+                    subject_id=run.id,
+                    details={"record_id": record.id, "claim_count": len(drafts)},
+                )
+            )
+            return IngestionResult(
+                run.id, None, (), checksum, record_hash, False, True
+            )
+        except Exception as error:
+            run.status = "failed"
+            run.completed_at = datetime.now(UTC)
+            run.details = {**run.details, "error": type(error).__name__}
+            session.add(
+                QualityCheck(
+                    pipeline_run_id=run.id,
+                    check_name="usgs_dry_run_validation",
+                    status="failed",
+                    subject_type="pipeline_run",
+                    subject_id=run.id,
+                    details={"error": str(error)},
+                )
+            )
+            session.flush()
+            raise
+
     run = PipelineRun(
         pipeline_name="usgs-earthquake-adapter",
         code_version="0.2.0",
@@ -378,36 +399,17 @@ def ingest_usgs(
             )
         ).hexdigest(),
         status="running",
-        started_at=datetime.now(UTC),
         details={"mode": "fixture" if fixture_path is not None else "live"},
     )
     session.add(run)
     session.flush()
-    quality_subject_release_id: UUID | None = None
     try:
-        payload = adapter.retrieve(fixture_path=fixture_path)
-        checksum = hashlib.sha256(payload).hexdigest()
-        if dry_run:
-            record = adapter.validate(payload)
-            adapter.record_to_claims(record)
-            run.status = "succeeded"
-            run.completed_at = datetime.now(UTC)
-            run.details = {**run.details, "dry_run": True, "checksum": checksum}
-            session.add(
-                QualityCheck(
-                    pipeline_run_id=run.id,
-                    check_name="usgs_schema_and_golden_record",
-                    status="passed",
-                    subject_type="pipeline_run",
-                    subject_id=run.id,
-                    details={"record_id": record.id, "dry_run": True},
-                )
-            )
-            return IngestionResult(run.id, None, (), checksum, False, True)
-
         with session.begin_nested():
             record = adapter.validate(payload)
             drafts = adapter.record_to_claims(record)
+            record_hash = hashlib.sha256(
+                canonical_json_bytes(record.model_dump(mode="json"))
+            ).hexdigest()
             source = session.scalar(select(Source).where(Source.slug == adapter.metadata.slug))
             if source is None:
                 source = Source(
@@ -419,10 +421,6 @@ def ingest_usgs(
                 )
                 session.add(source)
                 session.flush()
-            else:
-                source.name = adapter.metadata.name
-                source.publisher = adapter.metadata.publisher
-                source.canonical_url = adapter.metadata.canonical_url
             existing_release = session.scalar(
                 select(SourceRelease).where(
                     SourceRelease.source_id == source.id,
@@ -430,27 +428,7 @@ def ingest_usgs(
                 )
             )
             if existing_release is not None:
-                quality_subject_release_id = existing_release.id
-                raw_store.read(
-                    existing_release.raw_storage_uri,
-                    existing_release.raw_checksum_sha256,
-                )
-                existing_records = list(
-                    session.scalars(
-                        select(RawSourceRecord).where(
-                            RawSourceRecord.source_release_id == existing_release.id
-                        )
-                    )
-                )
-                if len(existing_records) != 1:
-                    raise RuntimeError(
-                        "The reused USGS release must retain exactly one raw record."
-                    )
-                for existing_record in existing_records:
-                    raw_store.read(
-                        existing_record.raw_storage_uri,
-                        existing_record.raw_checksum_sha256,
-                    )
+                _register_usgs_license(session, existing_release.id)
                 existing_claim_ids = tuple(
                     session.scalars(
                         select(Claim.id)
@@ -461,25 +439,12 @@ def ingest_usgs(
                 run.status = "succeeded"
                 run.completed_at = datetime.now(UTC)
                 run.details = {**run.details, "idempotent": True}
-                session.add(
-                    QualityCheck(
-                        pipeline_run_id=run.id,
-                        check_name="usgs_schema_and_golden_record",
-                        status="passed",
-                        subject_type="source_release",
-                        subject_id=existing_release.id,
-                        details={
-                            "record_id": record.id,
-                            "claim_count": len(existing_claim_ids),
-                            "idempotent": True,
-                        },
-                    )
-                )
                 return IngestionResult(
                     run.id,
                     existing_release.id,
                     existing_claim_ids,
                     checksum,
+                    record_hash,
                     True,
                     False,
                 )
@@ -495,6 +460,10 @@ def ingest_usgs(
                 pipeline_run_id=run.id,
                 metadata_json={
                     "dataset": "FDSN Event Web Service v1 GeoJSON",
+                    "quality_contract_version": "1",
+                    "required_quality_checks": [
+                        "usgs_schema_and_golden_record"
+                    ],
                     "retrieval_mode": "fixture" if fixture_path is not None else "live",
                     "record_locator": record.properties.url,
                     "usage_and_attribution": adapter.metadata.usage_notes,
@@ -502,25 +471,18 @@ def ingest_usgs(
                 },
                 legal_review_status=LegalReviewStatus.NOT_REQUIRED,
             )
-            record_payload = record.model_dump(mode="json")
-            record_bytes = canonical_json_bytes(record_payload)
-            record_hash = hashlib.sha256(record_bytes).hexdigest()
-            record_storage_uri = raw_store.write(
-                f"{adapter.metadata.slug}-records",
-                record_hash,
-                record_bytes,
-            )
             raw_record = RawSourceRecord(
                 source_release_id=release.id,
                 source_record_id=adapter.source_record_identity(record),
                 source_record_locator=record.properties.url,
-                raw_storage_uri=record_storage_uri,
-                raw_checksum_sha256=record_hash,
+                raw_storage_uri=storage_uri,
+                raw_checksum_sha256=checksum,
                 schema_version="usgs-fdsn-geojson-v1",
-                payload_json=record_payload,
+                payload_json=record.model_dump(mode="json"),
             )
             session.add(raw_record)
             session.flush()
+            _register_usgs_license(session, release.id)
             claims: list[Claim] = []
             for draft in drafts:
                 claim = create_claim(
@@ -570,6 +532,7 @@ def ingest_usgs(
                 release.id,
                 tuple(claim.id for claim in claims),
                 checksum,
+                record_hash,
                 False,
                 False,
             )
@@ -582,12 +545,7 @@ def ingest_usgs(
                 pipeline_run_id=run.id,
                 check_name="usgs_schema_and_golden_record",
                 status="failed",
-                subject_type=(
-                    "source_release"
-                    if quality_subject_release_id is not None
-                    else "pipeline_run"
-                ),
-                subject_id=quality_subject_release_id or run.id,
+                subject_type="pipeline_run",
                 details={"error": str(error)},
             )
         )
@@ -608,10 +566,11 @@ class ResolutionDecision:
 class EvidenceCandidate:
     value: str | float
     authoritative: bool
-    lineage_root: str
+    source_release_id: UUID
 
 
 def deterministic_resolution(
+    session: Session,
     candidates: tuple[EvidenceCandidate, ...],
     *,
     tolerance: float | None = None,
@@ -640,25 +599,19 @@ def deterministic_resolution(
         ):
             agrees = abs(float(candidate.value) - float(baseline)) <= tolerance
         (supporting if agrees else dissenting).append(index)
-    independent = len({candidates[index].lineage_root for index in supporting})
+    independent_roots: set[UUID] = set()
+    for index in supporting:
+        independent_roots.update(
+            lineage_root_ids(session, candidates[index].source_release_id)
+        )
+    independent = len(independent_roots)
     if dissenting:
         return ResolutionDecision(
             "unresolved",
             tuple(supporting),
             tuple(dissenting),
             independent,
-            "Unresolved disagreement remains outside the declared agreement rule.",
-        )
-    if not authoritative and independent < 2:
-        return ResolutionDecision(
-            "unresolved",
-            tuple(supporting),
-            (),
-            independent,
-            (
-                "Unresolved evidence lacks an authoritative source or independent "
-                "corroboration."
-            ),
+            "Unresolved disagreement remains outside a declared tolerance.",
         )
     return ResolutionDecision(
         "accepted",
@@ -688,8 +641,21 @@ def derive_quality(*, independent_sources: int, complete_predicates: int) -> tup
         "revision_stability": "immutable retrieved release; upstream record may be revised",
         "methodology_transparency": "deterministic rules and historical timezone conversion published",
     }
-    grade = "B" if independent_sources == 1 and complete_predicates >= 9 else "C"
-    if grade == "B":
+    if complete_predicates < 9:
+        grade = "C"
+        explanation = (
+            "Grade C: the available official USGS evidence is incomplete for the "
+            "required event predicates. The assessment retains the available "
+            "precision without overstating coverage."
+        )
+    elif independent_sources <= 0:
+        grade = "C"
+        explanation = (
+            "Grade C: all required event predicates are present, but no independent "
+            "source supports publication."
+        )
+    elif independent_sources == 1:
+        grade = "B"
         explanation = (
             "Grade B: the occurrence, time, epicenter, magnitude, and depth come "
             "from one validated official USGS catalog release with second-level "
@@ -698,86 +664,115 @@ def derive_quality(*, independent_sources: int, complete_predicates: int) -> tup
             "not assert a casualty value."
         )
     else:
+        grade = "B"
         explanation = (
-            f"Grade C: {complete_predicates}/9 required predicates are supported "
-            f"by {independent_sources} independent source"
-            f"{'' if independent_sources == 1 else 's'}. The evidence does not "
-            "meet the complete single-authoritative-source rule used for Grade B, "
-            "and no casualty value is asserted."
+            "Grade B: all required event predicates are present with second-level "
+            "and point-level detail, supported by "
+            f"{independent_sources} independent sources."
         )
     return grade, explanation, dimensions
 
 
-def accept_and_resolve_release(session: Session, source_release_id: UUID) -> dict[str, ResolvedClaim]:
+def accept_and_resolve_release(
+    session: Session,
+    source_release_id: UUID,
+    *,
+    review_candidates: bool = True,
+) -> dict[str, ResolvedClaim]:
     release = session.get(SourceRelease, source_release_id)
     if release is None:
         raise ValueError("Unknown source release.")
     source = session.get(Source, release.source_id)
-    if source is None or source.slug != USGS_SOURCE_SLUG:
-        raise ValueError("Golden earthquake resolution requires a USGS source release.")
     raw_record = session.scalar(
         select(RawSourceRecord).where(
-            RawSourceRecord.source_release_id == release.id,
+            RawSourceRecord.source_release_id == source_release_id,
             RawSourceRecord.source_record_id == USGS_EVENT_ID,
         )
     )
-    if raw_record is None:
+    if source is None or source.slug != USGS_SOURCE_SLUG or raw_record is None:
         raise ValueError(
-            "Golden earthquake resolution requires the expected USGS raw record."
+            "The golden resolver requires the official USGS release and event record."
         )
-    claims = _current_claims_for_release(session, source_release_id)
-    if len(claims) != 9 or len({claim.claim_type for claim in claims}) != 9:
+    claims = list(
+        session.scalars(
+            select(Claim)
+            .where(Claim.source_release_id == source_release_id)
+            .order_by(Claim.claim_type)
+        )
+    )
+    if len(claims) != 9:
         raise ValueError("The golden release must contain all nine predicate claims.")
-    allowed_statuses = {
-        ClaimAssertionStatus.CANDIDATE,
-        ClaimAssertionStatus.IN_REVIEW,
-        ClaimAssertionStatus.ACCEPTED,
-    }
-    blocked = [
-        f"{claim.claim_type}={claim.assertion_status.value}"
-        for claim in claims
-        if claim.assertion_status not in allowed_statuses
-    ]
-    if blocked:
-        raise ValueError(
-            "Non-reviewable claims block resolution: " + ", ".join(sorted(blocked))
-        )
     methodology = _methodology(session)
     resolved: dict[str, ResolvedClaim] = {}
     for claim in claims:
-        if claim.assertion_status != ClaimAssertionStatus.ACCEPTED:
-            claim.assertion_status = ClaimAssertionStatus.ACCEPTED
+        if claim.assertion_status in {
+            ClaimAssertionStatus.CANDIDATE,
+            ClaimAssertionStatus.IN_REVIEW,
+        }:
+            if not review_candidates:
+                raise ValueError(
+                    "Resolution requires claims to be explicitly accepted first."
+                )
+            record_claim_review(
+                session,
+                claim=claim,
+                decision=ReviewDecisionValue.ACCEPTED,
+                rationale="Reviewed against the validated official USGS fixture.",
+                reviewed_by="development-fixture-review",
+            )
+        elif claim.assertion_status != ClaimAssertionStatus.ACCEPTED:
+            raise ValueError("Rejected, superseded, or retracted claims cannot be resolved.")
         prior = session.scalar(
             select(ResolvedClaim)
             .where(ResolvedClaim.canonical_key == f"usgs:{USGS_EVENT_ID}:{claim.claim_type}")
             .order_by(ResolvedClaim.version.desc())
         )
-        if prior is not None and prior.resolved_value == claim.assertion_json:
-            already_supports_current_claim = session.scalar(
+        current_claim_supports_prior = (
+            prior is not None
+            and session.scalar(
                 select(ResolvedClaimEvidence.claim_id).where(
                     ResolvedClaimEvidence.resolved_claim_id == prior.id,
                     ResolvedClaimEvidence.claim_id == claim.id,
                     ResolvedClaimEvidence.stance == "supporting",
                 )
             )
-            if already_supports_current_claim is not None:
-                resolved[claim.claim_type] = prior
-                continue
-        row = resolve_claim(
-            session,
-            canonical_key=f"usgs:{USGS_EVENT_ID}:{claim.claim_type}",
-            resolved_value=claim.assertion_json or {"text": claim.assertion_text},
-            rationale=(
-                "Accepted the validated official USGS catalog claim. This is single-source "
-                "acceptance, not independent corroboration."
-            ),
-            supporting_claim_ids=[claim.id],
-            resolution_method=ResolutionMethod.SINGLE_SOURCE,
-            methodology_id=methodology.id,
-            supersedes_resolved_claim_id=prior.id if prior is not None else None,
+            is not None
         )
-        row.comparability_status = ComparabilityStatus.PARTIALLY_COMPARABLE
-        resolved[claim.claim_type] = row
+        if current_claim_supports_prior:
+            assert prior is not None
+            selected_resolution = prior
+        else:
+            selected_resolution = resolve_claim(
+                session,
+                canonical_key=f"usgs:{USGS_EVENT_ID}:{claim.claim_type}",
+                resolved_value=claim.assertion_json or {"text": claim.assertion_text},
+                rationale=(
+                    "Accepted the validated official USGS catalog claim. This is single-source "
+                    "acceptance, not independent corroboration."
+                ),
+                supporting_claim_ids=[claim.id],
+                resolution_method=(
+                    ResolutionMethod.METHODOLOGICAL_DERIVATION
+                    if claim.claim_type == "local_civil_date"
+                    else ResolutionMethod.SINGLE_SOURCE
+                ),
+                methodology_id=methodology.id,
+                supersedes_resolved_claim_id=prior.id if prior is not None else None,
+            )
+            selected_resolution.comparability_status = (
+                ComparabilityStatus.PARTIALLY_COMPARABLE
+            )
+        resolved[claim.claim_type] = selected_resolution
+        record_editorial_selection(
+            session,
+            profile_date=GOLDEN_DATE,
+            section_key="recorded_on_this_date",
+            resolved_claim_id=selected_resolution.id,
+            status=EditorialSelectionStatus.SELECTED,
+            display_rank=len(resolved),
+            rationale="Selected for the reviewed USGS golden-date recorded event.",
+            reviewed_by="development-fixture-review",
+        )
     tasks = list(
         session.scalars(
             select(ReviewTask).where(
@@ -795,7 +790,20 @@ def accept_and_resolve_release(session: Session, source_release_id: UUID) -> dic
         select(Event)
         .join(ResolvedClaim, Event.resolved_claim_id == ResolvedClaim.id)
         .where(ResolvedClaim.canonical_key == identity.canonical_key)
-        .limit(1)
+    )
+    timestamp = datetime.fromisoformat(
+        str(resolved["occurrence_timestamp"].resolved_value["utc"]).replace(
+            "Z", "+00:00"
+        )
+    )
+    local_value = resolved["local_civil_date"].resolved_value
+    local_date = date.fromisoformat(str(local_value["date"]))
+    timezone_name = str(local_value["timezone"])
+    local_timestamp = timestamp.astimezone(ZoneInfo(timezone_name))
+    display_label = (
+        f"{local_date:%B} {local_date.day}, {local_date.year} at "
+        f"{local_timestamp.hour % 12 or 12}:{local_timestamp:%M:%S} "
+        f"{local_timestamp:%p} {timezone_name}"
     )
     if event is None:
         event = Event(
@@ -810,21 +818,23 @@ def accept_and_resolve_release(session: Session, source_release_id: UUID) -> dic
     else:
         event.resolved_claim_id = identity.id
         event.event_type = str(resolved["event_type"].resolved_value["type"])
-        event.canonical_title = str(resolved["event_title"].resolved_value["title"])
-        event.data_status = DataStatus.REPORTED
-
-    timestamp = datetime.fromisoformat(
-        str(resolved["occurrence_timestamp"].resolved_value["utc"]).replace("Z", "+00:00")
-    )
-    local_value = resolved["local_civil_date"].resolved_value
-    local_date = date.fromisoformat(str(local_value["date"]))
-    timezone_name = str(local_value["timezone"])
-    local_timestamp = timestamp.astimezone(ZoneInfo(timezone_name))
+        event.canonical_title = str(
+            resolved["event_title"].resolved_value["title"]
+        )
     event_time = session.scalar(
-        select(EventTime).where(EventTime.event_id == event.id, EventTime.is_primary.is_(True))
+        select(EventTime).where(
+            EventTime.event_id == event.id,
+            EventTime.is_primary.is_(True),
+        )
     )
     if event_time is None:
-        event_time = EventTime(event_id=event.id)
+        event_time = EventTime(
+            event_id=event.id,
+            temporal_precision=TemporalPrecision.SECOND,
+            temporal_assignment=TemporalAssignment.DIRECT_RECORD,
+            date_role=DateRole.OCCURRED,
+            is_primary=True,
+        )
         session.add(event_time)
     event_time.provenance_resolved_claim_id = resolved["occurrence_timestamp"].id
     event_time.local_date_provenance_resolved_claim_id = resolved[
@@ -837,27 +847,22 @@ def accept_and_resolve_release(session: Session, source_release_id: UUID) -> dic
     event_time.timezone_name = timezone_name
     event_time.utc_offset_minutes = int(local_value["utc_offset_minutes"])
     event_time.interpretation = (
-        f"The USGS UTC occurrence falls on {local_date.isoformat()} under historical "
-        f"{timezone_name} civil-time rules "
-        f"(UTC offset {int(local_value['utc_offset_minutes'])} minutes at this instant)."
+        f"The USGS UTC occurrence is assigned to {local_date.isoformat()} under "
+        f"historical {timezone_name} civil-time rules."
     )
-    event_time.temporal_precision = TemporalPrecision.SECOND
-    event_time.temporal_assignment = TemporalAssignment.DIRECT_RECORD
-    event_time.date_role = DateRole.OCCURRED
-    event_time.is_primary = True
-    event_time.display_label = local_timestamp.strftime("%B %d, %Y at %I:%M:%S %p %Z")
-
+    event_time.display_label = display_label
     geography = session.scalar(
         select(Geography).where(Geography.stable_key == "us-ak")
     )
     if geography is None:
-        geography = Geography(stable_key="us-ak", geography_kind="state_or_territory")
+        geography = Geography(
+            stable_key="us-ak", geography_kind="state_or_territory"
+        )
         session.add(geography)
         session.flush()
     geography_version = session.scalar(
         select(GeographyVersion).where(
             GeographyVersion.geography_id == geography.id,
-            GeographyVersion.identifier_code == "US-AK",
             GeographyVersion.valid_from == date(1959, 1, 3),
         )
     )
@@ -865,7 +870,7 @@ def accept_and_resolve_release(session: Session, source_release_id: UUID) -> dic
         geography_version = GeographyVersion(
             geography_id=geography.id,
             provenance_resolved_claim_id=resolved["epicenter_geography"].id,
-            name="Alaska",
+            name=str(resolved["epicenter_geography"].resolved_value["region"]),
             identifier_code="US-AK",
             valid_from=date(1959, 1, 3),
             valid_to=None,
@@ -873,8 +878,12 @@ def accept_and_resolve_release(session: Session, source_release_id: UUID) -> dic
         )
         session.add(geography_version)
         session.flush()
-    geography_version.provenance_resolved_claim_id = resolved["epicenter_geography"].id
-
+    geography_version.provenance_resolved_claim_id = resolved[
+        "epicenter_geography"
+    ].id
+    geography_version.name = str(
+        resolved["epicenter_geography"].resolved_value["region"]
+    )
     coordinates = resolved["epicenter_coordinates"].resolved_value
     event_location = session.scalar(
         select(EventLocation).where(
@@ -887,11 +896,11 @@ def accept_and_resolve_release(session: Session, source_release_id: UUID) -> dic
             event_id=event.id,
             location_role="epicenter",
         )
-        session.add(
-            event_location
-        )
+        session.add(event_location)
     event_location.geography_version_id = geography_version.id
-    event_location.provenance_resolved_claim_id = resolved["epicenter_coordinates"].id
+    event_location.provenance_resolved_claim_id = resolved[
+        "epicenter_coordinates"
+    ].id
     event_location.point_geometry = WKTElement(
         f"POINT({coordinates['longitude']} {coordinates['latitude']})",
         srid=4326,
@@ -902,9 +911,27 @@ def accept_and_resolve_release(session: Session, source_release_id: UUID) -> dic
     grade, explanation, dimensions = derive_quality(
         independent_sources=1, complete_predicates=len(claims)
     )
+    existing_quality = session.scalar(
+        select(QualityAssessment).where(
+            QualityAssessment.source_release_id == release.id,
+            QualityAssessment.assessment_kind == "public_event_evidence_quality_v1",
+        )
+    )
+    if existing_quality is None:
+        existing_quality = QualityAssessment(
+                source_release_id=release.id,
+                methodology_id=methodology.id,
+                assessment_kind="public_event_evidence_quality_v1",
+                score=Decimal("0.80"),
+                findings=dimensions,
+                public_grade=grade,
+                public_explanation=explanation,
+                legal_review_status=LegalReviewStatus.NOT_REQUIRED,
+            )
+        session.add(existing_quality)
     quality_value = {
         "quality_grade": grade,
-        "quality_explanation": explanation,
+        "explanation": explanation,
         "dimensions": dimensions,
         "missing_data": {
             "casualties": {
@@ -928,9 +955,7 @@ def accept_and_resolve_release(session: Session, source_release_id: UUID) -> dic
                     "canonical_key": row.canonical_key,
                     "version": row.version,
                 }
-                for row in sorted(
-                    resolved.values(), key=lambda item: item.canonical_key
-                )
+                for row in sorted(resolved.values(), key=lambda item: item.canonical_key)
             ],
             "value": quality_value,
         }
@@ -965,43 +990,50 @@ def accept_and_resolve_release(session: Session, source_release_id: UUID) -> dic
                     resolved_claim_id=row.id,
                     input_role="supporting",
                 )
-                for row in sorted(
-                    resolved.values(), key=lambda item: item.canonical_key
-                )
+                for row in sorted(resolved.values(), key=lambda item: item.canonical_key)
             ]
         )
-    existing_quality = session.scalar(
-        select(QualityAssessment).where(
-            QualityAssessment.source_release_id == release.id,
-            QualityAssessment.assessment_kind == "public_event_evidence_quality_v1",
-        )
+    record_editorial_selection(
+        session,
+        profile_date=GOLDEN_DATE,
+        section_key="evidence_notes",
+        derived_value_id=quality_derived.id,
+        status=EditorialSelectionStatus.SELECTED,
+        display_rank=1,
+        rationale="Selected as the transparent evidence-quality explanation.",
+        reviewed_by="development-fixture-review",
     )
-    if existing_quality is None:
-        session.add(
-            QualityAssessment(
-                source_release_id=release.id,
-                derived_value_id=quality_derived.id,
-                methodology_id=methodology.id,
-                assessment_kind="public_event_evidence_quality_v1",
-                score=Decimal("0.80"),
-                findings=dimensions,
-                public_grade=grade,
-                public_explanation=explanation,
-                legal_review_status=LegalReviewStatus.NOT_REQUIRED,
-            )
-        )
     session.flush()
     return resolved
 
 
 def _public_provenance(
+    session: Session,
     claim: Claim,
     resolved: ResolvedClaim,
     release: SourceRelease,
     source: Source,
     methodology: Methodology,
 ) -> dict[str, Any]:
+    evidence_rows = list(
+        session.execute(
+            select(ResolvedClaimEvidence.stance, Claim)
+            .join(Claim, Claim.id == ResolvedClaimEvidence.claim_id)
+            .where(ResolvedClaimEvidence.resolved_claim_id == resolved.id)
+            .order_by(ResolvedClaimEvidence.stance, Claim.id)
+        )
+    )
+
+    def claim_summary(item: Claim) -> dict[str, Any]:
+        return {
+            "predicate": item.claim_type,
+            "value": item.assertion_json,
+            "source_record_locator": item.source_record_locator,
+            "source_record_hash_sha256": item.source_record_hash_sha256,
+        }
+
     return {
+        "root_type": "resolved_claim",
         "published_statement": "This statement is selected for the recorded-event section.",
         "resolved_claim": {
             "canonical_key": resolved.canonical_key,
@@ -1010,14 +1042,11 @@ def _public_provenance(
             "rationale": resolved.rationale,
         },
         "supporting_claims": [
-            {
-                "predicate": claim.claim_type,
-                "value": claim.assertion_json,
-                "source_record_locator": claim.source_record_locator,
-                "source_record_hash_sha256": claim.source_record_hash_sha256,
-            }
+            claim_summary(item) for stance, item in evidence_rows if stance == "supporting"
         ],
-        "dissenting_claims": [],
+        "dissenting_claims": [
+            claim_summary(item) for stance, item in evidence_rows if stance == "dissenting"
+        ],
         "source_release": {
             "source": source.name,
             "publisher": source.publisher,
@@ -1096,41 +1125,13 @@ def publish_golden_profile(
         .where(
             SourceRelease.source_id == source.id,
             QualityCheck.subject_type == "source_release",
-            QualityCheck.check_name == "usgs_schema_and_golden_record",
-            QualityCheck.status == "passed",
         )
         .order_by(PipelineRun.started_at.desc(), QualityCheck.id.desc())
     )
     if release is None:
         raise ValueError("USGS fixture has no source release.")
-    latest_release_check = session.scalar(
-        select(QualityCheck)
-        .join(PipelineRun, QualityCheck.pipeline_run_id == PipelineRun.id)
-        .where(
-            QualityCheck.subject_type == "source_release",
-            QualityCheck.subject_id == release.id,
-            QualityCheck.check_name == "usgs_schema_and_golden_record",
-        )
-        .order_by(PipelineRun.started_at.desc())
-    )
-    if latest_release_check is None or latest_release_check.status != "passed":
-        raise ValueError(
-            "The latest source-release quality check must pass before publication."
-        )
-    resolved = accept_and_resolve_release(session, release.id)
+    resolved = reviewed_resolutions_for_release(session, release.id)
     methodology = _methodology(session)
-    claims = {
-        claim.claim_type: claim
-        for claim in _current_claims_for_release(session, release.id)
-    }
-    quality = session.scalar(
-        select(QualityAssessment).where(
-            QualityAssessment.source_release_id == release.id,
-            QualityAssessment.assessment_kind == "public_event_evidence_quality_v1",
-        )
-    )
-    if quality is None or quality.public_grade is None or quality.public_explanation is None:
-        raise ValueError("A public quality assessment is required before publication.")
     current_resolution_ids = {row.id for row in resolved.values()}
     quality_derived = None
     for candidate in session.scalars(
@@ -1154,97 +1155,117 @@ def publish_golden_profile(
             break
     if quality_derived is None:
         raise ValueError("A derived public quality explanation is required.")
-    magnitude = claims["magnitude"].assertion_json or {}
-    magnitude_value = float(magnitude["value"])
-    magnitude_scale = str(magnitude["scale"])
-    magnitude_display = f"{magnitude_value:g} {magnitude_scale.title()}"
-    depth = claims["depth"].assertion_json or {}
-    depth_value = float(depth["value"])
-    depth_unit = str(depth["unit"])
-    depth_display = f"{depth_value:g} {depth_unit}"
-    occurrence = claims["occurrence_timestamp"].assertion_json or {}
-    occurrence_timestamp = datetime.fromisoformat(
-        str(occurrence["utc"]).replace("Z", "+00:00")
+    assert_release_publication_eligible(
+        session,
+        source_release_id=release.id,
+        profile_date=GOLDEN_DATE,
+        resolved_root_ids_by_section={
+            "recorded_on_this_date": {row.id for row in resolved.values()}
+        },
+        derived_root_ids_by_section={"evidence_notes": {quality_derived.id}},
     )
-    local = claims["local_civil_date"].assertion_json or {}
-    local_date = date.fromisoformat(str(local["date"]))
-    if local_date != GOLDEN_DATE:
-        raise ValueError("The selected USGS release no longer belongs to the golden date.")
-    event_title = str(claims["event_title"].assertion_text)
-    geography_display = str(claims["epicenter_geography"].assertion_text)
+    claims = {
+        claim.claim_type: claim
+        for claim in session.scalars(
+            select(Claim).where(Claim.source_release_id == release.id)
+        )
+    }
+    quality_value = quality_derived.value_json or {}
+    quality_grade = quality_value.get("quality_grade")
+    quality_explanation = quality_value.get("explanation")
+    if not isinstance(quality_grade, str) or not isinstance(
+        quality_explanation, str
+    ):
+        raise ValueError(
+            "The selected derived quality root lacks a public grade or explanation."
+        )
+    un_context = build_un_wpp_profile_content(session)
+    ucdp_context = build_ucdp_annual_profile_content(session)
+    resolved_values = {
+        predicate: row.resolved_value for predicate, row in resolved.items()
+    }
+    occurrence = datetime.fromisoformat(
+        str(resolved_values["occurrence_timestamp"]["utc"]).replace(
+            "Z", "+00:00"
+        )
+    ).astimezone(UTC)
+    local_value = resolved_values["local_civil_date"]
+    local_date = date.fromisoformat(str(local_value["date"]))
+    offset_minutes = int(local_value["utc_offset_minutes"])
+    offset_sign = "+" if offset_minutes >= 0 else "-"
+    offset_hours, offset_remainder = divmod(abs(offset_minutes), 60)
+    offset_text = f"UTC{offset_sign}{offset_hours}"
+    if offset_remainder:
+        offset_text += f":{offset_remainder:02d}"
 
     definitions = [
         (
-            "event-identity",
-            "event_identity",
-            f"USGS catalog record {claims['event_identity'].assertion_text} "
-            "identifies this event.",
-            claims["event_identity"].assertion_json or {},
-        ),
-        (
             "event-title",
             "event_title",
-            f"USGS names the event {event_title}.",
-            claims["event_title"].assertion_json or {},
-        ),
-        (
-            "event-type",
-            "event_type",
-            f"USGS classifies the record as {claims['event_type'].assertion_text}.",
-            claims["event_type"].assertion_json or {},
+            str(resolved_values["event_title"]["title"]),
+            resolved_values["event_title"],
         ),
         (
             "event-time-utc",
             "occurrence_timestamp",
-            f"USGS records the occurrence at "
-            f"{occurrence_timestamp.strftime('%Y-%m-%d %H:%M:%S')} UTC.",
-            {
-                "utc": occurrence["utc"],
-            },
+            f"USGS records the occurrence at {occurrence:%Y-%m-%d %H:%M:%S} UTC.",
+            resolved_values["occurrence_timestamp"],
         ),
         (
             "event-local-civil-date",
             "local_civil_date",
             (
-                f"Historical {local['timezone']} civil-time rules assign the "
-                f"occurrence to {local_date.strftime('%B %d, %Y')} locally "
-                f"(UTC offset {int(local['utc_offset_minutes'])} minutes)."
+                f"Historical {local_value['timezone']} civil-time rules assign "
+                f"the occurrence to {local_date:%B} {local_date.day}, "
+                f"{local_date.year} locally."
             ),
             {
-                **local,
-                "local_date": local_date.isoformat(),
+                **local_value,
                 "interpretation": (
-                    "Historical IANA civil-time assignment from the separately "
-                    "resolved local-date claim."
+                    "Methodological derivation using the IANA historical timezone "
+                    f"rule; {offset_text} at the event instant."
                 ),
             },
         ),
         (
-            "event-geography",
-            "epicenter_geography",
-            f"USGS locates the epicenter at {geography_display}.",
-            claims["epicenter_geography"].assertion_json or {},
-        ),
-        (
-            "event-coordinates",
-            "epicenter_coordinates",
-            (
-                "USGS records the epicenter coordinates as "
-                f"{claims['epicenter_coordinates'].assertion_text}."
-            ),
-            claims["epicenter_coordinates"].assertion_json or {},
-        ),
-        (
             "event-magnitude",
             "magnitude",
-            f"USGS reports a magnitude of {magnitude_display}.",
-            magnitude,
+            "USGS reports a magnitude of "
+            f"{_display_number(resolved_values['magnitude']['value'])} "
+            f"{str(resolved_values['magnitude']['scale']).upper()}.",
+            resolved_values["magnitude"],
         ),
         (
             "event-depth",
             "depth",
-            f"USGS reports a depth of {depth_display}.",
-            depth,
+            "USGS reports a depth of "
+            f"{_display_number(resolved_values['depth']['value'])} "
+            f"{resolved_values['depth']['unit']}.",
+            resolved_values["depth"],
+        ),
+        (
+            "event-geography",
+            "epicenter_geography",
+            "USGS names the location as "
+            f"{resolved_values['epicenter_geography']['display_name']}.",
+            resolved_values["epicenter_geography"],
+        ),
+        (
+            "event-coordinates",
+            "epicenter_coordinates",
+            "USGS places the epicenter at "
+            f"{_display_number(resolved_values['epicenter_coordinates']['latitude'])} "
+            "latitude, "
+            f"{_display_number(resolved_values['epicenter_coordinates']['longitude'])} "
+            "longitude.",
+            resolved_values["epicenter_coordinates"],
+        ),
+        (
+            "event-type",
+            "event_type",
+            f"USGS classifies the record as an "
+            f"{resolved_values['event_type']['type']}.",
+            resolved_values["event_type"],
         ),
     ]
     statements: list[dict[str, Any]] = []
@@ -1259,7 +1280,7 @@ def publish_golden_profile(
                 "details": details,
                 "provenance_note": "Official USGS catalog; single-source acceptance.",
                 "provenance": _public_provenance(
-                    claim, resolved_claim, release, source, methodology
+                    session, claim, resolved_claim, release, source, methodology
                 ),
             }
         )
@@ -1271,7 +1292,7 @@ def publish_golden_profile(
         )
     evidence_statement = {
         "statement_id": "quality-assessment",
-        "statement": quality.public_explanation,
+        "statement": quality_explanation,
         "details": quality_derived.value_json,
         "provenance_note": "Quality methodology v1; no opaque weighted truth score.",
         "provenance": _public_quality_provenance(
@@ -1284,13 +1305,18 @@ def publish_golden_profile(
     }
     sections = {
         "recorded_on_this_date": statements,
-        "typical_day_in_this_year": [],
-        "wider_historical_context": [],
+        "typical_day_in_this_year": un_context.typical_statements,
+        "wider_historical_context": [
+            *un_context.context_statements,
+            *ucdp_context.statements,
+        ],
         "curated_claims": [],
         "derived_comparisons": [],
         "wonder_and_progress": [],
         "evidence_notes": [evidence_statement],
     }
+    evidence.extend(un_context.evidence)
+    evidence.extend(ucdp_context.evidence)
     payload = {
         "schema_version": "1",
         "date": GOLDEN_DATE.isoformat(),
@@ -1299,7 +1325,13 @@ def publish_golden_profile(
         "section_states": {
             key: (
                 {"status": "available"}
-                if key in {"recorded_on_this_date", "evidence_notes"}
+                if key
+                in {
+                    "recorded_on_this_date",
+                    "typical_day_in_this_year",
+                    "wider_historical_context",
+                    "evidence_notes",
+                }
                 else {
                     "status": "not_yet_supported",
                     "reason": "This vertical slice does not publish this evidence class.",
@@ -1308,8 +1340,8 @@ def publish_golden_profile(
             for key in sections
         },
         "quality": {
-            "grade": quality.public_grade,
-            "explanation": quality.public_explanation,
+            "grade": quality_grade,
+            "explanation": quality_explanation,
         },
         "source_attribution": {
             "name": source.name,
@@ -1325,18 +1357,11 @@ def publish_golden_profile(
     )
     previous_manifest = session.scalar(
         select(PublicationManifest)
-        .join(
-            DayProfile,
-            DayProfile.publication_manifest_id == PublicationManifest.id,
-        )
-        .where(
-            PublicationManifest.profile_date == GOLDEN_DATE,
-            PublicationManifest.profile_type
-            == ProfileType.STANDARD_STATISTICAL,
-            PublicationManifest.status == PublicationStatus.PUBLISHED,
-        )
+        .where(PublicationManifest.profile_date == GOLDEN_DATE)
         .order_by(PublicationManifest.version.desc())
     )
+    from app.models import DayProfile
+
     previous_profile = (
         session.scalar(
             select(DayProfile).where(
@@ -1358,16 +1383,35 @@ def publish_golden_profile(
         methodology_id=methodology.id,
         editorial_revision=(previous_manifest.editorial_revision + 1 if previous_manifest else 1),
         manifest_metadata={
-            "source_release_ids": [str(release.id)],
+            "source_release_ids": [
+                str(release.id),
+                str(un_context.source_release_id),
+                str(ucdp_context.source_release_id),
+            ],
             "methodology_versions": [
-                {"slug": methodology.slug, "version": methodology.version}
+                {"slug": methodology.slug, "version": methodology.version},
+                {
+                    "slug": un_context.methodology.slug,
+                    "version": un_context.methodology.version,
+                },
+                {
+                    "slug": ucdp_context.methodology.slug,
+                    "version": ucdp_context.methodology.version,
+                },
             ],
             "resolved_claim_versions": [
                 {
                     "canonical_key": item.canonical_key,
                     "version": item.version,
                 }
-                for item in sorted(resolved.values(), key=lambda row: row.canonical_key)
+                for item in sorted(
+                    [
+                        *resolved.values(),
+                        *un_context.resolved_claims,
+                        *ucdp_context.resolved_claims,
+                    ],
+                    key=lambda row: row.canonical_key,
+                )
             ],
             "editorial_revision": (
                 previous_manifest.editorial_revision + 1 if previous_manifest else 1

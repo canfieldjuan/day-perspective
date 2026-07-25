@@ -112,15 +112,31 @@ universal score, live APIs, user features, queues, vector/graph DB, or deploymen
 is included. The foundation is designed for a senior engineer to build those
 capabilities without losing provenance or reconstructing intent.
 
-## Official USGS vertical slice
+## Current senior-takeover state
+
+The repository has one working standard-profile slice for `1964-03-27`.
+It combines reviewed USGS earthquake evidence, UN WPP annual demographic
+context and UCDP annual conflict context. Wikidata ingestion is candidate-only.
+The Golden 100 is selected but not reviewed or generated. The contracted MVP
+is **not complete**; see `docs/RELEASE_CHECKLIST.md`.
+
+## Multi-source golden slice
 
 The repository now proves one offline evidence-to-publication chain for the March 27, 1964 Alaska earthquake. Automated tests use only the committed official response in `data/fixtures/usgs/1964-prince-william-sound.geojson`; ordinary page requests never contact USGS.
 
 ```bash
-make db-reset
+make clean-reset
 make db-up
 make db-migrate
 make ingest-usgs-fixture
+make review-usgs-fixture
+make ingest-un-wpp-fixture
+make review-un-wpp-fixture
+make ingest-ucdp-annual-fixture
+make review-ucdp-annual-fixture
+make ingest-ucdp-ged-fixture
+make review-ucdp-ged-fixture
+make ingest-wikidata-fixture
 make publish-golden
 ```
 
@@ -138,7 +154,9 @@ make ingest-usgs-dry-run
 make ingest-usgs-live
 ```
 
-A changed response creates a new immutable source release. Do not use live ingestion in automated tests.
+A changed response creates a new immutable source release. Do not use live
+ingestion in automated tests. UN WPP, UCDP and Wikidata currently support the
+committed fixture path only.
 
 The minimal review API is development-only. Send `X-Development-Review-Token` with the value configured by `DEVELOPMENT_REVIEW_TOKEN` to `/api/v1/admin/claims`, `/api/v1/admin/conflicts`, `/api/v1/admin/review-tasks`, claim decision, release resolution, publication, and manifest endpoints. This guard is not secure authentication.
 
@@ -148,6 +166,45 @@ Full checks:
 make check
 make web-build
 make web-e2e
+make web-e2e-full-stack
+make validate-golden-set
 # or all repository gates
 make verify
 ```
+
+Security, operations and deployment state are documented in:
+
+- `docs/SECURITY_REVIEW.md`
+- `docs/BACKUP_RESTORE.md`
+- `docs/DEPLOYMENT.md`
+- `docs/SOURCE_LICENSES/README.md`
+- `docs/RELEASE_CHECKLIST.md`
+
+## Senior takeover status
+
+The repository is not a complete MVP. The verified current slice is one
+official USGS earthquake profile for `1964-03-27`. See
+`docs/SENIOR_TAKEOVER_AUDIT.md` and `docs/RELEASE_CHECKLIST.md` for confirmed
+behavior and red release gates.
+
+For a repeatable development reset, reset PostgreSQL and both local immutable
+storage roots together:
+
+```bash
+make clean-reset
+make db-up
+make db-migrate
+make ingest-usgs-fixture
+make review-usgs-fixture
+make ingest-un-wpp-fixture
+make review-un-wpp-fixture
+make ingest-ucdp-annual-fixture
+make review-ucdp-annual-fixture
+make ingest-ucdp-ged-fixture
+make review-ucdp-ged-fixture
+make publish-golden
+```
+
+Review is deliberately separate from publication. `publish-golden` must fail
+when claims remain candidates, review tasks remain open, required checks are not
+all passed, or the release lacks a public-display license snapshot.
