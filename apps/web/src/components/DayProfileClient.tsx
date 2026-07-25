@@ -154,11 +154,17 @@ export function DayProfileClient({
           : "An evidence-backed profile is published for this date.";
 
   const arrivalRef = useRef<HTMLElement>(null);
+  const lastFocusedDateRef = useRef<string | null>(null);
   useEffect(() => {
-    if (phase === "arrived" && state.adjacentArrival) {
+    if (
+      phase === "arrived" &&
+      state.adjacentArrival &&
+      lastFocusedDateRef.current !== state.date
+    ) {
+      lastFocusedDateRef.current = state.date;
       arrivalRef.current?.querySelector("h1")?.focus();
     }
-  }, [phase, state.adjacentArrival]);
+  }, [phase, state.adjacentArrival, state.date]);
 
   const arrivalPanel = (
     <header

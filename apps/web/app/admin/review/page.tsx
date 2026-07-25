@@ -90,7 +90,7 @@ export default function ReviewPage() {
   const releases = (data.releases?.releases || []) as JsonRecord[];
 
   return (
-    <main className="page-shell admin-shell">
+    <main className="page-shell admin-shell" id="main-content">
       <header className="masthead">
         <p className="eyebrow">Internal evidence review</p>
         <h1>Development review console</h1>

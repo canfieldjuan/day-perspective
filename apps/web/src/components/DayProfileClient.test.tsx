@@ -308,3 +308,34 @@ describe("DayProfileClient invalid-date variants", () => {
     ).toBeInTheDocument();
   });
 });
+
+describe("DayProfileClient focus discipline", () => {
+  it("does not re-steal focus when retrying the same date", async () => {
+    const { markNavigation, resetArrivalsForTests } = await import(
+      "@/src/lib/travel-store"
+    );
+    resetArrivalsForTests();
+    markNavigation();
+    const fetchMock = vi
+      .spyOn(global, "fetch")
+      .mockImplementation(async () =>
+        new Response("{}", {
+          status: 500,
+          headers: { "Content-Type": "application/json" }
+        })
+      );
+
+    render(
+      <DayProfileClient date="1964-03-28" arrival={<h1 tabIndex={-1}>March 28, 1964</h1>} />
+    );
+    await screen.findByRole("heading", { name: "The profile could not be loaded." });
+    expect(document.activeElement?.textContent).toBe("March 28, 1964");
+
+    const retry = screen.getByRole("button", { name: "Retry profile request" });
+    retry.focus();
+    fireEvent.click(retry);
+    await screen.findByRole("heading", { name: "The profile could not be loaded." });
+    expect(document.activeElement?.textContent).not.toBe("March 28, 1964");
+    fetchMock.mockRestore();
+  });
+});
