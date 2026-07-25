@@ -38,6 +38,15 @@ export function DayNavigation({ date }: { date: string }) {
         >
           <span aria-hidden="true">←</span> {formatPublicDate(previous)}
         </Link>
+      ) : valid ? (
+        <button
+          aria-label="Previous day unavailable — start of the public range"
+          className={styles.step}
+          disabled
+          type="button"
+        >
+          <span aria-hidden="true">←</span> Range start
+        </button>
       ) : null}
       <a className={styles.step} href="#historical-date">
         Another date
@@ -59,6 +68,15 @@ export function DayNavigation({ date }: { date: string }) {
         >
           {formatPublicDate(next)} <span aria-hidden="true">→</span>
         </Link>
+      ) : valid ? (
+        <button
+          aria-label="Next day unavailable — end of the public range"
+          className={styles.step}
+          disabled
+          type="button"
+        >
+          Range end <span aria-hidden="true">→</span>
+        </button>
       ) : null}
     </nav>
   );

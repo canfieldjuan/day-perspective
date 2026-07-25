@@ -21,11 +21,16 @@ describe("DayNavigation", () => {
     ).toHaveAttribute("href", "/day/1964-03-28");
   });
 
-  it("omits the edge direction at the shell boundaries instead of wrapping", () => {
+  it("disables the edge direction at the shell boundaries instead of wrapping", () => {
     render(<DayNavigation date="1900-01-01" />);
     expect(
       screen.queryByRole("link", { name: /Previous day/ })
     ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", {
+        name: "Previous day unavailable — start of the public range"
+      })
+    ).toBeDisabled();
     expect(
       screen.getByRole("link", { name: "Next day, January 2, 1900" })
     ).toBeInTheDocument();

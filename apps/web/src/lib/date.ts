@@ -58,8 +58,8 @@ export function adjacentPublicDate(
 }
 
 const SHELL_DAY_MS = 86_400_000;
-const SHELL_START_MS = Date.UTC(1900, 0, 1);
-const SHELL_END_MS = Date.UTC(2025, 11, 31);
+const SHELL_START_MS = Date.parse(PUBLIC_DATE_MIN + "T00:00:00.000Z");
+const SHELL_END_MS = Date.parse(PUBLIC_DATE_MAX + "T00:00:00.000Z");
 const SHELL_DAY_COUNT = (SHELL_END_MS - SHELL_START_MS) / SHELL_DAY_MS + 1;
 
 /** Uniform draw over the public shell; `random` is injectable for tests. */
