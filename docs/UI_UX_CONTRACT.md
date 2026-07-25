@@ -249,7 +249,7 @@ User-facing assertions use role + accessible name against canonical
 strings (C-8). Structural locators use `data-testid` from this fixed
 vocabulary: `day-arrival`, `day-nav`, `stratum-<section_key>`,
 `statement`, `evidence-chip`, `evidence-panel`,
-`publication-integrity`, `state-panel`. The fragile heading-parent walk
+`publication-integrity`, `state-panel`, `loading-line`. The fragile heading-parent walk
 in `full-stack-golden.spec.ts:33-35` is replaced by
 `stratum-evidence_notes` in slice B2. No spec asserts animation frames.
 
