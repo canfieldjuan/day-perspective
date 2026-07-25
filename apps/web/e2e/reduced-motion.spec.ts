@@ -22,7 +22,7 @@ test("loading pulse animates only when motion is allowed", async ({ page }) => {
 
   await page.goto("/day/1964-03-27");
 
-  const loadingLine = page.locator(".loading-line").first();
+  const loadingLine = page.getByTestId("loading-line").first();
   await expect(loadingLine).toBeVisible();
 
   const reducedMotion = await page.evaluate(
