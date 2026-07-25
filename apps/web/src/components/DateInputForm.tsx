@@ -18,9 +18,7 @@ type DateInputFormProps = {
 export function DateInputForm({ initialDate = "" }: DateInputFormProps) {
   const router = useRouter();
   const [error, setError] = useState<string | null>(null);
-  const [eraLine, setEraLine] = useState<string | null>(() =>
-    initialDate ? eraLineForDate(initialDate) : null
-  );
+  const [eraLine, setEraLine] = useState<string | null>(null);
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -62,11 +60,9 @@ export function DateInputForm({ initialDate = "" }: DateInputFormProps) {
       <button className="action-button" type="submit">
         Open profile
       </button>
-      {eraLine ? (
-        <p aria-live="polite" className="date-form__era">
-          {eraLine}
-        </p>
-      ) : null}
+      <p aria-live="polite" className="date-form__era" data-testid="era-live">
+        {eraLine ?? ""}
+      </p>
       {error ? (
         <p className="form-error" id="date-form-error" role="alert">
           {error}
