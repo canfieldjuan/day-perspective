@@ -837,6 +837,9 @@ def accept_and_resolve_release(
         )
         session.add(event_time)
     event_time.provenance_resolved_claim_id = resolved["occurrence_timestamp"].id
+    event_time.local_date_provenance_resolved_claim_id = resolved[
+        "local_civil_date"
+    ].id
     event_time.start_date = local_date
     event_time.end_date = local_date
     event_time.exact_timestamp = timestamp
@@ -1114,8 +1117,16 @@ def publish_golden_profile(
         raise ValueError("USGS fixture has not been ingested.")
     release = session.scalar(
         select(SourceRelease)
-        .where(SourceRelease.source_id == source.id)
-        .order_by(SourceRelease.ingested_at.desc())
+        .join(
+            QualityCheck,
+            QualityCheck.subject_id == SourceRelease.id,
+        )
+        .join(PipelineRun, QualityCheck.pipeline_run_id == PipelineRun.id)
+        .where(
+            SourceRelease.source_id == source.id,
+            QualityCheck.subject_type == "source_release",
+        )
+        .order_by(PipelineRun.started_at.desc(), QualityCheck.id.desc())
     )
     if release is None:
         raise ValueError("USGS fixture has no source release.")

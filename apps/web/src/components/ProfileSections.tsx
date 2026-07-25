@@ -16,16 +16,28 @@ type ProfileSectionsProps = {
   availability: SectionAvailability;
   sections?: PublishedDayProfile["sections"];
   sectionStates?: PublishedDayProfile["section_states"];
+  sourceAttribution?: PublishedDayProfile["source_attribution"];
 };
 
 export function ProfileSections({
   availability,
   sections,
-  sectionStates
+  sectionStates,
+  sourceAttribution
 }: ProfileSectionsProps) {
   return (
-    <div className="section-grid" aria-label="Day profile sections">
-      {DAY_PROFILE_SECTIONS.map((section, index) => {
+    <>
+      {availability === "published" && sourceAttribution ? (
+        <aside className="state-panel" aria-labelledby="source-attribution-title">
+          <p className="eyebrow">Source attribution</p>
+          <h2 id="source-attribution-title">
+            <a href={sourceAttribution.url}>{sourceAttribution.name}</a>
+          </h2>
+          <p>Published by {sourceAttribution.publisher}.</p>
+        </aside>
+      ) : null}
+      <div className="section-grid" aria-label="Day profile sections">
+        {DAY_PROFILE_SECTIONS.map((section, index) => {
         const headingId = section.id + "-heading";
         const statements = sections?.[section.key];
         const sectionState = sectionStates?.[section.key];
@@ -115,7 +127,8 @@ export function ProfileSections({
             )}
           </section>
         );
-      })}
-    </div>
+        })}
+      </div>
+    </>
   );
 }

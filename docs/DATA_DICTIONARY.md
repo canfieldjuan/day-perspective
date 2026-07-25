@@ -97,11 +97,22 @@ and temporal assignment is distinct from temporal precision.
 
 ### `raw_source_records`
 
-One immutable source record retained inside one immutable source release. `source_record_id` is unique within its release. `source_record_locator` is the public record URL; `raw_storage_uri` is an internal storage key; `raw_checksum_sha256` identifies exact bytes; `schema_version` identifies the adapter validation contract; `payload_json` retains the validated record. Update and delete are rejected. Release deletion is restricted.
+One immutable source record retained inside one immutable source release.
+`source_record_id` is unique within its release. `source_record_locator` is the
+public record URL; `raw_storage_uri` is an internal storage key;
+`raw_checksum_sha256` identifies the canonical validated record payload, while
+the release checksum identifies the exact retrieved file bytes.
+`schema_version` identifies the adapter validation contract; `payload_json`
+retains the validated record. Update and delete are rejected. Release deletion
+is restricted. `raw_storage_uri` points to the canonical record bytes whose
+SHA-256 is stored on the same row; it is not the enclosing release object.
 
 ### `claims` additions
 
-- `source_record_hash_sha256`: required 64-character SHA-256. A database insert trigger derives it from the immutable release checksum when older callers omit it.
+- `source_record_hash_sha256`: required 64-character SHA-256. A database insert
+  trigger may derive it from the immutable release checksum only for a
+  single-record release. Migration `0007` and direct inserts fail closed for
+  multi-record releases unless the actual record hash is supplied.
 - `unit`: predicate unit or measurement scale; nullable for nonnumeric predicates.
 - `lower_bound`, `upper_bound`: optional numeric uncertainty bounds. When both exist, lower must not exceed upper.
 
@@ -109,6 +120,8 @@ One immutable source record retained inside one immutable source release. `sourc
 
 - `exact_timestamp`: timezone-aware occurrence instant.
 - `local_date`: separately assigned civil date.
+- `local_date_provenance_resolved_claim_id`: resolved local-date claim that
+  supports the civil-date projection, distinct from the UTC occurrence claim.
 - `timezone_name`: IANA rule set used for conversion.
 - `utc_offset_minutes`: offset at the historical instant.
 - `interpretation`: public explanation of the assignment.

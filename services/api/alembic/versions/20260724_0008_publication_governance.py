@@ -1,14 +1,14 @@
 """Add immutable licensing, review decisions, and editorial selections.
 
-Revision ID: 20260724_0008
-Revises: 20260724_0007
+Revision ID: 20260724_0008_governance
+Revises: 20260724_0008
 Create Date: 2026-07-24
 """
 
 from alembic import op
 
-revision = "20260724_0008"
-down_revision = "20260724_0007"
+revision = "20260724_0008_governance"
+down_revision = "20260724_0008"
 branch_labels = None
 depends_on = None
 

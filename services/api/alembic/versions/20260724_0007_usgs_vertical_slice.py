@@ -42,6 +42,20 @@ def upgrade() -> None:
           FOR EACH ROW EXECUTE FUNCTION reject_raw_source_record_mutation();
 
         ALTER TABLE claims ADD COLUMN source_record_hash_sha256 VARCHAR(64);
+        DO $$
+        BEGIN
+          IF EXISTS (
+            SELECT 1
+            FROM claims
+            JOIN source_releases
+              ON source_releases.id = claims.source_release_id
+            WHERE source_releases.raw_record_count IS DISTINCT FROM 1
+          ) THEN
+            RAISE EXCEPTION
+              'cannot infer source-record hashes for claims from multi-record releases';
+          END IF;
+        END;
+        $$;
         UPDATE claims
         SET source_record_hash_sha256 = source_releases.raw_checksum_sha256
         FROM source_releases
@@ -57,10 +71,23 @@ def upgrade() -> None:
             CHECK (lower_bound IS NULL OR upper_bound IS NULL OR lower_bound <= upper_bound);
         CREATE FUNCTION populate_claim_record_hash()
         RETURNS trigger LANGUAGE plpgsql AS $$
+        DECLARE
+          release_checksum VARCHAR(64);
+          release_record_count INTEGER;
         BEGIN
           IF NEW.source_record_hash_sha256 IS NULL THEN
-            SELECT raw_checksum_sha256 INTO NEW.source_record_hash_sha256
-            FROM source_releases WHERE id = NEW.source_release_id;
+            SELECT raw_checksum_sha256, raw_record_count
+              INTO release_checksum, release_record_count
+            FROM source_releases
+            WHERE id = NEW.source_release_id;
+            IF NOT FOUND THEN
+              RETURN NEW;
+            END IF;
+            IF release_record_count IS DISTINCT FROM 1 THEN
+              RAISE EXCEPTION
+                'claims from multi-record releases require a source-record hash';
+            END IF;
+            NEW.source_record_hash_sha256 := release_checksum;
           END IF;
           RETURN NEW;
         END;
@@ -101,6 +128,19 @@ def upgrade() -> None:
 def downgrade() -> None:
     op.execute(
         """
+        DO $$
+        BEGIN
+          IF EXISTS (
+            SELECT 1 FROM claims WHERE temporal_precision::text = 'second'
+          ) OR EXISTS (
+            SELECT 1 FROM event_times WHERE temporal_precision::text = 'second'
+          ) THEN
+            RAISE EXCEPTION
+              'unsafe downgrade blocked: second-precision evidence exists';
+          END IF;
+        END;
+        $$;
+
         ALTER TABLE publication_manifests DROP COLUMN editorial_revision;
         ALTER TABLE quality_assessments
           DROP CONSTRAINT quality_assessments_public_pair,
