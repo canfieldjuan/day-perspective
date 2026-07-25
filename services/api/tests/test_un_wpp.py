@@ -26,6 +26,7 @@ from app.models import (
     RawSourceRecord,
     ResolvedClaim,
     ResolvedClaimEvidence,
+    ReviewTask,
     SourceRelease,
     TemporalAssignment,
 )
@@ -359,6 +360,23 @@ def test_supported_years_preserve_estimate_and_projection_status(
         2024: DataStatus.MODELED,
         2025: DataStatus.MODELED,
     }
+    for year, expected_classification in (
+        (2023, "estimate"),
+        (2024, "medium-variant projection"),
+        (2025, "medium-variant projection"),
+    ):
+        claim = session.scalar(
+            select(Claim).where(
+                Claim.claim_type == "population_midyear",
+                Claim.temporal_start == date(year, 1, 1),
+            )
+        )
+        assert claim is not None
+        task = session.scalar(
+            select(ReviewTask).where(ReviewTask.claim_id == claim.id)
+        )
+        assert task is not None
+        assert expected_classification in task.rationale
 
 
 def test_review_derives_every_supported_year_with_gregorian_denominators(

@@ -220,7 +220,9 @@ technically ready for public launch.
 - Ingestion creates 76 immutable raw records and 380 atomic source claims; review creates 380 resolved claims and 152 daily-equivalent derived values.
 - Fixture, live, and dry-run CLI modes are explicit; dry-run validation creates no source release.
 - Requested-year profile content uses Gregorian leap-year denominators and never presents an annual equivalent as a date-specific observation.
-- No additional profiles or datasets were added. Human licensing approval and deferred transaction-concurrency hardening remain outside this slice.
+- No additional profiles or datasets were added. Release-wide human licensing
+  inventory review and deferred transaction-concurrency hardening remain outside
+  this slice; the UN release row itself is recorded as `not_required`.
 
 ### Verification Results
 
@@ -237,5 +239,8 @@ technically ready for public launch.
 
 - Starlette warns that its httpx TestClient bridge is deprecated in favor of `httpx2`; this does not fail the current suite.
 - The first two focused-test commands used the wrong local database endpoint and then wrong credentials; both failed before test execution and were resolved by using the documented Docker Compose PostGIS service.
-- UN WPP publication remains subject to the recorded human legal-review gate.
+- UN WPP release rows are recorded as `legal_review_status=not_required` under
+  the current CC BY 3.0 IGO decision, so no UN-specific human legal-review gate
+  is enforced by publication. Release-wide human licensing review remains a
+  separate operational release gate.
 - The Golden 100, full UCDP coverage, curated catalogs, comparison models, production authentication, deployment, and issue #4 transaction-concurrency hardening remain incomplete.

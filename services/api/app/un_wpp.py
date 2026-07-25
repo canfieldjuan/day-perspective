@@ -644,7 +644,13 @@ def ingest_un_wpp(
                             status="open",
                             priority="normal",
                             rationale=(
-                                f"Review UN WPP {predicate} estimate for {record.year}."
+                                f"Review UN WPP {predicate} "
+                                + (
+                                    "medium-variant projection"
+                                    if record.data_status == DataStatus.MODELED
+                                    else "estimate"
+                                )
+                                + f" for {record.year}."
                             ),
                         )
                     )
