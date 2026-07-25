@@ -65,6 +65,19 @@ export interface ProfileStatement {
   };
 }
 
+/**
+ * How much a published profile actually offers, ordered sparse to rich.
+ * A date carrying only annual demographic context is useful, but it is not
+ * equivalent to a date with a reviewed recorded event.
+ */
+export const PUBLICATION_TIERS = [
+  "context_only",
+  "partially_enriched",
+  "reviewed_enriched"
+] as const;
+
+export type PublicationTier = (typeof PUBLICATION_TIERS)[number];
+
 export interface PublishedDayProfile {
   schema_version: "1";
   date: string;
@@ -76,6 +89,7 @@ export interface PublishedDayProfile {
       { status: "available" | "not_yet_supported"; reason?: string }
     >
   >;
+  publication_tier?: PublicationTier;
   quality?: { grade: string; explanation: string };
   source_attribution?: { name: string; publisher: string; url: string };
 }

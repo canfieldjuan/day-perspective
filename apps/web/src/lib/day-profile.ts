@@ -1,5 +1,6 @@
 import {
   DAY_PROFILE_SECTION_KEYS,
+  PUBLICATION_TIERS,
   profileTypeForDate,
   type DayProfileSectionKey,
   type ProfileNotPublished,
@@ -221,6 +222,15 @@ export function isPublishedProfileResponse(
     profile.schema_version !== "1" ||
     profile.date !== expectedDate ||
     profile.profile_type !== expectedProfileType
+  ) {
+    return false;
+  }
+
+  if (
+    profile.publication_tier !== undefined &&
+    !(PUBLICATION_TIERS as readonly string[]).includes(
+      profile.publication_tier as string
+    )
   ) {
     return false;
   }

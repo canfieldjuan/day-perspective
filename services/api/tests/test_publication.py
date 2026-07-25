@@ -914,6 +914,8 @@ def test_completed_publication_survives_unrelated_commit_failure(
     )
     assert replacement_manifest is not None
     assert replacement_manifest.version == 2
+    # The artifact carries the derived publication tier alongside the
+    # caller's payload (D031), so the stored profile is the payload plus it.
     assert store.read(
         replacement_manifest.storage_uri, replacement_manifest.content_hash
-    ) == replacement_payload
+    ) == {**replacement_payload, "publication_tier": "context_only"}

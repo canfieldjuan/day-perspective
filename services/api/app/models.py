@@ -133,6 +133,30 @@ class PublicationStatus(str, Enum):
     WITHDRAWN = "withdrawn"
 
 
+class PublicationTier(str, Enum):
+    """How much a published profile actually offers.
+
+    Ordered from sparse to rich. A date carrying only annual demographic
+    context is useful, but it is not equivalent to a date with a reviewed
+    recorded event, and the product must never imply otherwise.
+    """
+
+    CONTEXT_ONLY = "context_only"
+    PARTIALLY_ENRICHED = "partially_enriched"
+    REVIEWED_ENRICHED = "reviewed_enriched"
+
+    @property
+    def rank(self) -> int:
+        return _PUBLICATION_TIER_RANKS[self]
+
+
+_PUBLICATION_TIER_RANKS = {
+    PublicationTier.CONTEXT_ONLY: 0,
+    PublicationTier.PARTIALLY_ENRICHED: 1,
+    PublicationTier.REVIEWED_ENRICHED: 2,
+}
+
+
 class ProfileType(str, Enum):
     LIMITED_HISTORICAL = "limited_historical"
     STANDARD_STATISTICAL = "standard_statistical"
@@ -486,6 +510,10 @@ class PublicationManifest(Base):
     profile_type: Mapped[ProfileType] = mapped_column(enum_type(ProfileType, "profile_type"))
     version: Mapped[int] = mapped_column(Integer)
     editorial_revision: Mapped[int] = mapped_column(Integer, default=1)
+    publication_tier: Mapped[PublicationTier] = mapped_column(
+        enum_type(PublicationTier, "publication_tier"),
+        default=PublicationTier.CONTEXT_ONLY,
+    )
     status: Mapped[PublicationStatus] = mapped_column(
         enum_type(PublicationStatus, "publication_status"), default=PublicationStatus.DRAFT
     )

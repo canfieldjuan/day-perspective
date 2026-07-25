@@ -655,3 +655,45 @@ replays the initial reveal, which is the intended behavior.
 
 **Revisit trigger:** A router change that preserves page-subtree state
 across dynamic-param navigation.
+
+## D031: Publication tiers state how much a profile offers
+
+**Decision:** Every publication manifest records a `publication_tier` —
+`context_only`, `partially_enriched`, or `reviewed_enriched` — derived from
+the published payload at publication time, stored as an indexed column, and
+embedded in the hashed artifact so the database, the API response, the
+coverage index, and the interface describe the same thing. Derivation is a
+pure function of the payload sections: a populated `recorded_on_this_date`
+yields `reviewed_enriched`; populated `curated_claims`,
+`derived_comparisons`, or `wonder_and_progress` without a recorded event
+yield `partially_enriched`; anything else — including annual daily
+equivalents and period context — is `context_only`. A malformed payload
+degrades to `context_only`.
+
+**Context:** The archive is about to publish tens of thousands of dates
+carrying annual demographic context and nothing else. Such a date is useful,
+but it is not equivalent to 1964-03-27, and a boolean "published" flag would
+erase that difference everywhere it matters.
+
+**Alternatives considered:** Inferring richness in the frontend from section
+contents (splits the definition across languages and cannot be queried);
+storing the tier only in the artifact (not filterable for the coverage
+index); storing it only in the database (the artifact and API would not
+agree); requiring a recorded per-date human editorial review for
+`reviewed_enriched` (no such record exists as data today).
+
+**Reason:** A recorded event is the strongest signal the current pipelines
+produce, and publication already gates it behind claim review and editorial
+selection. Deriving from the payload keeps one definition, keeps the tier
+consistent with the exact bytes served, and makes the archive's honesty
+about sparseness structural rather than editorial.
+
+**Consequences:** Publication injects the tier into the payload before
+hashing, so identical content publishes identically across reruns; existing
+manifests were backfilled from their immutable statement-evidence rows
+rather than assumed; the frontend validator rejects a tier outside the
+contract vocabulary instead of rendering it.
+
+**Revisit trigger:** A per-date human editorial review becomes recorded
+data, at which point `reviewed_enriched` should require it and the current
+rule becomes `enriched`.

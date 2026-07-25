@@ -21,6 +21,7 @@ cascade-deleted.
 | `comparability_status` | `comparable`, `partially_comparable`, `not_comparable`, `unknown` |
 | `impact_directness` | `direct`, `indirect`, `modeled`, `contextual` |
 | `publication_status` | `draft`, `published`, `superseded`, `withdrawn` |
+| `publication_tier` | `context_only`, `partially_enriched`, `reviewed_enriched` | How much a published profile offers, derived from its payload sections at publication time (D031). Stored on `publication_manifests` (indexed) and embedded in the hashed artifact. |
 | `profile_type` | `limited_historical`, `standard_statistical`, `enhanced_structured` |
 | `legal_review_status` | `not_required`, `pending`, `approved`, `restricted`, `rejected` |
 | `pipeline_run_status` | `running`, `succeeded`, `failed`, `cancelled` |
