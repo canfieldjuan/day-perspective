@@ -68,11 +68,20 @@ test("renders the golden earthquake and public provenance chain", async ({ page 
   await page.goto("/day/1964-03-27");
   await expect(page.getByText("USGS reports a magnitude of 9.2 Mw.")).toBeVisible();
   await expect(page.getByTestId("evidence-chip")).toHaveText("Recorded on this date");
-  await page.getByText("Why can the app say this?").click();
+  await page.getByRole("button", { name: "Why can the app say this?" }).click();
+  const evidencePanel = page.getByTestId("evidence-panel");
   await expect(
-    page.getByRole("link", {
+    evidencePanel.getByRole("link", {
       name: "the USGS Earthquake Catalog source record"
     })
   ).toBeVisible();
-  await expect(page.getByText("None in this publication.")).toBeVisible();
+  await expect(
+    evidencePanel.getByText("None in this publication.")
+  ).toBeVisible();
+  await evidencePanel
+    .getByRole("button", { name: "Close evidence panel" })
+    .click();
+  await expect(page.getByTestId("publication-integrity")).toContainText(
+    "Manifest golden-manifest"
+  );
 });

@@ -1,24 +1,9 @@
 import { render, screen, fireEvent } from "@testing-library/react";
 import React from "react";
-import { beforeAll, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import type { ProfileStatement } from "@day-perspective/contracts";
 import { EvidencePanel } from "./EvidencePanel";
-
-beforeAll(() => {
-  // jsdom lacks full <dialog> plumbing in some versions; polyfill the bits used.
-  if (!HTMLDialogElement.prototype.showModal) {
-    HTMLDialogElement.prototype.showModal = function showModal() {
-      this.setAttribute("open", "");
-    };
-  }
-  if (!HTMLDialogElement.prototype.close) {
-    HTMLDialogElement.prototype.close = function close() {
-      this.removeAttribute("open");
-      this.dispatchEvent(new Event("close"));
-    };
-  }
-});
 
 const statement: ProfileStatement = {
   statement_id: "s-evidence",

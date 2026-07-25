@@ -31,7 +31,16 @@ test("serves the reviewed golden artifact through the complete runtime path", as
   ).toBeVisible();
 
   const qualityCard = page.getByTestId("stratum-evidence_notes");
-  await qualityCard.getByText("Why can the app say this?").click();
-  await expect(qualityCard.getByText(/Derived value/)).toBeVisible();
-  await expect(qualityCard.getByText(/calculation version 0.3.0/)).toBeVisible();
+  await qualityCard
+    .getByRole("button", { name: "Why can the app say this?" })
+    .first()
+    .click();
+  const evidencePanel = page.getByTestId("evidence-panel");
+  await expect(evidencePanel.getByText(/Derived value/)).toBeVisible();
+  await expect(evidencePanel.getByText(/calculation version 0.3.0/)).toBeVisible();
+  await evidencePanel.getByRole("button", { name: "Close evidence panel" }).click();
+  await expect(page.getByTestId("publication-integrity")).toContainText("Manifest");
+  await expect(page.getByTestId("publication-integrity")).toContainText(
+    "Content hash"
+  );
 });

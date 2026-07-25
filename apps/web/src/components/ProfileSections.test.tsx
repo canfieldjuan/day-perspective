@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import React from "react";
 import { describe, expect, it } from "vitest";
 
@@ -61,6 +61,9 @@ describe("ProfileSections provenance", () => {
 
     render(<ProfileSections availability="published" sections={sections} />);
 
+    fireEvent.click(
+      screen.getByRole("button", { name: "Why can the app say this?" })
+    );
     const links = screen.getAllByRole("link", {
         name: "the UN World Population Prospects source record"
       });
@@ -244,11 +247,10 @@ describe("ProfileSections evidence classes", () => {
       />
     );
 
-    expect(screen.getByText("Publication quality")).toBeInTheDocument();
-    expect(screen.getByText("Grade B")).toBeInTheDocument();
-    expect(
-      screen.getByText("Single validated official source.")
-    ).toBeInTheDocument();
+    const integrity = screen.getByTestId("publication-integrity");
+    expect(integrity).toHaveTextContent("Publication integrity");
+    expect(integrity).toHaveTextContent("Grade B");
+    expect(integrity).toHaveTextContent("Single validated official source.");
     expect(
       screen.getByRole("link", { name: "USGS Earthquake Catalog" })
     ).toBeInTheDocument();

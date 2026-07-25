@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DayProfileClient } from "./DayProfileClient";
@@ -165,9 +165,9 @@ describe("DayProfileClient", () => {
     expect(
       await screen.findByText("USGS reports a magnitude of 9.2 Mw.")
     ).toBeInTheDocument();
-    expect(
-      screen.getByText("Why can the app say this?")
-    ).toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Why can the app say this?" })
+    );
     expect(
       screen.getByRole("link", {
         name: "the USGS Earthquake Catalog source record"
