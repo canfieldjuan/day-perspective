@@ -59,3 +59,59 @@ describe("isPublishedProfileResponse", () => {
     ).toBe(false);
   });
 });
+
+describe("isPublishedProfileResponse optional metadata", () => {
+  function envelope(profileExtras: Record<string, unknown>) {
+    return {
+      status: "published",
+      date: "1964-03-27",
+      profile_type: "standard_statistical",
+      manifest_id: "manifest-metadata",
+      content_hash: "a".repeat(64),
+      profile: {
+        schema_version: "1",
+        date: "1964-03-27",
+        profile_type: "standard_statistical",
+        sections: { evidence_notes: [] },
+        ...profileExtras
+      }
+    };
+  }
+
+  it("accepts well-formed quality and source attribution", () => {
+    expect(
+      isPublishedProfileResponse(
+        envelope({
+          quality: { grade: "B", explanation: "Single validated source." },
+          source_attribution: {
+            name: "USGS Earthquake Catalog",
+            publisher: "U.S. Geological Survey",
+            url: "https://earthquake.usgs.gov"
+          }
+        }),
+        "1964-03-27"
+      )
+    ).toBe(true);
+  });
+
+  it("rejects malformed quality instead of letting it reach render", () => {
+    expect(
+      isPublishedProfileResponse(
+        envelope({ quality: { grade: "B", explanation: {} } }),
+        "1964-03-27"
+      )
+    ).toBe(false);
+    expect(
+      isPublishedProfileResponse(envelope({ quality: "B" }), "1964-03-27")
+    ).toBe(false);
+  });
+
+  it("rejects malformed source attribution", () => {
+    expect(
+      isPublishedProfileResponse(
+        envelope({ source_attribution: { name: "USGS", publisher: null, url: 4 } }),
+        "1964-03-27"
+      )
+    ).toBe(false);
+  });
+});

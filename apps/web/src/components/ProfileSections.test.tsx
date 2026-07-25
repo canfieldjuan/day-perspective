@@ -112,7 +112,7 @@ describe("ProfileSections evidence classes", () => {
             derived_value: {
               kind: "average_daily_births",
               calculation_version: "0.3.0",
-              value: null
+              value: {}
             }
           }
         }

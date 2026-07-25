@@ -28,7 +28,7 @@ const resolvedClaim = {
 const derivedValue = {
   kind: "average_daily_births",
   calculation_version: "0.3.0",
-  value: null
+  value: {}
 };
 
 function statement(overrides: Partial<ProfileStatement> = {}): ProfileStatement {
@@ -228,5 +228,55 @@ describe("deriveEvidenceClass", () => {
     });
     const result = deriveEvidenceClass("recorded_on_this_date", lyingRootType);
     expect(result.key).toBe("recorded");
+  });
+});
+
+describe("deriveEvidenceClass review-round hardening", () => {
+  it("treats a null derived value as unavailable, beating markers and defaults", () => {
+    const nullValueDerived = statement({
+      details: { temporal_assignment: "uniform_period_allocation" },
+      provenance: {
+        ...provenanceBase,
+        derived_value: { ...derivedValue, value: null }
+      }
+    });
+    expect(
+      deriveEvidenceClass("typical_day_in_this_year", nullValueDerived).key
+    ).toBe("unavailable");
+    expect(
+      deriveEvidenceClass("derived_comparisons", nullValueDerived).key
+    ).toBe("unavailable");
+  });
+
+  it("keeps object-valued derived statements in their normal classes", () => {
+    const objectValued = statement({
+      details: { temporal_assignment: "uniform_period_allocation" },
+      provenance: {
+        ...provenanceBase,
+        derived_value: { ...derivedValue, value: { average_daily_equivalent: 320470 } }
+      }
+    });
+    expect(
+      deriveEvidenceClass("typical_day_in_this_year", objectValued).key
+    ).toBe("daily-average");
+  });
+
+  it("carries the supplied comparability status in the comparison caveat", () => {
+    const withStatus = statement({
+      details: { comparability_status: "partially_comparable" },
+      provenance: {
+        ...provenanceBase,
+        derived_value: { ...derivedValue, value: {} }
+      }
+    });
+    const result = deriveEvidenceClass("derived_comparisons", withStatus);
+    expect(result.key).toBe("comparison");
+    expect(result.caveat).toBe("Comparability: partially_comparable.");
+  });
+
+  it("leaves the comparison caveat null when no status is supplied", () => {
+    const result = deriveEvidenceClass("derived_comparisons", derivedStatement());
+    expect(result.key).toBe("comparison");
+    expect(result.caveat).toBeNull();
   });
 });
