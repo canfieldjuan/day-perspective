@@ -1,7 +1,11 @@
 "use client";
 
-import React, { useEffect, useState, type ReactNode } from "react";
-import { isSupportedPublicDate } from "@/src/lib/date";
+import React, { useEffect, useRef, useState, type ReactNode } from "react";
+import {
+  classifyPublicDateInput,
+  formatPublicDate,
+  isSupportedPublicDate
+} from "@/src/lib/date";
 import {
   isProfileNotPublished,
   isPublishedProfileResponse
@@ -149,14 +153,37 @@ export function DayProfileClient({
           ? "Publication status unavailable."
           : "An evidence-backed profile is published for this date.";
 
+  const arrivalRef = useRef<HTMLElement>(null);
+  const lastFocusedDateRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (
+      phase === "arrived" &&
+      state.adjacentArrival &&
+      lastFocusedDateRef.current !== state.date
+    ) {
+      lastFocusedDateRef.current = state.date;
+      arrivalRef.current?.querySelector("h1")?.focus();
+    }
+  }, [phase, state.adjacentArrival, state.date]);
+
   const arrivalPanel = (
-    <header className="masthead day-arrival" data-testid="day-arrival">
+    <header
+      className="masthead day-arrival"
+      data-testid="day-arrival"
+      ref={arrivalRef}
+    >
       {arrival}
       {statusLine ? <p className="publication-status">{statusLine}</p> : null}
+      <p aria-live="polite" className="visually-hidden">
+        {phase === "arrived"
+          ? "Arrived at " + (formatPublicDate(date) ?? date) + "."
+          : ""}
+      </p>
     </header>
   );
 
   if (!isSupportedPublicDate(date)) {
+    const inputClass = classifyPublicDateInput(date);
     return (
       <div
         className="travel-shell"
@@ -166,8 +193,22 @@ export function DayProfileClient({
       >
         {arrivalPanel}
         <section className="state-panel state-panel--error" aria-labelledby="invalid-date-title">
-          <p className="eyebrow">Date outside public shell</p>
-          <h2 id="invalid-date-title">Choose a date from 1900-01-01 through 2025-12-31.</h2>
+          <p className="eyebrow">
+            {inputClass === "out-of-range"
+              ? "Date outside the public range"
+              : "Not a calendar date"}
+          </p>
+          {inputClass === "out-of-range" ? (
+            <>
+              <h2 id="invalid-date-title">This date is outside the public range.</h2>
+              <p>Records span 1900-01-01 through 2025-12-31.</p>
+            </>
+          ) : (
+            <>
+              <h2 id="invalid-date-title">This address is not a calendar date.</h2>
+              <p>Use the form YYYY-MM-DD, between 1900-01-01 and 2025-12-31.</p>
+            </>
+          )}
           <p>No profile request was made for this URL.</p>
         </section>
         <ProfileSections availability="unpublished" />

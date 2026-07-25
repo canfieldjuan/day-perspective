@@ -16,7 +16,7 @@ export default async function DayLayout({
   const { date } = await params;
 
   return (
-    <main className="page-shell">
+    <main className="page-shell" id="main-content">
       <div className="day-layout">
         <div className="day-layout__content">{children}</div>
         <DayNavigation date={date} />

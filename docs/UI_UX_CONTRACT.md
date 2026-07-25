@@ -210,6 +210,23 @@ payload-level grouping signal is deferred to backend coordination
    content was published for this section."; both render as seams (C-5.2).
 4. Missing values render their `missing_data_explanation`/reason when the
    payload provides one. Never zero-fill, never estimate in copy.
+5. **Implementation canon (backfilled by slice G).** Strings introduced
+   during the arc, now canonical: arrival status lines — "An
+   evidence-backed profile is published for this date." / "No profile is
+   published for this date." / "Publication status unavailable." / "No
+   profile request was made for this address." (loading renders no
+   arrival status line; the pending panel keeps its C-8.1 eyebrow);
+   recorded quiet-date seam "No reviewed event is published for this
+   date."; reasonless unsupported seam "This section is not yet
+   supported by an implemented pipeline."; integrity-strip eyebrow
+   "Publication integrity"; evidence-panel labels ("Evidence", "Why
+   published", "Evidence quality", "Close evidence panel", and the
+   dissent link pattern "the dissenting {source} source record");
+   navigation labels ("Previous day, {date}", "Next day, {date}",
+   "Another date", "Random day", and the edge labels "Previous/Next day
+   unavailable — start/end of the public range"); the arrival
+   announcement "Arrived at {date}."; the skip link "Skip to main
+   content".
 
 ## C-9 Evidence interaction
 
@@ -250,7 +267,7 @@ strings (C-8). Structural locators use `data-testid` from this fixed
 vocabulary: `day-arrival`, `day-nav`, `stratum-<section_key>`,
 `statement`, `evidence-chip`, `evidence-panel`,
 `publication-integrity`, `state-panel`, `loading-line`,
-`travel-shell`, `era-live`. The fragile heading-parent walk
+`travel-shell`, `era-live`, `era-horizon`. The fragile heading-parent walk
 in `full-stack-golden.spec.ts:33-35` is replaced by
 `stratum-evidence_notes` in slice B2. No spec asserts animation frames.
 

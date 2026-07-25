@@ -130,3 +130,31 @@ h2 {
     animation: none;
   }
 }
+
+.visually-hidden {
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  height: 1px;
+  overflow: hidden;
+  position: absolute;
+  white-space: nowrap;
+  width: 1px;
+}
+
+.skip-link {
+  background: var(--ink);
+  color: var(--panel);
+  left: 0.5rem;
+  padding: 0.6rem 1rem;
+  position: absolute;
+  top: -100vh;
+  z-index: 20;
+}
+
+.skip-link:focus-visible {
+  top: 0.5rem;
+}
+
+.day-arrival h1:focus-visible {
+  outline-offset: 6px;
+}

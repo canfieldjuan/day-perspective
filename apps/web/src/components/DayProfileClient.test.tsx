@@ -287,3 +287,55 @@ describe("DayProfileClient arrival panel", () => {
     }
   });
 });
+
+describe("DayProfileClient invalid-date variants", () => {
+  it("tells a real out-of-range date apart from a malformed address", () => {
+    const { unmount } = render(<DayProfileClient date="1899-12-31" />);
+    expect(
+      screen.getByRole("heading", { name: "This date is outside the public range." })
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Records span 1900-01-01 through 2025-12-31.")
+    ).toBeInTheDocument();
+    unmount();
+
+    render(<DayProfileClient date="1964-02-30" />);
+    expect(
+      screen.getByRole("heading", { name: "This address is not a calendar date." })
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Use the form YYYY-MM-DD, between 1900-01-01 and 2025-12-31.")
+    ).toBeInTheDocument();
+  });
+});
+
+describe("DayProfileClient focus discipline", () => {
+  it("does not re-steal focus when retrying the same date", async () => {
+    const { markNavigation, resetArrivalsForTests } = await import(
+      "@/src/lib/travel-store"
+    );
+    resetArrivalsForTests();
+    markNavigation();
+    const fetchMock = vi
+      .spyOn(global, "fetch")
+      .mockImplementation(async () =>
+        new Response("{}", {
+          status: 500,
+          headers: { "Content-Type": "application/json" }
+        })
+      );
+
+    render(
+      <DayProfileClient date="1964-03-28" arrival={<h1 tabIndex={-1}>March 28, 1964</h1>} />
+    );
+    await screen.findByRole("heading", { name: "The profile could not be loaded." });
+    expect(document.activeElement?.textContent).toBe("March 28, 1964");
+
+    const retry = screen.getByRole("button", { name: "Retry profile request" });
+    retry.focus();
+    fireEvent.click(retry);
+    await screen.findByRole("heading", { name: "The profile could not be loaded." });
+    expect(document.activeElement?.textContent).not.toBe("March 28, 1964");
+    fetchMock.mockRestore();
+  });
+});

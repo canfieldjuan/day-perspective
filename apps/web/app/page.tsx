@@ -1,3 +1,5 @@
+import { PUBLIC_DATE_MAX, PUBLIC_DATE_MIN } from "@day-perspective/contracts";
+
 import { DateInputForm } from "@/src/components/DateInputForm";
 import { ERA_BANDS } from "@/src/lib/day-profile";
 
@@ -7,12 +9,13 @@ function bandYears(band: { start: string; end: string }): number {
 
 export default function HomePage() {
   return (
-    <main className="page-shell">
+    <main className="page-shell" id="main-content">
       <header className="masthead landing-masthead">
         <p className="eyebrow">Historical perspective</p>
         <h1 className="landing-title">Stand inside one day of the record.</h1>
         <p className="lede">
-          Choose a date between 1900 and 2025. A published profile keeps
+          Choose a date between {PUBLIC_DATE_MIN.slice(0, 4)} and{" "}
+          {PUBLIC_DATE_MAX.slice(0, 4)}. A published profile keeps
           recorded events, period context, calculations, and uncertainty
           visibly separate — and says plainly what the evidence cannot
           support.

@@ -96,3 +96,15 @@ describe("canonicalizePublicDatePath", () => {
     expect(canonicalizePublicDatePath("1964-003-27")).toBeNull();
   });
 });
+
+describe("classifyPublicDateInput", () => {
+  it("separates supported, out-of-range, and malformed inputs", async () => {
+    const { classifyPublicDateInput } = await import("./date");
+    expect(classifyPublicDateInput("1964-03-27")).toBe("supported");
+    expect(classifyPublicDateInput("1899-12-31")).toBe("out-of-range");
+    expect(classifyPublicDateInput("2026-01-01")).toBe("out-of-range");
+    expect(classifyPublicDateInput("1964-02-30")).toBe("malformed");
+    expect(classifyPublicDateInput("not-a-date")).toBe("malformed");
+    expect(classifyPublicDateInput("1964-3-27")).toBe("malformed");
+  });
+});

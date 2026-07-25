@@ -8,7 +8,7 @@ export default function RootError({
   reset: () => void;
 }) {
   return (
-    <main className="page-shell">
+    <main className="page-shell" id="main-content">
       <section className="state-panel state-panel--error" aria-labelledby="page-error-title">
         <p className="eyebrow">Page unavailable</p>
         <h1 id="page-error-title">The page could not be rendered.</h1>

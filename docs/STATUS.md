@@ -244,3 +244,27 @@ technically ready for public launch.
   is enforced by publication. Release-wide human licensing review remains a
   separate operational release gate.
 - The Golden 100, full UCDP coverage, curated catalogs, comparison models, production authentication, deployment, and issue #4 transaction-concurrency hardening remain incomplete.
+
+## Time-Travel UI arc (2026-07-25)
+
+The public web experience was rebuilt as the "Strata" direction
+(`docs/UI_UX_DIRECTIONS.md`, binding contract `docs/UI_UX_CONTRACT.md`)
+across serial slices A0/B1/B2/C/B3/E/F/G, tracked on epic issue #7 with
+one issue and one PR per slice, each through the Codex review loop under
+the root `CLAUDE.md` working agreement.
+
+Shipped: split CSS foundation with mobile and reduced-motion Playwright
+projects; per-statement evidence-class chips and caveats derived from
+validated payload signals; the Strata day-page anatomy (date monument in
+a committed OFL display face, era lines, honest seams, lead-statement
+emphasis); persistent blind date navigation with canonical 308 URLs and
+per-date metadata; the modal evidence panel with dissent at equal
+completeness and a publication-integrity strip (manifest id and content
+hash now rendered); CSS-only travel choreography with reduced-motion
+equivalence; the era-horizon landing; split invalid states, skip link,
+and focus-managed date changes.
+
+Verification at arc close: 80 web unit tests, 51 mocked e2e checks
+across three Playwright projects (desktop, Pixel 7, reduced-motion),
+production build, full `make check`. The full-stack Playwright spec runs
+against the real golden artifact in CI.
