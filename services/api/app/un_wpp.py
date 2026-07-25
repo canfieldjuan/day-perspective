@@ -78,6 +78,9 @@ UN_WPP_LICENSE_SNAPSHOT = (
 UN_WPP_WORKBOOK_SHA256 = (
     "98e34d9b65b53858cd08a57a566e45050b08093ad85ba5714fe6fbd78055ae6d"
 )
+UN_WPP_NORMALIZED_FIXTURE_SHA256 = (
+    "a491914da7e942feb016304ada0c9c43f5c7d576fc15bf3541ba54c16a4aa039"
+)
 GOLDEN_YEAR = 1964
 GOLDEN_DATE = date(1964, 3, 27)
 SUPPORTED_YEARS = frozenset(range(1950, 2026))
@@ -555,10 +558,14 @@ def ingest_un_wpp(
                     "file_identity": "GEN/01/REV1",
                     "input_format": input_format,
                     "fixture": fixture_path is not None,
-                    "upstream_source_file_sha256": (
-                        UN_WPP_WORKBOOK_SHA256
-                        if fixture_path is not None
-                        else checksum
+                    **(
+                        {"upstream_source_file_sha256": checksum}
+                        if input_format == "official_xlsx"
+                        else {
+                            "upstream_source_file_sha256": UN_WPP_WORKBOOK_SHA256
+                        }
+                        if checksum == UN_WPP_NORMALIZED_FIXTURE_SHA256
+                        else {}
                     ),
                     "variants": ["Estimates", "Medium"],
                     "supported_year_start": min(SUPPORTED_YEARS),
@@ -781,8 +788,13 @@ def review_un_wpp(
                 canonical_key=canonical_key,
                 resolved_value=claim.assertion_json or {},
                 rationale=(
-                    "Accepted one attributed official UN WPP estimate. The estimate "
-                    "status and annual resolution remain visible."
+                    "Accepted one attributed official UN WPP "
+                    + (
+                        "medium-variant projection. The modeled"
+                        if claim.data_status == DataStatus.MODELED
+                        else "estimate. The estimated"
+                    )
+                    + " status and annual resolution remain visible."
                 ),
                 supporting_claim_ids=[claim.id],
                 resolution_method=ResolutionMethod.SINGLE_SOURCE,
@@ -808,9 +820,6 @@ def review_un_wpp(
             )
             session.add(metric)
             session.flush()
-        else:
-            metric.provenance_resolved_claim_id = resolved_row.id
-            metric.methodology_id = methodology.id
         observation = session.scalar(
             select(Observation).where(
                 Observation.metric_id == metric.id,
@@ -941,11 +950,6 @@ def review_un_wpp(
                     )
                     session.add(daily_metric)
                     session.flush()
-                else:
-                    daily_metric.provenance_resolved_claim_id = (
-                        resolved_input.id
-                    )
-                    daily_metric.methodology_id = methodology.id
                 derived = DerivedValue(
                     metric_id=daily_metric.id,
                     methodology_id=methodology.id,

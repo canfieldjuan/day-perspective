@@ -18,6 +18,7 @@ from app.models import (
     ClaimAssertionStatus,
     DataStatus,
     DerivedValue,
+    Metric,
     PipelineRun,
     QualityCheck,
     RawSourceRecord,
@@ -27,6 +28,8 @@ from app.models import (
     TemporalAssignment,
 )
 from app.un_wpp import (
+    UN_WPP_NORMALIZED_FIXTURE_SHA256,
+    UN_WPP_WORKBOOK_SHA256,
     WORKBOOK_COLUMNS,
     LocalFilesystemRawSourceStore,
     WPPIngestionResult,
@@ -95,6 +98,13 @@ def test_fixture_ingestion_preserves_records_claims_license_run_and_check(
     assert session.scalar(select(func.count()).select_from(Claim)) == 380
     assert session.scalar(select(PipelineRun.status)) == "succeeded"
     assert session.scalar(select(QualityCheck.status)) == "passed"
+    release = session.get(SourceRelease, result.source_release_id)
+    assert release is not None
+    assert (
+        release.metadata_json["upstream_source_file_sha256"]
+        == UN_WPP_WORKBOOK_SHA256
+    )
+    assert result.checksum == UN_WPP_NORMALIZED_FIXTURE_SHA256
     license_row = session.get(SourceReleaseLicense, result.source_release_id)
     assert license_row is not None
     assert license_row.license_identifier == "CC-BY-3.0-IGO"
@@ -219,6 +229,9 @@ def test_revised_wpp_release_versions_resolution_and_daily_equivalent(
         raw_store=LocalFilesystemRawSourceStore(tmp_path / "raw"),
     )
     assert second.source_release_id is not None
+    second_release = session.get(SourceRelease, second.source_release_id)
+    assert second_release is not None
+    assert "upstream_source_file_sha256" not in second_release.metadata_json
     review_un_wpp(session, second.source_release_id)
     latest = session.scalar(
         select(ResolvedClaim)
@@ -319,6 +332,7 @@ def test_official_workbook_shape_ingests_without_network(
     release = session.get(SourceRelease, result.source_release_id)
     assert release is not None
     assert release.metadata_json["input_format"] == "official_xlsx"
+    assert release.metadata_json["upstream_source_file_sha256"] == result.checksum
 
 
 def test_supported_years_preserve_estimate_and_projection_status(
@@ -368,6 +382,32 @@ def test_review_derives_every_supported_year_with_gregorian_denominators(
         if row.value_json is not None
     }
     assert days == {1964: 366, 2023: 365, 2024: 366}
+    for metric_key, claim_type in (
+        ("un-wpp:annual_births", "annual_births"),
+        ("app:average_daily_births", "annual_births"),
+    ):
+        metric = session.scalar(select(Metric).where(Metric.metric_key == metric_key))
+        assert metric is not None
+        metric_provenance = session.get(
+            ResolvedClaim,
+            metric.provenance_resolved_claim_id,
+        )
+        assert metric_provenance is not None
+        assert metric_provenance.canonical_key == f"un-wpp:world:1950:{claim_type}"
+    for year in (1964, 2025):
+        derived = session.scalar(
+            select(DerivedValue).where(
+                DerivedValue.value_kind == "average_daily_births",
+                DerivedValue.period_start == date(year, 1, 1),
+            )
+        )
+        assert derived is not None
+        year_provenance = session.get(
+            ResolvedClaim,
+            derived.provenance_resolved_claim_id,
+        )
+        assert year_provenance is not None
+        assert year_provenance.canonical_key == f"un-wpp:world:{year}:annual_births"
 
 
 def test_profile_content_selects_requested_projection_year(
@@ -404,6 +444,10 @@ def test_profile_content_selects_requested_projection_year(
     )
     assert "medium-variant projected annual value" in str(
         content.typical_statements[0]["provenance_note"]
+    )
+    assert all(
+        "medium-variant projection" in str(statement["provenance"])
+        for statement in content.context_statements
     )
     assert "not an observation for July 20" in str(
         content.typical_statements[0]["statement"]
