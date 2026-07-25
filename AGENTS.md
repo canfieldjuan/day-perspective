@@ -9,10 +9,12 @@ only this file; if the two files drift, `CLAUDE.md` wins.
    lines (excluding lockfiles, fixtures, and generated files) means split
    before opening.
 
-2. **Review loop order.** Address EVERY review thread — push a fix, or
-   reply with reasoned evidence — before resolving anything. Only an
-   addressed thread gets resolved. Never resolve a thread you have not
-   addressed; never merge with unresolved threads.
+2. **Review loop.** After opening a PR, wait for the reviewer to file a
+   review. Address EVERY thread — push a fix, or reply with reasoned
+   evidence — before resolving anything. Only an addressed thread gets
+   resolved. Then wait for the next round. Post a "round N addressed"
+   comment per round so the round count is auditable. Never resolve a
+   thread you have not addressed; never merge with unresolved threads.
 
 3. **Three-round convergence rule.** If review has not converged after 3
    rounds, stop pushing fixes: reassess PR scope (split if too broad), and

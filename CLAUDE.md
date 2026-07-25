@@ -120,9 +120,18 @@ test-only and never masquerade as production facts.
 - `gh` auth: an invalid `GH_TOKEN` env var can shadow working keyring auth;
   if `gh` returns 401, retry as `env -u GH_TOKEN gh …`.
 - Verify locally before pushing: `make check` on every push, `make verify`
-  before opening a PR. CI runs the full pipeline (~30 minutes) on every PR —
-  local verification is cheaper than CI discovery.
+  before opening a PR. `make verify` is not self-contained: it needs a
+  running migrated database with the golden fixture published and
+  Playwright browsers installed first — from a fresh checkout run
+  `make db-up && make db-migrate`, then the fixture ingest/review cycle
+  ending in `make publish-golden` (exact order in `README.md` and
+  `.github/workflows/ci.yml`), then `make verify`. CI runs the same
+  pipeline (~30 minutes) on every PR — local verification is cheaper
+  than CI discovery.
 - e2e selectors: role + accessible name for user-facing assertions,
-  `data-testid` for structural locators. Canonical user-facing strings live
-  in `docs/UI_UX_CONTRACT.md`; changing one is a contract amendment, not a
-  per-PR debate.
+  `data-testid` for structural locators. Once `docs/UI_UX_CONTRACT.md`
+  exists and merges (a UI-arc deliverable), canonical user-facing strings
+  live there and changing one is a contract amendment, not a per-PR
+  debate. Until then, the strings asserted by the existing e2e and
+  component tests are the de facto canon; change one only with an
+  explicit callout in the PR description.
