@@ -61,8 +61,12 @@ def upgrade() -> None:
         "DISABLE TRIGGER publication_manifests_final_immutable"
     )
 
+    # starts_with is an exact prefix test: LIKE would treat every underscore
+    # in these section names as a single-character wildcard and could
+    # overstate a lookalike path's tier.
     editorial_predicate = " OR ".join(
-        f"evidence.statement_path LIKE '{prefix}%'" for prefix in EDITORIAL_PREFIXES
+        f"starts_with(evidence.statement_path, '{prefix}')"
+        for prefix in EDITORIAL_PREFIXES
     )
     op.execute(
         f"""
@@ -82,7 +86,7 @@ def upgrade() -> None:
         WHERE EXISTS (
             SELECT 1 FROM publication_statement_evidence AS evidence
             WHERE evidence.publication_manifest_id = manifests.id
-              AND evidence.statement_path LIKE '{RECORDED_PREFIX}%'
+              AND starts_with(evidence.statement_path, '{RECORDED_PREFIX}')
         )
         """
     )

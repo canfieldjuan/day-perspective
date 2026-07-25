@@ -15,7 +15,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import ProfileType, PublicationManifest, PublicationTier
+from app.models import DayProfile, ProfileType, PublicationManifest, PublicationTier
 from app.services import (
     LocalFilesystemPublishedProfileStore,
     PublicationStatementEvidenceInput,
@@ -225,3 +225,83 @@ def test_tier_is_queryable_for_coverage(session: Session, tmp_path: Path) -> Non
             )
         )
     ) == [PublicationTier.REVIEWED_ENRICHED]
+
+
+@pytest.mark.integration
+def test_api_serves_the_backfilled_tier_for_a_pre_tier_artifact(
+    session: Session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Artifacts published before tiers existed are byte-immutable and carry
+    none. Their backfilled tier must still reach the API and interface, or
+    coverage would report richness the product never shows."""
+    from datetime import UTC, datetime
+
+    from fastapi.testclient import TestClient
+
+    from app import main
+    from app.database import get_session
+    from app.models import PublicationStatus
+    from app.services import content_hash
+
+    store = LocalFilesystemPublishedProfileStore(tmp_path)
+    legacy_date = date(1971, 6, 15)
+    legacy_payload: dict[str, object] = {
+        "schema_version": "1",
+        "date": legacy_date.isoformat(),
+        "profile_type": PROFILE_TYPE.value,
+        "sections": {"evidence_notes": []},
+    }
+    assert "publication_tier" not in legacy_payload
+    staged = store.stage_versioned(legacy_date, 1, legacy_payload)
+    staged.finalize()
+    session.add(
+        PublicationManifest(
+            profile_date=legacy_date,
+            profile_type=PROFILE_TYPE,
+            version=1,
+            editorial_revision=1,
+            status=PublicationStatus.PUBLISHED,
+            published_at=datetime.now(UTC),
+            publication_tier=PublicationTier.PARTIALLY_ENRICHED,
+            content_hash=content_hash(legacy_payload),
+            source_snapshot_hash="0" * 64,
+            storage_uri=staged.storage_uri,
+            code_version="test",
+            metadata_json={},
+        )
+    )
+    session.flush()
+    legacy_manifest = session.scalar(
+        select(PublicationManifest).where(
+            PublicationManifest.profile_date == legacy_date
+        )
+    )
+    assert legacy_manifest is not None
+    session.add(
+        DayProfile(
+            profile_date=legacy_date,
+            profile_type=PROFILE_TYPE,
+            publication_manifest_id=legacy_manifest.id,
+            content_hash=legacy_manifest.content_hash,
+        )
+    )
+    session.commit()
+
+    monkeypatch.setattr(main.settings, "published_profile_root", tmp_path)
+
+    def override_session() -> object:
+        yield session
+
+    main.app.dependency_overrides[get_session] = override_session
+    try:
+        response = TestClient(main.app).get(f"/api/v1/day/{legacy_date.isoformat()}")
+    finally:
+        main.app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["profile"]["publication_tier"] == "partially_enriched"
+    # The artifact itself is untouched: verification still runs on its bytes.
+    assert "publication_tier" not in store.read(
+        staged.storage_uri, content_hash(legacy_payload)
+    )

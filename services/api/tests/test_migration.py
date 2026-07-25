@@ -89,6 +89,7 @@ def test_publication_tier_backfill_derives_from_statement_evidence(
 
     context_date = date(1969, 7, 20)
     enriched_date = date(1970, 1, 2)
+    lookalike_date = date(1972, 3, 3)
     publish_day_profile(
         session,
         store=store,
@@ -125,6 +126,29 @@ def test_publication_tier_backfill_derives_from_statement_evidence(
             mapping("recorded", "/sections/recorded_on_this_date/0")
         ],
     )
+    # A section key that merely resembles the recorded-event path must not be
+    # backfilled as enriched: every underscore in a LIKE pattern is a
+    # single-character wildcard. Evidence is immutable after publication, so
+    # the lookalike path is established at publication time.
+    publish_day_profile(
+        session,
+        store=store,
+        profile_date=lookalike_date,
+        profile_type=ProfileType.STANDARD_STATISTICAL,
+        payload={
+            "schema_version": "1",
+            "date": lookalike_date.isoformat(),
+            "profile_type": "standard_statistical",
+            "sections": {
+                "recordedXonYthisZdate": [
+                    {"statement_id": "lookalike", "statement": "lookalike"}
+                ]
+            },
+        },
+        statement_evidence=[
+            mapping("lookalike", "/sections/recordedXonYthisZdate/0")
+        ],
+    )
     session.commit()
     session.close()
 
@@ -155,5 +179,6 @@ def test_publication_tier_backfill_derives_from_statement_evidence(
             }
         assert observed[context_date.isoformat()] == "context_only"
         assert observed[enriched_date.isoformat()] == "reviewed_enriched"
+        assert observed[lookalike_date.isoformat()] == "context_only"
     finally:
         engine.dispose()
