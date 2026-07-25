@@ -458,3 +458,42 @@ describe("ProfileSections publication integrity", () => {
     expect(screen.getByText("a1b2c3d4e5f6".padEnd(64, "0"))).toBeInTheDocument();
   });
 });
+
+describe("ProfileSections evidence-panel quality fallback", () => {
+  it("falls back to the profile-level grade when a statement carries none", () => {
+    const sections = {
+      ...emptySections,
+      recorded_on_this_date: [
+        {
+          statement_id: "no-grade",
+          statement: "Synthetic statement without its own grade.",
+          provenance: {
+            ...testProvenance,
+            resolved_claim: {
+              canonical_key: "test:nograde",
+              version: 1,
+              method: "single_source",
+              rationale: "Accepted."
+            }
+          }
+        }
+      ]
+    } as PublishedDayProfile["sections"];
+
+    render(
+      <ProfileSections
+        availability="published"
+        sections={sections}
+        profileDate="1964-03-27"
+        quality={{ grade: "B", explanation: "Profile-level assessment." }}
+      />
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Why can the app say this?" })
+    );
+    const panel = screen.getByTestId("evidence-panel");
+    expect(panel).toHaveTextContent("Evidence quality");
+    expect(panel).toHaveTextContent("Grade B");
+  });
+});
