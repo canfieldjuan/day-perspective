@@ -1,0 +1,72 @@
+.admin-shell {
+  max-width: 90rem;
+}
+
+.admin-token-form,
+.admin-panel__heading,
+.admin-release {
+  align-items: center;
+  display: flex;
+  gap: 0.75rem;
+}
+
+.admin-token-form {
+  flex-wrap: wrap;
+}
+
+.admin-token-form input {
+  min-height: 2.8rem;
+  min-width: min(28rem, 100%);
+}
+
+.admin-status {
+  border-left: 4px solid var(--accent);
+  margin: 1rem 0 2rem;
+  padding-left: 0.75rem;
+}
+
+.admin-panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  margin-top: 1rem;
+  padding: 1rem;
+}
+
+.admin-panel__heading {
+  justify-content: space-between;
+}
+
+.admin-table-wrap {
+  overflow-x: auto;
+}
+
+.admin-panel table {
+  border-collapse: collapse;
+  min-width: 58rem;
+  width: 100%;
+}
+
+.admin-panel th,
+.admin-panel td {
+  border-top: 1px solid var(--line);
+  padding: 0.65rem;
+  text-align: left;
+  vertical-align: top;
+}
+
+.admin-mono,
+.admin-panel pre {
+  font-family: "Courier New", monospace;
+  font-size: 0.76rem;
+}
+
+.admin-panel pre {
+  overflow-x: auto;
+  white-space: pre-wrap;
+}
+
+.admin-release {
+  border-top: 1px solid var(--line);
+  justify-content: space-between;
+  padding: 0.75rem 0;
+}

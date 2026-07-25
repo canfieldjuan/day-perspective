@@ -527,3 +527,62 @@ revision tests must preserve immutable earlier releases.
 
 **Revisit trigger:** A later official WPP release reclassifies the supported
 years or product policy excludes projected annual context.
+
+## D027: UI-arc CSS architecture — split global files plus CSS Modules
+
+**Decision:** The single `apps/web/app/globals.css` is split by concern into
+`app/styles/tokens.css` (design-token source of truth), `base.css`,
+`landing.css`, `profile.css`, and `admin.css`, imported in that order from
+`app/layout.tsx`. Existing UI keeps global class names. New components built
+in the Time-Travel arc use co-located CSS Modules; shared visual vocabulary
+(evidence chips, stratum rules, seams) lives in `profile.css`. No CSS
+tooling, framework, or dependency is added.
+
+**Context:** Eight serial UI slices (`docs/UI_UX_CONTRACT.md` C-14) would
+otherwise contend on one 339-line file, and per-component styles need
+isolation without a build-system change.
+
+**Alternatives considered:** One growing global file; CSS Modules for
+everything including a rewrite of existing selectors; Tailwind or another
+utility framework; CSS-in-JS.
+
+**Reason:** The split is a pure move verified line-for-line, keeps existing
+e2e/component selectors intact, and Next.js supports both multiple global
+imports and CSS Modules natively — zero new dependencies, minimal churn.
+
+**Consequences:** Import order in `layout.tsx` is part of the cascade
+contract (`admin.css` must follow `base.css` for `.admin-shell` to override
+`.page-shell`); slices own their module files and rarely touch shared ones.
+
+**Revisit trigger:** A design-token pipeline or theming requirement (e.g.
+dark mode) outgrows plain custom properties.
+
+## D028: Evidence-class derivation uses validated provenance presence
+
+**Decision:** The UI derives each statement's evidence class
+(`docs/UI_UX_CONTRACT.md` C-4) from typed signals first — the section key
+plus the validated presence of a `resolved_claim` vs `derived_value`
+provenance object — refined by runtime-checked optional `details` markers
+(`temporal_assignment`, `data_status`). The optional, unvalidated
+`provenance.root_type` field may corroborate but is never the discriminant.
+`packages/contracts` is not changed for this; promoting a typed vocabulary
+is tracked separately (issue #18).
+
+**Context:** The published artifact carries class markers only inside
+`details: Record<string, unknown>`; the payload validator
+(`apps/web/src/lib/day-profile.ts:103`) guarantees at least one typed
+provenance branch but never checks `root_type`.
+
+**Alternatives considered:** Trusting `root_type`; extending the contracts
+package now; parsing statement prose; section key alone.
+
+**Reason:** Rendering decisions must rest on signals the validator actually
+guarantees; untyped markers can refine but must degrade safely (unknown →
+section default, never a stronger claim, never a crash).
+
+**Consequences:** `deriveEvidenceClass` is a pure, never-throwing function
+with exhaustive unit tests (slice B1); a future typed-details contract
+change (issue #18) can simplify it without changing rendered classes.
+
+**Revisit trigger:** Issue #18 lands a typed vocabulary, or a source
+publishes statements whose class the current signals cannot distinguish.

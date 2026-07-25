@@ -1,0 +1,98 @@
+.state-panel,
+.section-card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  padding: 1.25rem;
+}
+
+.state-panel {
+  margin-bottom: 1rem;
+}
+
+.state-panel--unpublished {
+  background: var(--accent-wash);
+  border-color: var(--accent);
+}
+
+.state-panel--error {
+  border-color: #8b2016;
+}
+
+.state-panel p,
+.section-card p {
+  color: var(--muted-ink);
+  margin-bottom: 0;
+}
+
+.profile-statement + .profile-statement {
+  border-top: 1px solid var(--line);
+  margin-top: 0.85rem;
+  padding-top: 0.85rem;
+}
+
+.profile-statement__provenance {
+  font-family: "Courier New", monospace;
+  font-size: 0.78rem;
+  margin-top: 0.45rem;
+}
+
+.section-grid {
+  display: grid;
+  gap: 0.85rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.section-card {
+  min-height: 9rem;
+}
+
+.section-card:last-child {
+  grid-column: span 2;
+}
+
+.section-card__index {
+  color: var(--accent);
+  display: block;
+  font-family: "Courier New", monospace;
+  font-size: 0.75rem;
+  font-weight: 700;
+  margin-bottom: 1rem;
+}
+
+@media (max-width: 42rem) {
+  .section-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .section-card:last-child {
+    grid-column: auto;
+  }
+}
+
+.provenance-view {
+  margin-top: 1rem;
+  border-top: 1px solid color-mix(in srgb, currentColor 20%, transparent);
+  padding-top: 0.8rem;
+}
+
+.provenance-view summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.provenance-view dt {
+  margin-top: 0.75rem;
+  font-weight: 700;
+}
+
+.provenance-view dd {
+  margin-left: 0;
+}
+
+.provenance-view dd span {
+  display: block;
+}
+
+.quality-grade {
+  font-weight: 800;
+}

@@ -1,6 +1,10 @@
 import type { Metadata } from "next";
 import type { ReactNode } from "react";
-import "./globals.css";
+import "./styles/tokens.css";
+import "./styles/base.css";
+import "./styles/landing.css";
+import "./styles/profile.css";
+import "./styles/admin.css";
 
 export const metadata: Metadata = {
   title: "Day Perspective",
