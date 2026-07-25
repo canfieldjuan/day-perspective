@@ -71,10 +71,15 @@ Top to bottom:
 
 Within a stratum, statements use the document register: statement text in
 body serif at full measure; class chip + caveat line (C-4); provenance
-affordance (C-9). One dominant recorded event (exactly one statement
-group in `recorded_on_this_date` describing one event) may take the
-dominant treatment: larger statement type and full-width rule. Multiple
-events share equal weight.
+affordance (C-9). **Lead-statement emphasis:** the payload is a flat
+statement array with no event or group identifier (the golden artifact
+renders one earthquake as eight independent statements), so event
+grouping is NOT derivable and the UI must never claim an event count.
+Instead, when `recorded_on_this_date` is non-empty its first statement
+(publisher order) takes the lead treatment — larger statement type and
+full-width rule — and the remainder render in the standard register. A
+payload-level grouping signal is deferred to backend coordination
+(logged on issue #18).
 
 ## C-4 Evidence classes
 
@@ -101,6 +106,7 @@ events share equal weight.
 | `comparison` | section `derived_comparisons` | "App-derived comparison" | double rule |
 | `archive-note` | section `evidence_notes` | "About this evidence" | plain rule |
 | `unavailable` | `data_status: missing` or missing-value derived statements | "Not available" | faded rule |
+| `unclassified` | statement without a `provenance` block (valid per the payload validator) in any section | "Evidence class unstated" | faded dotted rule |
 
 2. **Caveat lines.** `daily-average` statements always carry, visibly and
    adjacent: "Average across {year} — not a count for this date."
@@ -119,12 +125,20 @@ events share equal weight.
    text presence per class).
 5. `wonder_and_progress` statements classify by their own signals
    ((a)/(b) above), not by a section default, until real data exists.
+6. **Conservative fallback.** A statement with no `provenance` block —
+   valid, since the validator treats provenance as optional
+   (`day-profile.ts:114`) — classifies as `unclassified` in every
+   section, including `wonder_and_progress`. The fallback understates
+   rather than overstates: it never inherits a stronger section default,
+   and B1's unit tests cover it explicitly. This satisfies C-4.1's
+   exactly-one-class rule for the entire valid payload space.
 
 ## C-5 Variable content, quiet dates
 
-1. Emphasis adapts to content: a date with one dominant recorded event
-   leads with it; a date with none leads with the average-day stratum and
-   says plainly that no reviewed event is published for this date.
+1. Emphasis adapts to content: a date with recorded statements leads
+   with them (lead-statement emphasis, C-3); a date with none leads with
+   the average-day stratum and says plainly that no reviewed event is
+   published for this date.
 2. Empty or unsupported strata compress to a **seam**: stratum heading,
    one-line state text, no card boxes. The three states keep distinct
    canonical text (C-8) and visual weight far below populated strata.
@@ -138,7 +152,10 @@ events share equal weight.
    and offers: previous day, next day, another date (opens the date
    form), random day. All ≥ 44px touch targets, all keyboard reachable,
    arrow affordances labeled with the actual target date ("← March 26,
-   1964").
+   1964"). On a render with no valid reference date (the malformed-path
+   state of C-8.2), previous/next are omitted — never labeled with an
+   invented date — while another-date and random day (which needs no
+   reference) remain available.
 2. Previous/next clamp at `1900-01-01`/`2025-12-31` (disabled state at
    the edge, never wrapping). Random draws uniformly from the full shell.
 3. Navigation is **blind by design** (no published-dates index exists):
@@ -266,7 +283,7 @@ No CSS-in-JS, no Tailwind, no new tooling.
   caveats per C-4 on the golden profile; `quality` + `source_attribution`
   rendered; disputed badge mock-tested; no `packages/contracts` change.
 - **B2**: page anatomy per C-3 (arrival panel, strata order, seams per
-  C-5.2, dominant-event rule); `unpublished-state.spec.ts` rewritten
+  C-5.2, lead-statement rule); `unpublished-state.spec.ts` rewritten
   first; parent-walk locator replaced (C-11); mobile project green.
 - **C**: date bar per C-6 on all `/day/*` states; date math unit-tested
   across leap/month/year/clamp boundaries before the component exists;
