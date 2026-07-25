@@ -10,6 +10,7 @@ import {
   isSupportedPublicDate,
   randomPublicDate
 } from "@/src/lib/date";
+import { markNavigation } from "@/src/lib/travel-store";
 import styles from "./DayNavigation.module.css";
 
 /**
@@ -35,6 +36,7 @@ export function DayNavigation({ date }: { date: string }) {
           className={styles.step}
           href={"/day/" + previous}
           aria-label={"Previous day, " + formatPublicDate(previous)}
+          onClick={() => markNavigation()}
         >
           <span aria-hidden="true">←</span> {formatPublicDate(previous)}
         </Link>
@@ -55,6 +57,7 @@ export function DayNavigation({ date }: { date: string }) {
         className={styles.step}
         type="button"
         onClick={() => {
+          markNavigation();
           router.push("/day/" + randomPublicDate());
         }}
       >
@@ -65,6 +68,7 @@ export function DayNavigation({ date }: { date: string }) {
           className={styles.step}
           href={"/day/" + next}
           aria-label={"Next day, " + formatPublicDate(next)}
+          onClick={() => markNavigation()}
         >
           {formatPublicDate(next)} <span aria-hidden="true">→</span>
         </Link>

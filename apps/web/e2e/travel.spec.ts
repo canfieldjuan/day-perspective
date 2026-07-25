@@ -66,3 +66,44 @@ test("adjacent-date arrivals take the quick path, not the full reveal", async ({
     "adjacent"
   );
 });
+
+test("navigation that interrupts the first load still takes the quick path", async ({
+  page
+}) => {
+  let releaseFirst = () => {};
+  const firstGate = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
+  await page.route("**/api/day/1964-03-27", async (route) => {
+    await firstGate;
+    await route.fulfill({
+      contentType: "application/json",
+      status: 404,
+      body: unpublishedBody("1964-03-27", "standard_statistical")
+    });
+  });
+  await page.route("**/api/day/1964-03-28", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      status: 404,
+      body: unpublishedBody("1964-03-28", "standard_statistical")
+    });
+  });
+
+  await page.goto("/day/1964-03-27");
+  await expect(page.getByTestId("travel-shell")).toHaveAttribute(
+    "data-phase",
+    "traveling"
+  );
+  await page.getByRole("link", { name: "Next day, March 28, 1964" }).click();
+  await expect(page.getByTestId("day-arrival")).toContainText("March 28, 1964");
+  await expect(page.getByTestId("travel-shell")).toHaveAttribute(
+    "data-phase",
+    "arrived"
+  );
+  await expect(page.getByTestId("travel-shell")).toHaveAttribute(
+    "data-entry",
+    "adjacent"
+  );
+  releaseFirst();
+});

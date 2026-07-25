@@ -9,7 +9,7 @@ import {
 import type { PublishedDayProfile } from "@day-perspective/contracts";
 import { ProfileSections } from "./ProfileSections";
 import { entryKindForArrival, phaseForView } from "@/src/lib/travel-phase";
-import { recordArrival } from "@/src/lib/travel-store";
+import { hasNavigated, recordArrival } from "@/src/lib/travel-store";
 
 type ViewState =
   | { kind: "loading" }
@@ -46,11 +46,11 @@ export function DayProfileClient({
   const [state, setState] = useState<{
     date: string;
     view: ViewState;
-    arrivals: number;
+    adjacentArrival: boolean;
   }>({
     date,
     view: { kind: "loading" },
-    arrivals: 0
+    adjacentArrival: false
   });
   const [requestNumber, setRequestNumber] = useState(0);
 
@@ -81,7 +81,7 @@ export function DayProfileClient({
             setState({
               date,
               view: { kind: "unpublished" },
-              arrivals: arrivalNumber
+              adjacentArrival: hasNavigated() || arrivalNumber > 1
             });
           }
           return;
@@ -93,7 +93,7 @@ export function DayProfileClient({
             setState({
               date,
               view: { kind: "api-error" },
-              arrivals: arrivalNumber
+              adjacentArrival: hasNavigated() || arrivalNumber > 1
             });
           }
           return;
@@ -109,7 +109,7 @@ export function DayProfileClient({
               manifestId: payload.manifest_id,
               contentHash: payload.content_hash
             },
-            arrivals: arrivalNumber
+            adjacentArrival: hasNavigated() || arrivalNumber > 1
           });
         }
       } catch {
@@ -118,7 +118,7 @@ export function DayProfileClient({
           setState({
             date,
             view: { kind: "api-error" },
-            arrivals: arrivalNumber
+            adjacentArrival: hasNavigated() || arrivalNumber > 1
           });
         }
       }
@@ -137,7 +137,7 @@ export function DayProfileClient({
   const phase = phaseForView(
     isSupportedPublicDate(date) ? viewState.kind : "unpublished"
   );
-  const entry = entryKindForArrival(state.arrivals > 1);
+  const entry = entryKindForArrival(state.adjacentArrival);
 
   const statusLine = !isSupportedPublicDate(date)
     ? "No profile request was made for this address."
@@ -223,7 +223,7 @@ export function DayProfileClient({
               setState((previous) => ({
                 date,
                 view: { kind: "loading" },
-                arrivals: previous.arrivals
+                adjacentArrival: previous.adjacentArrival
               }));
               setRequestNumber((value) => value + 1);
             }}
