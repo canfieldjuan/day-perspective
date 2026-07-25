@@ -50,20 +50,45 @@ export function ProfileSections({
           <p>Published by {sourceAttribution.publisher}.</p>
         </aside>
       ) : null}
-      <div className="section-grid" aria-label="Day profile sections">
-        {DAY_PROFILE_SECTIONS.map((section, index) => {
+      <div className="strata" aria-label="Day profile sections">
+        {DAY_PROFILE_SECTIONS.map((section) => {
         const headingId = section.id + "-heading";
         const statements = sections?.[section.key];
         const sectionState = sectionStates?.[section.key];
+        const recordedPopulated =
+          availability === "published" &&
+          (sections?.recorded_on_this_date?.length ?? 0) > 0;
+        const typicalPopulated =
+          availability === "published" &&
+          (sections?.typical_day_in_this_year?.length ?? 0) > 0;
+        const leadSectionKey = recordedPopulated
+          ? "recorded_on_this_date"
+          : typicalPopulated
+            ? "typical_day_in_this_year"
+            : null;
+        const populated =
+          availability === "published" &&
+          statements !== undefined &&
+          statements.length > 0;
+        const stratumState = populated
+          ? "populated"
+          : availability !== "published"
+            ? availability
+            : sectionState?.status === "not_yet_supported"
+              ? "not_yet_supported"
+              : "empty";
 
         return (
-          <section className="section-card" key={section.key} aria-labelledby={headingId}>
-            <span className="section-card__index">
-              Section {String(index + 1).padStart(2, "0")}
-            </span>
+          <section
+            className={populated ? "stratum" : "stratum stratum--seam"}
+            data-testid={"stratum-" + section.key}
+            data-stratum-state={stratumState}
+            key={section.key}
+            aria-labelledby={headingId}
+          >
             <h2 id={headingId}>{section.title}</h2>
-            {availability === "published" && statements && statements.length > 0 ? (
-              statements.map((statement) => {
+            {populated ? (
+              statements.map((statement, statementIndex) => {
                 const evidenceClass = deriveEvidenceClass(section.key, statement);
                 const disputed =
                   (statement.provenance?.dissenting_claims.length ?? 0) > 0;
@@ -73,11 +98,14 @@ export function ProfileSections({
                       profileYear || "the year"
                     )
                   : null;
+                const isLead =
+                  section.key === leadSectionKey && statementIndex === 0;
 
                 return (
                 <article
                   className="profile-statement"
                   data-evidence-class={evidenceClass.key}
+                  {...(isLead ? { "data-lead": "true" } : {})}
                   key={statement.statement_id}
                 >
                   <p className="evidence-chips">
@@ -97,7 +125,7 @@ export function ProfileSections({
                       </span>
                     ) : null}
                   </p>
-                  <p>{statement.statement}</p>
+                  <p className="statement-text">{statement.statement}</p>
                   {caveat ? <p className="evidence-caveat">{caveat}</p> : null}
                   {statement.provenance_note ? (
                     <p className="profile-statement__provenance">{statement.provenance_note}</p>
@@ -166,10 +194,12 @@ export function ProfileSections({
                 );
               })
             ) : (
-              <p>
+              <p className="stratum__state">
                 {availability === "published"
                   ? sectionState?.reason ??
-                    "No evidence-backed content was published for this section."
+                    (section.key === "recorded_on_this_date"
+                      ? "No reviewed event is published for this date."
+                      : "No evidence-backed content was published for this section.")
                   : sectionMessages[availability]}
               </p>
             )}

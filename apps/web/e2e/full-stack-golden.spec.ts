@@ -30,9 +30,7 @@ test("serves the reviewed golden artifact through the complete runtime path", as
     )
   ).toBeVisible();
 
-  const qualityCard = page
-    .getByRole("heading", { name: "Evidence notes" })
-    .locator("..");
+  const qualityCard = page.getByTestId("stratum-evidence_notes");
   await qualityCard.getByText("Why can the app say this?").click();
   await expect(qualityCard.getByText(/Derived value/)).toBeVisible();
   await expect(qualityCard.getByText(/calculation version 0.3.0/)).toBeVisible();

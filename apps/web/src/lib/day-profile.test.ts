@@ -60,6 +60,21 @@ describe("isPublishedProfileResponse", () => {
   });
 });
 
+describe("eraLineForDate", () => {
+  it("names each era band with its canonical range", async () => {
+    const { eraLineForDate } = await import("./day-profile");
+    expect(eraLineForDate("1900-01-01")).toBe("Limited historical era · 1900–1949");
+    expect(eraLineForDate("1964-03-27")).toBe("Standard statistical era · 1950–1988");
+    expect(eraLineForDate("1989-01-01")).toBe("Enhanced structured era · 1989–2025");
+  });
+
+  it("returns null outside the public shell", async () => {
+    const { eraLineForDate } = await import("./day-profile");
+    expect(eraLineForDate("1899-12-31")).toBeNull();
+    expect(eraLineForDate("garbage")).toBeNull();
+  });
+});
+
 describe("isPublishedProfileResponse optional metadata", () => {
   function envelope(profileExtras: Record<string, unknown>) {
     return {
@@ -113,5 +128,13 @@ describe("isPublishedProfileResponse optional metadata", () => {
         "1964-03-27"
       )
     ).toBe(false);
+  });
+});
+
+describe("eraLineForDate calendar validity", () => {
+  it("refuses impossible dates that are lexically in range", async () => {
+    const { eraLineForDate } = await import("./day-profile");
+    expect(eraLineForDate("1964-02-30")).toBeNull();
+    expect(eraLineForDate("1900-99-99")).toBeNull();
   });
 });

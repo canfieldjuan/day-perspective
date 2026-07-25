@@ -7,6 +7,8 @@ import {
   type PublishedProfileResponse
 } from "@day-perspective/contracts";
 
+import { isSupportedPublicDate } from "./date";
+
 const SECTION_TITLES: Record<DayProfileSectionKey, string> = {
   recorded_on_this_date: "Recorded on this date",
   typical_day_in_this_year: "Typical day in this year",
@@ -22,6 +24,25 @@ export const DAY_PROFILE_SECTIONS = DAY_PROFILE_SECTION_KEYS.map((key) => ({
   key,
   title: SECTION_TITLES[key]
 }));
+
+const ERA_LINES: Record<ReturnType<typeof profileTypeForDate> & string, string> = {
+  limited_historical: "Limited historical era · 1900–1949",
+  standard_statistical: "Standard statistical era · 1950–1988",
+  enhanced_structured: "Enhanced structured era · 1989–2025"
+};
+
+/**
+ * Canonical era line per UI_UX_CONTRACT C-3.1; null outside the shell and
+ * for non-calendar values (profileTypeForDate alone is lexical and would
+ * assign an era to impossible dates like 1964-02-30).
+ */
+export function eraLineForDate(value: string): string | null {
+  if (!isSupportedPublicDate(value)) {
+    return null;
+  }
+  const profileType = profileTypeForDate(value);
+  return profileType ? ERA_LINES[profileType] : null;
+}
 
 export type DayProfileSection = (typeof DAY_PROFILE_SECTIONS)[number];
 
