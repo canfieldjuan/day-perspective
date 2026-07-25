@@ -8,6 +8,7 @@ import styles from "./EvidencePanel.module.css";
 type EvidencePanelProps = {
   open: boolean;
   statement?: ProfileStatement;
+  qualityGrade?: string;
   onClose: () => void;
 };
 
@@ -17,7 +18,12 @@ type EvidencePanelProps = {
  * only payload-provided provenance; dissenting records get the same
  * completeness as supporting ones.
  */
-export function EvidencePanel({ open, statement, onClose }: EvidencePanelProps) {
+export function EvidencePanel({
+  open,
+  statement,
+  qualityGrade,
+  onClose
+}: EvidencePanelProps) {
   const dialogRef = useRef<HTMLDialogElement>(null);
 
   useEffect(() => {
@@ -106,6 +112,12 @@ export function EvidencePanel({ open, statement, onClose }: EvidencePanelProps) 
                 : ""}
               . Retrieved {provenance.source_release.retrieved_at}.
             </dd>
+            {qualityGrade ? (
+              <>
+                <dt>Evidence quality</dt>
+                <dd>Grade {qualityGrade}</dd>
+              </>
+            ) : null}
             <dt>Methodology</dt>
             <dd>
               {provenance.methodology.name}, version{" "}

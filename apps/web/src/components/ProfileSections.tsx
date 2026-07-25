@@ -39,6 +39,10 @@ export function ProfileSections({
   const [evidenceStatement, setEvidenceStatement] = useState<
     import("@day-perspective/contracts").ProfileStatement | null
   >(null);
+  const evidenceQualityGrade =
+    typeof evidenceStatement?.details?.quality_grade === "string"
+      ? evidenceStatement.details.quality_grade
+      : undefined;
   const showIntegrity =
     availability === "published" &&
     Boolean(
@@ -205,6 +209,7 @@ export function ProfileSections({
       <EvidencePanel
         onClose={() => setEvidenceStatement(null)}
         open={evidenceStatement !== null}
+        qualityGrade={evidenceQualityGrade}
         statement={evidenceStatement ?? undefined}
       />
     </>
