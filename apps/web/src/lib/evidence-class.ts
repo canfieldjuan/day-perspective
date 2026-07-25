@@ -102,6 +102,9 @@ export function deriveEvidenceClass(
   if (dataStatus === "missing") {
     return CLASSES.unavailable;
   }
+  if (hasDerived && provenance.derived_value?.value === null) {
+    return CLASSES.unavailable;
+  }
   if (hasDerived && temporalAssignment === "modeled_period_allocation") {
     return CLASSES["date-modeled"];
   }
@@ -127,6 +130,15 @@ export function deriveEvidenceClass(
   }
   if (sectionDefault === "daily-average" && !hasDerived) {
     return CLASSES.unclassified;
+  }
+  if (sectionDefault === "comparison") {
+    const comparability = detailString(
+      statementValue.details,
+      "comparability_status"
+    );
+    return comparability
+      ? { ...CLASSES.comparison, caveat: "Comparability: " + comparability + "." }
+      : CLASSES.comparison;
   }
   return CLASSES[sectionDefault];
 }
