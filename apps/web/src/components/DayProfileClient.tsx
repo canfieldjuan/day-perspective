@@ -2,6 +2,8 @@
 
 import React, { useEffect, useRef, useState, type ReactNode } from "react";
 import {
+  PUBLIC_DATE_MAX,
+  PUBLIC_DATE_MIN,
   classifyPublicDateInput,
   formatPublicDate,
   isSupportedPublicDate
@@ -51,10 +53,12 @@ export function DayProfileClient({
     date: string;
     view: ViewState;
     adjacentArrival: boolean;
+    navigatedArrival: boolean;
   }>({
     date,
     view: { kind: "loading" },
-    adjacentArrival: false
+    adjacentArrival: false,
+    navigatedArrival: false
   });
   const [requestNumber, setRequestNumber] = useState(0);
 
@@ -85,7 +89,8 @@ export function DayProfileClient({
             setState({
               date,
               view: { kind: "unpublished" },
-              adjacentArrival: hasNavigated() || arrivalNumber > 1
+              adjacentArrival: hasNavigated() || arrivalNumber > 1,
+              navigatedArrival: hasNavigated()
             });
           }
           return;
@@ -97,7 +102,8 @@ export function DayProfileClient({
             setState({
               date,
               view: { kind: "api-error" },
-              adjacentArrival: hasNavigated() || arrivalNumber > 1
+              adjacentArrival: hasNavigated() || arrivalNumber > 1,
+              navigatedArrival: hasNavigated()
             });
           }
           return;
@@ -113,7 +119,8 @@ export function DayProfileClient({
               manifestId: payload.manifest_id,
               contentHash: payload.content_hash
             },
-            adjacentArrival: hasNavigated() || arrivalNumber > 1
+            adjacentArrival: hasNavigated() || arrivalNumber > 1,
+              navigatedArrival: hasNavigated()
           });
         }
       } catch {
@@ -122,7 +129,8 @@ export function DayProfileClient({
           setState({
             date,
             view: { kind: "api-error" },
-            adjacentArrival: hasNavigated() || arrivalNumber > 1
+            adjacentArrival: hasNavigated() || arrivalNumber > 1,
+              navigatedArrival: hasNavigated()
           });
         }
       }
@@ -158,13 +166,13 @@ export function DayProfileClient({
   useEffect(() => {
     if (
       phase === "arrived" &&
-      state.adjacentArrival &&
+      state.navigatedArrival &&
       lastFocusedDateRef.current !== state.date
     ) {
       lastFocusedDateRef.current = state.date;
       arrivalRef.current?.querySelector("h1")?.focus();
     }
-  }, [phase, state.adjacentArrival, state.date]);
+  }, [phase, state.navigatedArrival, state.date]);
 
   const arrivalPanel = (
     <header
@@ -201,12 +209,17 @@ export function DayProfileClient({
           {inputClass === "out-of-range" ? (
             <>
               <h2 id="invalid-date-title">This date is outside the public range.</h2>
-              <p>Records span 1900-01-01 through 2025-12-31.</p>
+              <p>
+                Records span {PUBLIC_DATE_MIN} through {PUBLIC_DATE_MAX}.
+              </p>
             </>
           ) : (
             <>
               <h2 id="invalid-date-title">This address is not a calendar date.</h2>
-              <p>Use the form YYYY-MM-DD, between 1900-01-01 and 2025-12-31.</p>
+              <p>
+                Use the form YYYY-MM-DD, between {PUBLIC_DATE_MIN} and{" "}
+                {PUBLIC_DATE_MAX}.
+              </p>
             </>
           )}
           <p>No profile request was made for this URL.</p>
@@ -264,7 +277,8 @@ export function DayProfileClient({
               setState((previous) => ({
                 date,
                 view: { kind: "loading" },
-                adjacentArrival: previous.adjacentArrival
+                adjacentArrival: previous.adjacentArrival,
+                navigatedArrival: previous.navigatedArrival
               }));
               setRequestNumber((value) => value + 1);
             }}

@@ -264,7 +264,7 @@ hash now rendered); CSS-only travel choreography with reduced-motion
 equivalence; the era-horizon landing; split invalid states, skip link,
 and focus-managed date changes.
 
-Verification at arc close: 80 web unit tests, 51 mocked e2e checks
+Verification at arc close: 87 web unit tests, 54 mocked e2e checks
 across three Playwright projects (desktop, Pixel 7, reduced-motion),
 production build, full `make check`. The full-stack Playwright spec runs
 against the real golden artifact in CI.
