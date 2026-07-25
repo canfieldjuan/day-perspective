@@ -32,6 +32,32 @@ const ERA_LINES: Record<ReturnType<typeof profileTypeForDate> & string, string> 
 };
 
 /**
+ * Era bands for the landing horizon (UI_UX_CONTRACT C-3.1 vocabulary,
+ * Strata direction). Boundaries mirror profileTypeForDate; the tiling
+ * property is unit-tested against it.
+ */
+export const ERA_BANDS = [
+  {
+    key: "limited_historical" as const,
+    line: ERA_LINES.limited_historical,
+    start: "1900-01-01",
+    end: "1949-12-31"
+  },
+  {
+    key: "standard_statistical" as const,
+    line: ERA_LINES.standard_statistical,
+    start: "1950-01-01",
+    end: "1988-12-31"
+  },
+  {
+    key: "enhanced_structured" as const,
+    line: ERA_LINES.enhanced_structured,
+    start: "1989-01-01",
+    end: "2025-12-31"
+  }
+];
+
+/**
  * Canonical era line per UI_UX_CONTRACT C-3.1; null outside the shell and
  * for non-calendar values (profileTypeForDate alone is lexical and would
  * assign an era to impossible dates like 1964-02-30).
