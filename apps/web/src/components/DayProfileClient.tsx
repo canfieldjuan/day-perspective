@@ -155,10 +155,10 @@ export function DayProfileClient({
 
   const arrivalRef = useRef<HTMLElement>(null);
   useEffect(() => {
-    if (phase === "arrived" && state.arrivals > 1) {
+    if (phase === "arrived" && state.adjacentArrival) {
       arrivalRef.current?.querySelector("h1")?.focus();
     }
-  }, [phase, state.arrivals]);
+  }, [phase, state.adjacentArrival]);
 
   const arrivalPanel = (
     <header
