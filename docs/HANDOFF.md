@@ -2,16 +2,14 @@
 
 ## 1. Executive State
 
-- Current branch: `agent/senior-takeover-mvp`
-- Latest implementation commit: `c95b8db` (`audit and harden evidence
-  publication slice`). The metadata-only commit containing this finalized
-  handoff follows it; use `git log -1 --oneline` for that self-referential SHA.
-- Working tree: expected clean after the handoff metadata commit. Publication to
-  GitHub is blocked locally because the HTTPS credential is invalid and no SSH
-  key is accepted.
-- Current phase: senior foundation repair plus a multi-source standard-profile
-  proof
-- Genuinely working: migrations through `0009`; offline USGS, UN WPP, UCDP and
+- Current branch: `agent/un-wpp-supported-years`
+- Latest commit before this slice: `6a102c5` (`Merge pull request #3 from
+  canfieldjuan/agent/txn-safe-publication`). Use `git log -1 --oneline` after
+  this slice is committed for its final SHA.
+- Working tree: contains the supported-year UN WPP slice until its review commit
+  is created.
+- Current phase: full supported-year UN WPP context pipeline
+- Genuinely working: migrations through `0011`; offline USGS, UN WPP, UCDP and
   Wikidata fixture ingestion; review ledger; deterministic USGS/UCDP/UN
   resolution and derivation; license publication gate; immutable profile
   versions; hash-verifying API; public profile; development review console;
@@ -100,6 +98,7 @@ Migrations in order:
 8. `20260724_0008_publication_governance.py`
 9. `20260724_0009_period_context.py`
 10. `20260724_0010_editorial_selection_history.py`
+11. `20260724_0011_editorial_root_version_uniqueness.py`
 
 All foundation tables are implemented. `0008` adds immutable
 `source_release_licenses`, `claim_review_decisions` and
@@ -133,8 +132,8 @@ USGS event us7000dflf raw record
 -> day/1964-03-27/profile-vN.json
 ```
 
-UN WPP adds 20 annual claims, 20 resolutions, structured metrics and
-observations, and two uniform-period daily equivalents. UCDP adds 25 1964
+UN WPP adds 380 annual claims, 380 resolutions, structured metrics and
+observations, and 152 uniform-period daily equivalents across 1950-2025. UCDP adds 25 1964
 conflict-year claims whose 25 resolved inputs produce one period-context count.
 Wikidata Q749610 revision 2497659168 creates eight candidates and eight review
 tasks; it creates no resolution or canonical event.
@@ -153,9 +152,10 @@ Stable record identifiers:
 - USGS: fixture and live retrieval, dry run, immutable raw storage,
   record-specific hash, idempotency, run/check records, transformation,
   explicit review and publication
-- UN WPP: strict selected official excerpt, immutable raw storage, 20 claims,
-  metrics/observations/coverage, daily-equivalent derivation and publication;
-  live workbook retrieval is absent
+- UN WPP: strict official-workbook and normalized-fixture parsing, immutable raw
+  storage, 380 claims across 1950-2025, estimate/projection status preservation,
+  metrics/observations/coverage, 152 daily-equivalent derivations, requested-year
+  profile content, fixture/live/dry-run modes and checksum-pinned extraction
 - UCDP: strict official 26.1 annual and GED excerpts, idempotency, run/check
   records, 1964 period context and one bounded event impact; live retrieval and
   full revision processing are absent
@@ -200,11 +200,13 @@ make review-ucdp-ged-fixture
 make ingest-wikidata-fixture
 ```
 
-Live USGS and dry runs:
+Live ingestion and dry runs:
 
 ```bash
 make ingest-usgs-live
 make ingest-usgs-dry-run
+make ingest-un-wpp-live
+make ingest-un-wpp-dry-run
 make ingest-wikidata-dry-run
 ```
 
@@ -283,7 +285,49 @@ make web-e2e-full-stack
 - Golden set: 100 records validate structurally; 0 reviewed and 0 published, so `release_ready=False`.
 - Dependency audit: pnpm and pip-audit reported no known third-party vulnerabilities; the local package is not a PyPI audit target.
 
+### Supported-year UN WPP verification, 2026-07-24 21:06 CDT
+
+- Initial focused-test setup attempts failed before collection: port `5433`
+  exposed plain PostgreSQL without PostGIS, then the correct PostGIS container
+  was tried with incorrect default credentials. Both were environment-command
+  errors; the migration and application code were not changed to mask them.
+- Focused UN suite: `14 passed in 23.86s` against the documented PostGIS service.
+- `make check`: contracts lint/type/test passed; API Ruff and strict mypy passed;
+  `114` Python tests passed with one Starlette TestClient deprecation warning;
+  web lint/typecheck and `10` Vitest tests passed.
+- `make clean-reset` plus migrations `0001` through `0011`, USGS ingestion/review,
+  UN ingestion/review (`76` records, `380` claims), UCDP annual ingestion/review,
+  and golden publication passed. The first publication attempt correctly failed
+  closed until the required UCDP review input was loaded.
+- Published artifact SHA-256:
+  `1bf8f4ecdd97f7331b0fa659f6f052191ff5b5273483b2c7a514c206d579183b`.
+- Next.js production build passed. Real full-stack Playwright passed `1` Chromium
+  test through browser, Next proxy, FastAPI, manifest verification and immutable
+  profile storage.
+
 ## 10. Files Changed
+
+Supported-year UN WPP slice:
+
+- `services/api/app/un_wpp.py`: official workbook retrieval/parsing, 1950-2025
+  validation, status-preserving claims, full-year resolution/derivation and
+  requested-year profile content
+- `services/api/app/context_cli.py`: mutually exclusive fixture/live ingestion
+  and dry-run support
+- `scripts/extract_un_wpp_fixture.py`: checksum-pinned extraction from the
+  official workbook
+- `data/fixtures/un-wpp/wpp2024-world-1950-2025.csv`: network-independent World
+  excerpt for all supported years
+- `services/api/tests/test_un_wpp.py`: adapter, lifecycle, status, leap-year,
+  requested-year and failure-path coverage
+- `services/api/tests/test_governance.py` and
+  `services/api/tests/test_usgs_vertical_slice.py`: full-range fixture integration
+- `services/api/pyproject.toml` and `services/api/requirements.lock`: pinned
+  `openpyxl` workbook parser
+- `Makefile` and `README.md`: fixture, live and dry-run operator commands
+- `docs/STATUS.md`, `docs/HANDOFF.md`, `docs/DATA_DICTIONARY.md`,
+  `docs/DECISIONS.md` and `docs/SOURCE_LICENSES/*`: implementation contract,
+  data semantics, decision, licensing scope and reproducible evidence
 
 Foundation and pipelines:
 
@@ -368,6 +412,9 @@ publication, runtime verification, licensing, security or handoff requirements.
 - Vulnerable framework transitive dependencies are fixed at the maintained
   framework and lockfile boundary.
 - Production deployment remains blocked rather than simulated.
+- WPP estimates (`1950-2023`) and medium-variant projections (`2024-2025`)
+  retain different data statuses through claims, observations, derived values
+  and public wording (Decision D026).
 
 Full rationale is in `docs/DECISIONS.md`.
 
@@ -375,7 +422,7 @@ Full rationale is in `docs/DECISIONS.md`.
 
 - Only one date is published. Severity: release blocker.
 - Golden 100 records are not reviewed or generated. Severity: release blocker.
-- UN and UCDP support only selected fixtures, not full supported-year releases.
+- UCDP supports only selected fixtures, not full supported-year releases.
   Severity: release blocker.
 - Apocalypse, wonder/progress and comparison systems are absent. Severity:
   release blocker.

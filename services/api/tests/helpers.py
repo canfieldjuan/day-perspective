@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from sqlalchemy.orm import Session
 
-from app.models import LegalReviewStatus, Source
+from app.models import LegalReviewStatus, Source, SourceRelease
 from app.services import create_source_release
 
 
-def source_release(session: Session):
+def source_release(session: Session) -> SourceRelease:
     source = Source(
         slug="test-source",
         name="Synthetic source for tests",
@@ -25,4 +25,3 @@ def source_release(session: Session):
         raw_bytes=b"test raw source bytes",
         raw_record_count=1,
     )
-

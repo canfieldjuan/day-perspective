@@ -208,7 +208,8 @@ class USGSEarthquakeAdapter:
             headers={"User-Agent": "day-perspective-offline-ingestion/0.1"},
         )
         with urllib.request.urlopen(request, timeout=30) as response:
-            return response.read()
+            payload: bytes = response.read()
+            return payload
 
     def validate(self, payload: bytes) -> USGSFeature:
         parsed = USGSFeatureCollection.model_validate_json(payload)

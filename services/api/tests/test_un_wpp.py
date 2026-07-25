@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import csv
+from datetime import date
 from decimal import Decimal
+from io import BytesIO
 from pathlib import Path
+from typing import NoReturn
+from urllib.error import URLError
 
 import pytest
+from openpyxl import Workbook
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -14,31 +19,76 @@ from app.models import (
     ClaimAssertionStatus,
     DataStatus,
     DerivedValue,
+    Methodology,
+    Metric,
     PipelineRun,
     QualityCheck,
     RawSourceRecord,
     ResolvedClaim,
     ResolvedClaimEvidence,
+    ReviewTask,
     SourceRelease,
     TemporalAssignment,
 )
 from app.un_wpp import (
+    UN_WPP_NORMALIZED_FIXTURE_SHA256,
+    UN_WPP_WORKBOOK_SHA256,
+    WORKBOOK_COLUMNS,
     LocalFilesystemRawSourceStore,
+    WPPIngestionResult,
     build_un_wpp_profile_content,
     ingest_un_wpp,
     review_un_wpp,
 )
 
 ROOT = Path(__file__).resolve().parents[3]
-FIXTURE = ROOT / "data/fixtures/un-wpp/wpp2024-world-selected-years.csv"
+FIXTURE = ROOT / "data/fixtures/un-wpp/wpp2024-world-1950-2025.csv"
 
 
-def ingest(session: Session, tmp_path: Path):
-    return ingest_un_wpp(
+def ingest(session: Session, tmp_path: Path) -> WPPIngestionResult:
+    result = ingest_un_wpp(
         session,
         fixture_path=FIXTURE,
         raw_store=LocalFilesystemRawSourceStore(tmp_path / "raw"),
     )
+    assert result.source_release_id is not None
+    return result
+
+
+def workbook_fixture(tmp_path: Path) -> Path:
+    with FIXTURE.open(newline="", encoding="utf-8") as handle:
+        records = list(csv.DictReader(handle))
+    workbook = Workbook()
+    workbook.remove(workbook.active)
+    for sheet_name, variant in (
+        ("Estimates", "Estimates"),
+        ("Medium variant", "Medium"),
+    ):
+        sheet = workbook.create_sheet(sheet_name)
+        for _ in range(16):
+            sheet.append([])
+        header: list[object | None] = [None] * 65
+        for index, expected in WORKBOOK_COLUMNS.values():
+            header[index] = expected
+        sheet.append(header)
+        for record in records:
+            if record["variant"] != variant:
+                continue
+            row: list[object | None] = [None] * 65
+            for field, (index, _) in WORKBOOK_COLUMNS.items():
+                raw = record[field]
+                row[index] = (
+                    int(raw)
+                    if field in {"location_code", "year"}
+                    else float(raw)
+                    if field
+                    not in {"variant", "location"}
+                    else raw
+                )
+            sheet.append(row)
+    path = tmp_path / "wpp-fixture.xlsx"
+    workbook.save(path)
+    return path
 
 
 def test_fixture_ingestion_preserves_records_claims_license_run_and_check(
@@ -46,11 +96,18 @@ def test_fixture_ingestion_preserves_records_claims_license_run_and_check(
 ) -> None:
     result = ingest(session, tmp_path)
 
-    assert result.claim_count == 20
-    assert session.scalar(select(func.count()).select_from(RawSourceRecord)) == 4
-    assert session.scalar(select(func.count()).select_from(Claim)) == 20
+    assert result.claim_count == 380
+    assert session.scalar(select(func.count()).select_from(RawSourceRecord)) == 76
+    assert session.scalar(select(func.count()).select_from(Claim)) == 380
     assert session.scalar(select(PipelineRun.status)) == "succeeded"
     assert session.scalar(select(QualityCheck.status)) == "passed"
+    release = session.get(SourceRelease, result.source_release_id)
+    assert release is not None
+    assert (
+        release.metadata_json["upstream_source_file_sha256"]
+        == UN_WPP_WORKBOOK_SHA256
+    )
+    assert result.checksum == UN_WPP_NORMALIZED_FIXTURE_SHA256
     license_row = session.get(SourceReleaseLicense, result.source_release_id)
     assert license_row is not None
     assert license_row.license_identifier == "CC-BY-3.0-IGO"
@@ -66,8 +123,8 @@ def test_idempotent_rerun_does_not_duplicate_release_records_or_claims(
     assert second.idempotent is True
     assert first.source_release_id == second.source_release_id
     assert session.scalar(select(func.count()).select_from(SourceRelease)) == 1
-    assert session.scalar(select(func.count()).select_from(RawSourceRecord)) == 4
-    assert session.scalar(select(func.count()).select_from(Claim)) == 20
+    assert session.scalar(select(func.count()).select_from(RawSourceRecord)) == 76
+    assert session.scalar(select(func.count()).select_from(Claim)) == 380
 
 
 def test_non_finite_wpp_measure_fails_before_release_creation(
@@ -102,15 +159,17 @@ def test_review_derives_leap_year_daily_equivalents_without_date_claim(
     session: Session, tmp_path: Path
 ) -> None:
     result = ingest(session, tmp_path)
-    assert review_un_wpp(session, result.source_release_id) == 20
+    assert result.source_release_id is not None
+    assert review_un_wpp(session, result.source_release_id) == 380
     values = {
         row.value_kind: row
         for row in session.scalars(
-            select(DerivedValue).where(
-                DerivedValue.value_kind.in_(
-                    ("average_daily_births", "average_daily_deaths")
+                select(DerivedValue).where(
+                    DerivedValue.value_kind.in_(
+                        ("average_daily_births", "average_daily_deaths")
+                    ),
+                    DerivedValue.period_start == date(1964, 1, 1),
                 )
-            )
         )
     }
 
@@ -129,6 +188,7 @@ def test_rejected_wpp_claim_blocks_review_before_any_resolution(
     session: Session, tmp_path: Path
 ) -> None:
     result = ingest(session, tmp_path)
+    assert result.source_release_id is not None
     rejected = session.scalar(
         select(Claim).where(
             Claim.source_release_id == result.source_release_id,
@@ -150,6 +210,7 @@ def test_revised_wpp_release_versions_resolution_and_daily_equivalent(
     session: Session, tmp_path: Path
 ) -> None:
     first = ingest(session, tmp_path)
+    assert first.source_release_id is not None
     review_un_wpp(session, first.source_release_id)
 
     with FIXTURE.open(newline="", encoding="utf-8") as handle:
@@ -170,6 +231,10 @@ def test_revised_wpp_release_versions_resolution_and_daily_equivalent(
         fixture_path=revised_fixture,
         raw_store=LocalFilesystemRawSourceStore(tmp_path / "raw"),
     )
+    assert second.source_release_id is not None
+    second_release = session.get(SourceRelease, second.source_release_id)
+    assert second_release is not None
+    assert "upstream_source_file_sha256" not in second_release.metadata_json
     review_un_wpp(session, second.source_release_id)
     latest = session.scalar(
         select(ResolvedClaim)
@@ -202,6 +267,7 @@ def test_latest_unreviewed_wpp_release_blocks_profile_content(
     session: Session, tmp_path: Path
 ) -> None:
     first = ingest(session, tmp_path)
+    assert first.source_release_id is not None
     review_un_wpp(session, first.source_release_id)
     session.commit()
 
@@ -242,6 +308,7 @@ def test_wpp_context_prose_is_derived_from_current_reviewed_values(
         fixture_path=revised,
         raw_store=LocalFilesystemRawSourceStore(tmp_path / "raw"),
     )
+    assert result.source_release_id is not None
     review_un_wpp(session, result.source_release_id)
 
     statements = {
@@ -254,6 +321,279 @@ def test_wpp_context_prose_is_derived_from_current_reviewed_values(
     assert "150 deaths" in statements["world-under-five-mortality"]
 
 
+def test_official_workbook_shape_ingests_without_network(
+    session: Session, tmp_path: Path
+) -> None:
+    result = ingest_un_wpp(
+        session,
+        fixture_path=workbook_fixture(tmp_path),
+        raw_store=LocalFilesystemRawSourceStore(tmp_path / "raw"),
+    )
+
+    assert result.source_release_id is not None
+    assert result.claim_count == 380
+    release = session.get(SourceRelease, result.source_release_id)
+    assert release is not None
+    assert release.metadata_json["input_format"] == "official_xlsx"
+    assert release.metadata_json["upstream_source_file_sha256"] == result.checksum
+
+
+def test_supported_years_preserve_estimate_and_projection_status(
+    session: Session, tmp_path: Path
+) -> None:
+    ingest(session, tmp_path)
+    statuses = {
+        claim.temporal_start.year: claim.data_status
+        for claim in session.scalars(
+            select(Claim).where(
+                Claim.claim_type == "population_midyear",
+                Claim.temporal_start.in_(
+                    (date(2023, 1, 1), date(2024, 1, 1), date(2025, 1, 1))
+                ),
+            )
+        )
+        if claim.temporal_start is not None
+    }
+
+    assert statuses == {
+        2023: DataStatus.ESTIMATED,
+        2024: DataStatus.MODELED,
+        2025: DataStatus.MODELED,
+    }
+    for year, expected_classification in (
+        (2023, "estimate"),
+        (2024, "medium-variant projection"),
+        (2025, "medium-variant projection"),
+    ):
+        claim = session.scalar(
+            select(Claim).where(
+                Claim.claim_type == "population_midyear",
+                Claim.temporal_start == date(year, 1, 1),
+            )
+        )
+        assert claim is not None
+        task = session.scalar(
+            select(ReviewTask).where(ReviewTask.claim_id == claim.id)
+        )
+        assert task is not None
+        assert expected_classification in task.rationale
+
+
+def test_review_derives_every_supported_year_with_gregorian_denominators(
+    session: Session, tmp_path: Path
+) -> None:
+    result = ingest(session, tmp_path)
+    assert result.source_release_id is not None
+    review_un_wpp(session, result.source_release_id)
+
+    assert (
+        session.scalar(select(func.count()).select_from(DerivedValue)) == 152
+    )
+    days = {
+        row.period_start.year: row.value_json["days_in_year"]
+        for row in session.scalars(
+            select(DerivedValue).where(
+                DerivedValue.value_kind == "average_daily_births",
+                DerivedValue.period_start.in_(
+                    (date(1964, 1, 1), date(2023, 1, 1), date(2024, 1, 1))
+                ),
+            )
+        )
+        if row.value_json is not None
+    }
+    assert days == {1964: 366, 2023: 365, 2024: 366}
+    for metric_key, claim_type in (
+        ("un-wpp:annual_births", "annual_births"),
+        ("app:average_daily_births", "annual_births"),
+    ):
+        metric = session.scalar(select(Metric).where(Metric.metric_key == metric_key))
+        assert metric is not None
+        metric_provenance = session.get(
+            ResolvedClaim,
+            metric.provenance_resolved_claim_id,
+        )
+        assert metric_provenance is not None
+        assert metric_provenance.canonical_key == f"un-wpp:world:1950:{claim_type}"
+    for year in (1964, 2025):
+        derived = session.scalar(
+            select(DerivedValue).where(
+                DerivedValue.value_kind == "average_daily_births",
+                DerivedValue.period_start == date(year, 1, 1),
+            )
+        )
+        assert derived is not None
+        year_provenance = session.get(
+            ResolvedClaim,
+            derived.provenance_resolved_claim_id,
+        )
+        assert year_provenance is not None
+        assert year_provenance.canonical_key == f"un-wpp:world:{year}:annual_births"
+    stale_provenance = session.scalar(
+        select(ResolvedClaim).where(
+            ResolvedClaim.canonical_key == "un-wpp:world:1964:annual_births"
+        )
+    )
+    assert stale_provenance is not None
+    reconciled_metrics = list(
+        session.scalars(
+            select(Metric).where(
+                Metric.metric_key.in_(
+                    ("un-wpp:annual_births", "app:average_daily_births")
+                )
+            )
+        )
+    )
+    assert len(reconciled_metrics) == 2
+    for metric in reconciled_metrics:
+        metric.provenance_resolved_claim_id = stale_provenance.id
+        metric.methodology_id = None
+    session.flush()
+
+    review_un_wpp(session, result.source_release_id)
+
+    methodology = session.scalar(
+        select(Methodology).where(
+            Methodology.slug == "un-wpp-annual-context",
+            Methodology.version == "2",
+        )
+    )
+    assert methodology is not None
+    for metric in reconciled_metrics:
+        session.refresh(metric)
+        metric_provenance = session.get(
+            ResolvedClaim,
+            metric.provenance_resolved_claim_id,
+        )
+        assert metric.methodology_id == methodology.id
+        assert metric_provenance is not None
+        assert metric_provenance.canonical_key == "un-wpp:world:1950:annual_births"
+
+
+def test_profile_content_selects_requested_projection_year(
+    session: Session, tmp_path: Path
+) -> None:
+    selected_date = date(2025, 7, 20)
+    result = ingest(session, tmp_path)
+    assert result.source_release_id is not None
+    review_un_wpp(
+        session,
+        result.source_release_id,
+        editorial_dates=(selected_date,),
+    )
+
+    content = build_un_wpp_profile_content(
+        session,
+        profile_date=selected_date,
+    )
+
+    typical_details = [
+        statement["details"] for statement in content.typical_statements
+    ]
+    assert all(isinstance(details, dict) for details in typical_details)
+    assert all(
+        details["data_status"] == "modeled"
+        for details in typical_details
+        if isinstance(details, dict)
+    )
+    assert "Average daily births in 2025" in str(
+        content.typical_statements[0]["statement"]
+    )
+    assert "medium-variant projection" in str(
+        content.typical_statements[0]["statement"]
+    )
+    assert "medium-variant projected annual value" in str(
+        content.typical_statements[0]["provenance_note"]
+    )
+    assert all(
+        "medium-variant projection" in str(statement["provenance"])
+        for statement in content.context_statements
+    )
+    assert "not an observation for July 20" in str(
+        content.typical_statements[0]["statement"]
+    )
+    assert all(
+        "projects" in str(statement["statement"])
+        for statement in content.context_statements
+    )
+
+
+def test_dry_run_validates_without_creating_a_release(
+    session: Session, tmp_path: Path
+) -> None:
+    result = ingest_un_wpp(
+        session,
+        fixture_path=FIXTURE,
+        raw_store=LocalFilesystemRawSourceStore(tmp_path / "raw"),
+        dry_run=True,
+    )
+
+    assert result.source_release_id is None
+    assert result.claim_count == 0
+    assert session.scalar(select(func.count()).select_from(SourceRelease)) == 0
+    assert session.scalar(select(PipelineRun.status)) == "succeeded"
+    assert session.scalar(select(QualityCheck.status)) == "passed"
+
+
+def test_live_retrieval_failure_records_failed_run_and_check(
+    session: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_live_retrieval(*args: object, **kwargs: object) -> NoReturn:
+        raise URLError("simulated offline retrieval failure")
+
+    monkeypatch.setattr(
+        "app.un_wpp.urllib.request.urlopen",
+        fail_live_retrieval,
+    )
+
+    with pytest.raises(URLError, match="simulated offline retrieval failure"):
+        ingest_un_wpp(
+            session,
+            raw_store=LocalFilesystemRawSourceStore(tmp_path / "raw"),
+        )
+
+    run = session.scalar(select(PipelineRun))
+    check = session.scalar(select(QualityCheck))
+    assert run is not None
+    assert check is not None
+    assert run.status == "failed"
+    assert run.details["failure_stage"] == "retrieval"
+    assert check.check_name == "un_wpp_retrieval"
+    assert check.status == "failed"
+    assert session.scalar(select(func.count()).select_from(SourceRelease)) == 0
+
+
+def test_live_retrieval_rejects_an_unpinned_workbook(
+    session: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def changed_live_response(*args: object, **kwargs: object) -> BytesIO:
+        return BytesIO(b"structurally irrelevant changed workbook")
+
+    monkeypatch.setattr(
+        "app.un_wpp.urllib.request.urlopen",
+        changed_live_response,
+    )
+
+    with pytest.raises(ValueError, match="does not match pinned GEN/01/REV1"):
+        ingest_un_wpp(
+            session,
+            raw_store=LocalFilesystemRawSourceStore(tmp_path / "raw"),
+        )
+
+    run = session.scalar(select(PipelineRun))
+    check = session.scalar(select(QualityCheck))
+    assert run is not None
+    assert check is not None
+    assert run.status == "failed"
+    assert run.details["failure_stage"] == "validation"
+    assert check.check_name == "un_wpp_schema_supported_world_years"
+    assert check.status == "failed"
+    assert session.scalar(select(func.count()).select_from(SourceRelease)) == 0
+
+
 def test_wpp_ingestion_rejects_a_fixture_missing_a_required_year(
     session: Session, tmp_path: Path
 ) -> None:
@@ -264,7 +604,7 @@ def test_wpp_ingestion_rejects_a_fixture_missing_a_required_year(
         encoding="utf-8",
     )
 
-    with pytest.raises(ValueError, match="exactly 1950, 1964, 1989, and 2023"):
+    with pytest.raises(ValueError, match="every year from 1950 through 2025"):
         ingest_un_wpp(
             session,
             fixture_path=invalid,
