@@ -105,3 +105,13 @@ test("random day lands inside the shell with navigation still present", async ({
   await expect(page).toHaveURL(/\/day\/\d{4}-\d{2}-\d{2}$/);
   await expect(page.getByTestId("day-nav")).toBeVisible();
 });
+
+test("the canonical redirect is a real HTTP 308 before streaming", async ({
+  page
+}) => {
+  const response = await page.request.get("/day/1964-3-27", {
+    maxRedirects: 0
+  });
+  expect(response.status()).toBe(308);
+  expect(response.headers()["location"]).toContain("/day/1964-03-27");
+});

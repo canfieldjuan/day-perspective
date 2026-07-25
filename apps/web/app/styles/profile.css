@@ -202,6 +202,8 @@
     gap: 2rem;
     grid-template-columns: minmax(0, 1fr) 13rem;
   }
+}
+
 .stratum[data-stratum-state="loading"] {
   min-height: 9rem;
 }
