@@ -52,6 +52,7 @@ from app.models import (
     PipelineRun,
     ProfileType,
     PublicationManifest,
+    PublicationStatus,
     QualityAssessment,
     QualityCheck,
     RawSourceRecord,
@@ -1112,6 +1113,7 @@ def publish_golden_profile(
     session: Session,
     *,
     store: LocalFilesystemPublishedProfileStore,
+    force_new_version: bool = False,
 ) -> Any:
     source = session.scalar(select(Source).where(Source.slug == USGS_SOURCE_SLUG))
     if source is None:
@@ -1356,9 +1358,15 @@ def publish_golden_profile(
             derived_value_id=quality_derived.id,
         )
     )
+    # Only a published manifest can be superseded: an abandoned (withdrawn)
+    # manifest has no day profile, and offering it as a predecessor would
+    # permanently block republication after reconciliation.
     previous_manifest = session.scalar(
         select(PublicationManifest)
-        .where(PublicationManifest.profile_date == GOLDEN_DATE)
+        .where(
+            PublicationManifest.profile_date == GOLDEN_DATE,
+            PublicationManifest.status == PublicationStatus.PUBLISHED,
+        )
         .order_by(PublicationManifest.version.desc())
     )
     from app.models import DayProfile
@@ -1383,6 +1391,7 @@ def publish_golden_profile(
         supersedes_day_profile_id=previous_profile.id if previous_profile is not None else None,
         methodology_id=methodology.id,
         editorial_revision=(previous_manifest.editorial_revision + 1 if previous_manifest else 1),
+        force_new_version=force_new_version,
         manifest_metadata={
             "source_release_ids": [
                 str(release.id),

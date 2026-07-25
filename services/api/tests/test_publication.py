@@ -852,13 +852,16 @@ def test_local_profile_store_refuses_to_replace_an_existing_artifact(tmp_path: P
         store.write(date(1969, 7, 20), ProfileType.STANDARD_STATISTICAL, target_payload)
 
 
-def test_failed_commit_discards_staged_profile_and_retry_reuses_version(
+def test_completed_publication_survives_unrelated_commit_failure(
     session: Session, tmp_path: Path
 ) -> None:
+    """Fail-closed publication commits durably: a later unrelated failing
+    commit must not unwind a completed publication or its artifact, and a
+    correction supersedes with a fresh version instead of reusing one."""
     store = LocalFilesystemPublishedProfileStore(tmp_path)
     provenance = statement_evidence(session)
     session.commit()
-    first_payload = payload("Aborted publication.")
+    first_payload = payload("Durable publication.")
     profile = publish_day_profile(
         session,
         store=store,
@@ -886,8 +889,16 @@ def test_failed_commit_discards_staged_profile_and_retry_reuses_version(
         session.commit()
     session.rollback()
 
-    assert not (tmp_path / storage_uri).exists()
-    replacement_payload = payload("Successful retry.")
+    assert (tmp_path / storage_uri).exists(), (
+        "An unrelated failing commit must never remove a completed "
+        "publication's artifact."
+    )
+    session.expire_all()
+    surviving = session.get(PublicationManifest, profile.publication_manifest_id)
+    assert surviving is not None
+    assert surviving.status == PublicationStatus.PUBLISHED
+
+    replacement_payload = payload("Superseding correction.")
     replacement = publish_day_profile(
         session,
         store=store,
@@ -895,13 +906,14 @@ def test_failed_commit_discards_staged_profile_and_retry_reuses_version(
         profile_type=ProfileType.STANDARD_STATISTICAL,
         payload=replacement_payload,
         statement_evidence=provenance,
+        supersedes_manifest_id=profile.publication_manifest_id,
+        supersedes_day_profile_id=profile.id,
     )
-    session.commit()
     replacement_manifest = session.get(
         PublicationManifest, replacement.publication_manifest_id
     )
     assert replacement_manifest is not None
-    assert replacement_manifest.version == 1
+    assert replacement_manifest.version == 2
     assert store.read(
         replacement_manifest.storage_uri, replacement_manifest.content_hash
     ) == replacement_payload

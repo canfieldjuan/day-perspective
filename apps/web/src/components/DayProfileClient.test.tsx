@@ -329,13 +329,23 @@ describe("DayProfileClient focus discipline", () => {
       <DayProfileClient date="1964-03-28" arrival={<h1 tabIndex={-1}>March 28, 1964</h1>} />
     );
     await screen.findByRole("heading", { name: "The profile could not be loaded." });
-    expect(document.activeElement?.textContent).toBe("March 28, 1964");
+    // The focus effect flushes after the arrival commit, so wait for the
+    // condition instead of assuming it has landed by this tick.
+    await waitFor(() =>
+      expect(document.activeElement?.textContent).toBe("March 28, 1964")
+    );
 
     const retry = screen.getByRole("button", { name: "Retry profile request" });
     retry.focus();
     fireEvent.click(retry);
     await screen.findByRole("heading", { name: "The profile could not be loaded." });
-    expect(document.activeElement?.textContent).not.toBe("March 28, 1964");
+    // Give any late focus effect a chance to run before asserting it did not
+    // fire. Focus may legitimately fall to the body when the retry control is
+    // re-rendered; what must not happen is the arrival heading taking focus.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(document.activeElement).not.toBe(
+      screen.getByRole("heading", { name: "March 28, 1964" })
+    );
     fetchMock.mockRestore();
   });
 });
