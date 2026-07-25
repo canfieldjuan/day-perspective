@@ -546,8 +546,11 @@ date-modeled class have zero real data instances and are mock-tested
 only; the landing horizon's era-band widths are proportional to years,
 not data density; `wonder_and_progress` statements without markers
 classify as `unclassified` by design (C-4.6); post-merge Codex rounds on
-#25 and #27 were absorbed into the next open PR — check any future
-post-merge threads the same way.
+#25, #27, and #29 were absorbed into the next open PR — check any future
+post-merge threads the same way. One known e2e flake: the focus-follows-
+navigation test's click-initiated soft navigation intermittently stalls
+under parallel e2e server load (never in isolation), mitigated by visible
+test-level retries and tracked on epic #7.
 
 **Deferred (issues):** typed evidence-class vocabulary in contracts
 (#18), published-dates index endpoint for sighted navigation (#19), CI
