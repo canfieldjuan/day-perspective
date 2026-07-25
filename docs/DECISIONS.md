@@ -557,3 +557,47 @@ contract (`admin.css` must follow `base.css` for `.admin-shell` to override
 **Revisit trigger:** A design-token pipeline or theming requirement (e.g.
 dark mode) outgrows plain custom properties.
 
+
+## D028: Evidence-class derivation uses validated provenance presence
+
+**Decision:** The UI derives each statement's evidence class
+(`docs/UI_UX_CONTRACT.md` C-4) from typed signals first — the section key
+plus the validated presence of a `resolved_claim` vs `derived_value`
+provenance object — refined by runtime-checked optional `details` markers
+(`temporal_assignment`, `data_status`). The optional, unvalidated
+`provenance.root_type` field may corroborate but is never the discriminant.
+`packages/contracts` is not changed for this; promoting a typed vocabulary
+is tracked separately (issue #18).
+
+**Fallback outcomes for permissive validation:** the payload validator
+accepts statements with no provenance block at all
+(`apps/web/src/lib/day-profile.ts:114`) and accepts both branches present
+simultaneously (inclusive OR at `:103`). Both cases have defined, tested
+outcomes: absent provenance classifies as `unclassified` (contract C-4.6);
+both-branches-present classifies by root-gated section defaults that may
+never raise epistemic strength — `recorded` requires a resolved claim,
+`daily-average` requires a derived value, so both-present in the recorded
+section stays `recorded` because a resolved claim exists, while a
+derived-only statement there degrades to `unclassified` rather than
+claiming record-ness.
+
+**Context:** The published artifact carries class markers only inside
+`details: Record<string, unknown>`; nothing stronger is typed today.
+
+**Alternatives considered:** Trusting `root_type`; extending the contracts
+package now; parsing statement prose; section key alone; requiring exactly
+one provenance branch in the validator (rejected here — a validator
+tightening is a contract-layer change owned by issue #18's discussion).
+
+**Reason:** Rendering decisions must rest on signals the validator actually
+guarantees; untyped markers can refine but must degrade safely (unknown →
+section default, never a stronger claim, never a crash).
+
+**Consequences:** `deriveEvidenceClass` is a pure, never-throwing function
+with exhaustive unit tests covering every class, both permissive-validator
+cases, marker degradation, and a lying `root_type`; a future typed-details
+contract change (issue #18) can simplify it without changing rendered
+classes.
+
+**Revisit trigger:** Issue #18 lands a typed vocabulary, or a source
+publishes statements whose class the current signals cannot distinguish.

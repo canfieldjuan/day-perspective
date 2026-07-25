@@ -152,6 +152,9 @@ export function DayProfileClient({ date }: { date: string }) {
         availability="published"
         sections={viewState.profile.sections}
         sectionStates={viewState.profile.section_states}
+        sourceAttribution={viewState.profile.source_attribution}
+        quality={viewState.profile.quality}
+        profileDate={date}
       />
     );
   }

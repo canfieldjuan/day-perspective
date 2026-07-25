@@ -96,3 +96,79 @@
 .quality-grade {
   font-weight: 800;
 }
+
+.evidence-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-bottom: 0.45rem;
+}
+
+.evidence-chip {
+  border: 1px solid var(--muted-ink);
+  color: var(--muted-ink);
+  display: inline-block;
+  font-family: "Courier New", monospace;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  padding: 0.1rem 0.45rem;
+  text-transform: uppercase;
+}
+
+.evidence-chip[data-evidence-class="recorded"] {
+  border-color: var(--ink);
+  color: var(--ink);
+}
+
+.evidence-chip--disputed {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.evidence-caveat {
+  color: var(--muted-ink);
+  font-family: "Courier New", monospace;
+  font-size: 0.78rem;
+  margin-top: 0.45rem;
+}
+
+.profile-statement[data-evidence-class] {
+  border-left: 4px solid var(--line);
+  padding-left: 0.85rem;
+}
+
+.profile-statement[data-evidence-class="recorded"] {
+  border-left-style: solid;
+  border-left-color: var(--ink);
+}
+
+.profile-statement[data-evidence-class="daily-average"] {
+  border-left-style: dotted;
+}
+
+.profile-statement[data-evidence-class="date-modeled"] {
+  border-left-style: dashed;
+}
+
+.profile-statement[data-evidence-class="period-context"] {
+  border-left-style: groove;
+}
+
+.profile-statement[data-evidence-class="curated"] {
+  border-left-style: ridge;
+}
+
+.profile-statement[data-evidence-class="comparison"] {
+  border-left-style: double;
+}
+
+.profile-statement[data-evidence-class="archive-note"] {
+  border-left-width: 2px;
+}
+
+.profile-statement[data-evidence-class="unavailable"],
+.profile-statement[data-evidence-class="unclassified"] {
+  border-left-style: dotted;
+  opacity: 0.85;
+}
