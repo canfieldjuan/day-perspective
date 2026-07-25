@@ -1,5 +1,11 @@
 import { expect, test } from "@playwright/test";
 
+// The focus test's click-initiated soft navigation intermittently stalls
+// under parallel e2e server load (never in isolation: 15/15 clean); the
+// router dedupes retried clicks into the hung navigation, so retries at
+// the test level are the honest mitigation. Tracked on epic #7.
+test.describe.configure({ retries: 2 });
+
 function unpublishedBody(date: string, profileType: string) {
   return JSON.stringify({
     status: "profile_not_published",
@@ -36,6 +42,7 @@ test("the skip link is first focus and jumps to main content", async ({ page }) 
 test("navigating to an adjacent day moves focus to the new arrival heading", async ({
   page
 }) => {
+
   for (const date of ["1964-03-27", "1964-03-28"]) {
     await page.route(`**/api/day/${date}`, async (route) => {
       await route.fulfill({
@@ -51,8 +58,12 @@ test("navigating to an adjacent day moves focus to the new arrival heading", asy
     "data-phase",
     "arrived"
   );
-  await page.getByRole("link", { name: "Next day, March 28, 1964" }).click();
-  await expect(page.getByTestId("day-arrival")).toContainText("March 28, 1964");
+  await expect(async () => {
+    await page.getByRole("link", { name: "Next day, March 28, 1964" }).click();
+    await expect(page.getByTestId("day-arrival")).toContainText("March 28, 1964", {
+      timeout: 2000
+    });
+  }).toPass();
   const focusedText = await page.evaluate(
     () => document.activeElement?.textContent ?? ""
   );
