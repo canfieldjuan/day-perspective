@@ -195,15 +195,18 @@
 }
 
 .provenance-trigger {
+  align-items: flex-end;
   background: transparent;
   border: 0;
   border-bottom: 1px solid var(--muted-ink);
   color: var(--muted-ink);
+  display: inline-flex;
   font-family: "Courier New", monospace;
   font-size: 0.78rem;
   font-weight: 700;
-  margin-top: 0.6rem;
-  padding: 0 0 0.1rem;
+  margin-top: 0.35rem;
+  min-height: 44px;
+  padding: 0 0 0.35rem;
 }
 
 .provenance-trigger:hover {
