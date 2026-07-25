@@ -557,32 +557,3 @@ contract (`admin.css` must follow `base.css` for `.admin-shell` to override
 **Revisit trigger:** A design-token pipeline or theming requirement (e.g.
 dark mode) outgrows plain custom properties.
 
-## D028: Evidence-class derivation uses validated provenance presence
-
-**Decision:** The UI derives each statement's evidence class
-(`docs/UI_UX_CONTRACT.md` C-4) from typed signals first — the section key
-plus the validated presence of a `resolved_claim` vs `derived_value`
-provenance object — refined by runtime-checked optional `details` markers
-(`temporal_assignment`, `data_status`). The optional, unvalidated
-`provenance.root_type` field may corroborate but is never the discriminant.
-`packages/contracts` is not changed for this; promoting a typed vocabulary
-is tracked separately (issue #18).
-
-**Context:** The published artifact carries class markers only inside
-`details: Record<string, unknown>`; the payload validator
-(`apps/web/src/lib/day-profile.ts:103`) guarantees at least one typed
-provenance branch but never checks `root_type`.
-
-**Alternatives considered:** Trusting `root_type`; extending the contracts
-package now; parsing statement prose; section key alone.
-
-**Reason:** Rendering decisions must rest on signals the validator actually
-guarantees; untyped markers can refine but must degrade safely (unknown →
-section default, never a stronger claim, never a crash).
-
-**Consequences:** `deriveEvidenceClass` is a pure, never-throwing function
-with exhaustive unit tests (slice B1); a future typed-details contract
-change (issue #18) can simplify it without changing rendered classes.
-
-**Revisit trigger:** Issue #18 lands a typed vocabulary, or a source
-publishes statements whose class the current signals cannot distinguish.
