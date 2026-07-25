@@ -7,8 +7,10 @@ claim below cites the code that makes it true; claims are classified
 claims lead.
 
 Scope: the public web experience (`apps/web`). The admin review console
-(`apps/web/app/admin/review/page.tsx`) is a development-only tool behind
-`X-Development-Review-Token` and is out of the redesign's scope.
+(`apps/web/app/admin/review/page.tsx`) is out of the redesign's scope; note
+that its **page route is publicly reachable** — the
+`X-Development-Review-Token` gates only the `/api/admin/*` data requests
+and actions the page makes, not the route itself.
 
 ---
 
@@ -35,12 +37,15 @@ Scope: the public web experience (`apps/web`). The admin review console
    by the backend (e.g. "average daily equivalent based on the annual
    total, not an observation for March 27", pinned in
    `apps/web/e2e/full-stack-golden.spec.ts:22-26`) and as section
-   membership. Nothing in the rendering layer encodes statement class:
-   every statement is an identical `<article class="profile-statement">`
-   (`ProfileSections.tsx:53`) regardless of whether its provenance root is
-   a resolved claim or a derived value. A reader who skims statement text
-   sees typography that treats "magnitude 9.2" and "about 320,470 average
-   daily births" as the same kind of assertion.
+   membership. In the collapsed reading view, nothing encodes statement
+   class: every statement is an identical
+   `<article class="profile-statement">` (`ProfileSections.tsx:53`)
+   regardless of provenance root. The class IS named — "Resolved claim"
+   vs "Derived value" (`ProfileSections.tsx:67-85`) — but only inside
+   each statement's expanded provenance disclosure, one `<details>` at a
+   time. A reader who skims statement text sees typography that treats
+   "magnitude 9.2" and "about 320,470 average daily births" as the same
+   kind of assertion.
 
 ---
 
@@ -88,8 +93,13 @@ statement — disputed display has zero real data instances today.
 
 The class markers in `details` are **untyped** — the contract declares
 `details?: Record<string, unknown>` (`packages/contracts/src/index.ts:25`).
-Only `provenance.root_type` and the section key are typed signals of
-statement class.
+The reliable typed signals of statement class are the section key plus the
+**validated presence** of a `resolved_claim` vs `derived_value` object:
+the payload validator requires at least one of the two typed branches
+(`day-profile.ts:78-103`, disjunction at `:103`) but never checks
+`root_type`, which the contract declares optional
+(`packages/contracts/src/index.ts:27`). `root_type` may corroborate but
+must not be the discriminant.
 
 ### Styling
 
@@ -128,7 +138,11 @@ sections and panels; `aria-busy`/`aria-live` on loading; native
 
 Gaps: **zero `prefers-reduced-motion` handling anywhere in `apps/web`**
 (grep-verified) while the pulse animation runs infinitely; no skip link;
-no landmark beyond `<main>`; no automated a11y scanning in any test.
+no `header`/`nav` landmarks (the section cards and state panels ARE
+exposed as named region landmarks via `aria-labelledby`,
+`ProfileSections.tsx:46`, `DayProfileClient.tsx:94,107-110,126` — the
+missing landmarks are banner and navigation, not regions); no automated
+a11y scanning in any test.
 
 ### Tests
 
@@ -153,9 +167,13 @@ no landmark beyond `<main>`; no automated a11y scanning in any test.
 3. Clean seams: the server page composes `DateInputForm` and
    `DayProfileClient` as siblings; `ProfileSections` is purely
    presentational; contracts package is the single shared type source.
-4. Full provenance chain already renders: resolved claim/derived value,
-   supporting/dissenting claims with source-record links, source release,
-   methodology (`ProfileSections.tsx:63-117`).
+4. The provenance chain largely renders already: resolved claim/derived
+   value, supporting claims with source-record links, source release,
+   methodology (`ProfileSections.tsx:63-117`). One material gap:
+   **dissenting claims render as a retained count only**
+   (`ProfileSections.tsx:99-104`) — no predicates, locators, or links —
+   so any future dispute would be uninspectable. The redesign must give
+   dissent the same completeness as support (slice B3).
 5. Zero heavy dependencies; pure CSS with tokens; native form semantics.
 
 ---
@@ -213,13 +231,17 @@ Each item names the product rule it strains and the evidence.
    having gone anywhere.
 
 8. **e2e selector fragility that a redesign will trip.**
-   `full-stack-golden.spec.ts:12` pins "9.2 MW." against artifact text
-   "9.2 Mw." — it passes only because Playwright string matching is
-   case-insensitive; `:33-35` walks `.locator("..")` from a heading to
-   find its card, which breaks on any DOM restructure.
+   `full-stack-golden.spec.ts:33-35` walks `.locator("..")` from a
+   heading to find its card, which breaks on any DOM restructure.
    `golden-profile.spec.ts:70-76` and `DayProfileClient.test.tsx` pin the
    summary copy "Why can the app say this?", the link name pattern
    "the {source} source record", and "None in this publication."
+   (A prior draft claimed a "9.2 MW."-vs-"9.2 Mw." casing mismatch here;
+   that was false — the pipeline uppercases the scale (`usgs.py:1236`)
+   and the published artifact reads "9.2 MW.", matching the pin exactly.
+   The lowercase "Mw." appears only in `golden-profile.spec.ts:22`'s own
+   mock payload, which is self-consistent. Correction retained per the
+   audit's own discipline.)
 
 9. **Single-breakpoint responsiveness.** One 42rem media query
    (`globals.css:222-239`). Nothing between phone and 72rem desktop; no
