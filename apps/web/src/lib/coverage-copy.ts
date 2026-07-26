@@ -114,3 +114,60 @@ export function describeEmptyIndex(state: DiscoveryState): string {
       : `You can continue chronologically, choose another date, or explore the available ${held}.`;
   return `No enriched dates are currently available from this archive index. ${alternatives}`;
 }
+
+
+/**
+ * The landing page's disclosure, built only from aggregates the summary
+ * actually carries: the published total, the range, the tier breakdown and
+ * the recorded-event count.
+ *
+ * It deliberately does not say what the remaining dates contain. A
+ * `partially_enriched` profile can hold curated or comparison content and
+ * no period context at all, and the summary exposes no aggregate that
+ * would prove otherwise — so claiming it would be inventing a fact from a
+ * count.
+ */
+export function describeArchiveShape(summary: {
+  total_published: number;
+  by_tier: Record<string, number>;
+  with_recorded_event: number;
+  earliest: string | null;
+  latest: string | null;
+}): { scale: string; caveat: string } {
+  const span =
+    summary.earliest && summary.latest
+      ? `, from ${formatPublicDate(summary.earliest) ?? summary.earliest} to ${
+          formatPublicDate(summary.latest) ?? summary.latest
+        }`
+      : "";
+  const scale = `${summary.total_published.toLocaleString(
+    "en-US"
+  )} dates are published${span}.`;
+
+  const contextOnly = summary.by_tier.context_only ?? 0;
+  const events = summary.with_recorded_event;
+  const eventSentence =
+    events === 0
+      ? "No date yet carries a recorded event."
+      : events === 1
+        ? "One carries a recorded event."
+        : `${events.toLocaleString("en-US")} carry recorded events.`;
+  const contextSentence =
+    contextOnly === 0
+      ? ""
+      : ` ${contextOnly.toLocaleString("en-US")} carry the annual context of their year and no recorded event.`;
+
+  return { scale, caveat: `${eventSentence}${contextSentence}` };
+}
+
+/** Explains a direction with no enriched date, for the discovery nav. */
+export function describeNavAbsence(
+  missingDirection: "before" | "after" | null,
+  monument: string
+): string {
+  if (missingDirection === null) {
+    return "";
+  }
+  const side = missingDirection === "after" ? "after" : "before";
+  return `No enriched date is currently published ${side} ${monument}.`;
+}
