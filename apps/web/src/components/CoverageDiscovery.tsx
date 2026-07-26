@@ -40,12 +40,12 @@ export function CoverageDiscovery({
 
   return (
     <section
-      aria-labelledby="find-reviewed-evidence"
+      aria-labelledby="find-enriched-dates"
       className={styles.discovery}
       data-testid="coverage-discovery"
       data-discovery-state={state.kind}
     >
-      <h2 className={styles.heading} id="find-reviewed-evidence">
+      <h2 className={styles.heading} id="find-enriched-dates">
         Find enriched dates
       </h2>
       {state.kind === "none-available" ? (
@@ -153,7 +153,7 @@ function OneDirection({
         {band === "days"
           ? `${target} ${
               destination.hasRecordedEvent
-                ? "has reviewed recorded events"
+                ? "has recorded events"
                 : "carries more than annual context"
             }, ${destination.distance}.`
           : `${target}, ${destination.distance}.`}

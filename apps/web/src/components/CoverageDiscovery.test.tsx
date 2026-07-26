@@ -75,7 +75,7 @@ describe("CoverageDiscovery", () => {
 
     expect(screen.getByText("Continue to a richer date")).toBeInTheDocument();
     expect(
-      screen.getByText("March 27, 1964 has reviewed recorded events, one day later.")
+      screen.getByText("March 27, 1964 has recorded events, one day later.")
     ).toBeInTheDocument();
     expect(
       screen.getByRole("link", { name: "Explore March 27, 1964" })
@@ -99,7 +99,7 @@ describe("CoverageDiscovery", () => {
       )
     ).toBeInTheDocument();
     expect(
-      screen.queryByText(/has reviewed recorded events/)
+      screen.queryByText(/has recorded events/)
     ).toBeNull();
   });
 

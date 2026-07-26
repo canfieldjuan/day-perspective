@@ -59,7 +59,7 @@ test("an ordinary context-only date is honest about what it holds", async ({
   await page.goto("/day/1983-10-12");
 
   await expect(page.getByTestId("publication-tier")).toContainText(
-    "This date currently has demographic context only."
+    "This date currently has demographic and period context only."
   );
   await expect(page.getByTestId("publication-tier")).toContainText(
     "No recorded events are published for October 12, 1983."

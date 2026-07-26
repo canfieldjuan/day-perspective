@@ -69,11 +69,15 @@ export function CoverageSection({ date }: { date: string }) {
           {/* The tier also admits an evidence-notes-only profile, so the
               demographic sentence is earned from the sections rather than
               assumed from the tier. */}
-          {state.hasDemographicContext
-            ? `This date currently has demographic context only. No recorded events are published for ${monument}.`
-            : state.hasPeriodContext
-              ? `This date currently has period context only. No recorded events are published for ${monument}.`
-              : `No recorded events are published for ${monument}.`}
+          {/* The ordinary indexed profile carries both kinds, so naming
+              only one would omit what the page holds. */}
+          {state.hasDemographicContext && state.hasPeriodContext
+            ? `This date currently has demographic and period context only. No recorded events are published for ${monument}.`
+            : state.hasDemographicContext
+              ? `This date currently has demographic context only. No recorded events are published for ${monument}.`
+              : state.hasPeriodContext
+                ? `This date currently has period context only. No recorded events are published for ${monument}.`
+                : `No recorded events are published for ${monument}.`}
         </p>
       ) : null}
       <CoverageDiscovery date={date} state={state} />

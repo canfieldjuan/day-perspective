@@ -198,3 +198,19 @@ describe("period context is not demographic context", () => {
     expect(state.hasDemographicContext).toBe(true);
   });
 });
+
+describe("the ordinary profile carries both kinds of context", () => {
+  it("reports both when both sections are populated", () => {
+    // The ordinary indexed context profile: two typical-day statements and
+    // three wider-context ones.
+    const state = discoveryStateFor(
+      {
+        ...base,
+        sections: { typical_day_in_this_year: 2, wider_historical_context: 3 }
+      },
+      "1983-10-12"
+    );
+    expect(state.hasDemographicContext).toBe(true);
+    expect(state.hasPeriodContext).toBe(true);
+  });
+});
