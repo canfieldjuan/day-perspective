@@ -13,13 +13,11 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
-from typing import Any, Literal, cast
 from uuid import UUID
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.governance import EditorialSelection, EditorialSelectionStatus
 from app.models import (
     CoverageEntry,
     DayProfile,
@@ -40,29 +38,6 @@ SECTION_KEYS = (
     "evidence_notes",
 )
 RECORDED_SECTION = "recorded_on_this_date"
-#: What review actually happened for a date, derived from editorial-selection
-#: rows rather than from the presence of evidence. A recorded event is not a
-#: reviewed one: per-date human review exists as data or it does not exist.
-CoverageReviewStatus = Literal["reviewed", "rule_selected", "unreviewed"]
-REVIEWED_STATUS: CoverageReviewStatus = "reviewed"
-STANDING_RULE_REVIEW_STATUS: CoverageReviewStatus = "rule_selected"
-UNREVIEWED_STATUS: CoverageReviewStatus = "unreviewed"
-REVIEW_STATUSES: tuple[CoverageReviewStatus, ...] = (
-    REVIEWED_STATUS,
-    STANDING_RULE_REVIEW_STATUS,
-    UNREVIEWED_STATUS,
-)
-
-
-def as_review_status(value: str) -> CoverageReviewStatus:
-    """Narrow a stored status, weakening rather than inventing a claim.
-
-    A row written by a future version with a status this one cannot name
-    must not be read as something stronger than it is.
-    """
-    if value in REVIEW_STATUSES:
-        return cast(CoverageReviewStatus, value)
-    return UNREVIEWED_STATUS
 
 
 @dataclass
@@ -88,119 +63,17 @@ def _section_counts(session: Session, manifest_id: UUID) -> dict[str, int]:
     return counts
 
 
-#: Known grades from strongest to weakest. A grade outside this vocabulary
-#: cannot be ordered against it, so it sorts as the weakest thing present:
-#: "we cannot establish how good this is" must never read as "good".
-GRADE_ORDER = ("A", "B", "C", "D", "E", "F")
-
-
-def _weakness(grade: str) -> tuple[int, str]:
-    try:
-        return (GRADE_ORDER.index(grade), grade)
-    except ValueError:
-        return (len(GRADE_ORDER), grade)
-
-
-def quality_floor_from_payload(payload: dict[str, Any]) -> str | None:
-    """The weakest grade the profile rests on, not its best.
-
-    Read from the published payload, which is the same thing a reader is
-    served; the floor understates rather than flatters. Ordering is by an
-    explicit rank rather than string comparison, under which "A+" sorts
-    above "A" and would report the stronger grade as the floor.
-    """
-    grades: set[str] = set()
-    quality = payload.get("quality")
-    if isinstance(quality, dict) and isinstance(quality.get("grade"), str):
-        grades.add(quality["grade"])
-    sections = payload.get("sections")
-    if isinstance(sections, dict):
-        for statements in sections.values():
-            if not isinstance(statements, list):
-                continue
-            for statement in statements:
-                if not isinstance(statement, dict):
-                    continue
-                details = statement.get("details")
-                if isinstance(details, dict) and isinstance(
-                    details.get("quality_grade"), str
-                ):
-                    grades.add(details["quality_grade"])
-    if not grades:
-        return None
-    return max(grades, key=_weakness)
-
-
-def _review_status(
-    session: Session, manifest: PublicationManifest
-) -> CoverageReviewStatus:
-    """Derive review status from decisions about *this manifest's* evidence.
-
-    ``reviewed`` means a reviewer other than a standing rule selected content
-    that the reader is actually served. Scoping to the indexed manifest's
-    evidence roots matters: a human may have selected candidate content that
-    was never published, and that decision must not upgrade an unrelated
-    profile to "reviewed".
-    """
-    from app.un_wpp import STANDING_ANNUAL_CONTEXT_RULE
-
-    # Editorial selections are keyed by (profile_date, section_key, root),
-    # so matching the root alone is not enough: the same root can be
-    # standing-rule-selected in the published section and human-selected
-    # for a different, unpublished section on the same date.
-    section = func.split_part(PublicationStatementEvidence.statement_path, "/", 3)
-    published = (
-        select(
-            section.label("section_key"),
-            PublicationStatementEvidence.resolved_claim_id.label("resolved_claim_id"),
-            PublicationStatementEvidence.derived_value_id.label("derived_value_id"),
-        )
-        .where(PublicationStatementEvidence.publication_manifest_id == manifest.id)
-        .subquery()
-    )
-    reviewers = {
-        value.strip()
-        for value in session.scalars(
-            select(EditorialSelection.reviewed_by)
-            .join(
-                published,
-                (EditorialSelection.section_key == published.c.section_key)
-                & or_(
-                    EditorialSelection.resolved_claim_id
-                    == published.c.resolved_claim_id,
-                    EditorialSelection.derived_value_id
-                    == published.c.derived_value_id,
-                ),
-            )
-            .where(
-                EditorialSelection.profile_date == manifest.profile_date,
-                EditorialSelection.status == EditorialSelectionStatus.SELECTED,
-            )
-        )
-        # reviewed_by is NOT NULL, but nothing forbids an empty string, and
-        # "not the standing rule" is not the same as "a person decided".
-        if value and value.strip()
-    }
-    if not reviewers:
-        return UNREVIEWED_STATUS
-    if reviewers - {STANDING_ANNUAL_CONTEXT_RULE}:
-        return REVIEWED_STATUS
-    return STANDING_RULE_REVIEW_STATUS
-
-
 def upsert_coverage_entry(
     session: Session,
     *,
     manifest: PublicationManifest,
-    payload: dict[str, Any] | None = None,
-    store: PublishedProfileStore | None = None,
 ) -> CoverageEntry:
     """Record this date's richness. Called as publication's final step.
 
-    The quality floor comes from the served payload: the publisher passes
-    what it just published, and a rebuild reads the artifact when given a
-    store. Without either, an existing floor is preserved rather than
-    silently nulled.
+    Every field is derived from the manifest and its immutable statement
+    evidence — nothing here reads the artifact or the editorial record, so
+    there is no payload to thread through the callers and no second source
+    that could disagree with this one.
     """
     counts = _section_counts(session, manifest.id)
     has_event = counts[RECORDED_SECTION] > 0
@@ -209,24 +82,12 @@ def upsert_coverage_entry(
             CoverageEntry.profile_date == manifest.profile_date
         )
     )
-    if payload is None and store is not None:
-        try:
-            payload = store.read(manifest.storage_uri, manifest.content_hash)
-        except (OSError, RuntimeError, ValueError):
-            payload = None
-    floor = (
-        quality_floor_from_payload(payload)
-        if payload is not None
-        else (entry.quality_floor if entry is not None else None)
-    )
     values = {
         "profile_type": manifest.profile_type,
         "publication_manifest_id": manifest.id,
         "publication_tier": manifest.publication_tier,
         "has_recorded_event": has_event,
         "sections": counts,
-        "quality_floor": floor,
-        "review_status": _review_status(session, manifest),
         "refreshed_at": datetime.now(UTC),
     }
     if entry is None:
@@ -316,16 +177,12 @@ def rebuild_coverage_index(
             if manifest is None:
                 # No published manifest with a profile row: not served.
                 continue
-            payload = None
-            if store is not None:
-                payload = _read_artifact(store, manifest)
-                if payload is None:
-                    # The day endpoint fails for this date. Indexing it
-                    # anyway would send readers to a page that cannot be
-                    # served.
-                    report.unreadable.append(manifest.profile_date)
-                    continue
-            upsert_coverage_entry(session, manifest=manifest, payload=payload)
+            if store is not None and not _artifact_servable(store, manifest):
+                # The day endpoint fails for this date. Indexing it anyway
+                # would send readers to a page that cannot be served.
+                report.unreadable.append(manifest.profile_date)
+                continue
+            upsert_coverage_entry(session, manifest=manifest)
             live_dates.add(manifest.profile_date)
     report.dropped = _drop_stale_entries(
         session, live_dates=live_dates, store=store
@@ -334,19 +191,20 @@ def rebuild_coverage_index(
     return report
 
 
-def _read_artifact(
+def _artifact_servable(
     store: PublishedProfileStore, manifest: PublicationManifest
-) -> dict[str, Any] | None:
-    """The verified payload, or None when this date is not servable.
+) -> bool:
+    """Whether the day endpoint could serve this date.
 
-    Returned rather than discarded: reading twice leaves a window in which
-    the second read fails, and upsert_coverage_entry tolerates that failure,
-    so the date would be indexed as live after its artifact went away.
+    The read is a guard only: no indexed field comes from the payload, so
+    there is nothing to carry forward and no second read to disagree with
+    this one.
     """
     try:
-        return store.read(manifest.storage_uri, manifest.content_hash)
+        store.read(manifest.storage_uri, manifest.content_hash)
     except (OSError, RuntimeError, ValueError):
-        return None
+        return False
+    return True
 
 
 def _drop_stale_entries(
@@ -380,7 +238,7 @@ def _drop_stale_entries(
                 continue
             manifest = _latest_published_manifest(session, profile_date)
             if manifest is not None and (
-                store is None or _read_artifact(store, manifest) is not None
+                store is None or _artifact_servable(store, manifest)
             ):
                 live_dates.add(profile_date)
                 continue

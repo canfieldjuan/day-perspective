@@ -171,7 +171,6 @@ def test_the_index_records_richness_not_merely_publication(
     assert enriched.publication_tier is PublicationTier.REVIEWED_ENRICHED
     assert enriched.sections["recorded_on_this_date"] == 1
     assert enriched.has_recorded_event is True
-    assert enriched.quality_floor == "B"
 
 
 @pytest.mark.integration
@@ -376,73 +375,6 @@ def test_rebuild_refuses_to_advertise_an_unreadable_artifact(
 
 
 @pytest.mark.integration
-def test_review_status_reflects_recorded_review_not_evidence_presence(
-    session: Session, tmp_path: Path, reviewed_un_wpp: None
-) -> None:
-    """A recorded event is not a reviewed one. Per-date human review exists
-    as editorial-selection data or it does not exist at all."""
-    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
-    context_date = date(1986, 1, 6)
-    unreviewed_date = date(1986, 1, 8)
-    run = start_batch_run(
-        session,
-        kind=CONTEXT_BATCH_KIND,
-        requested={"dates": [context_date.isoformat()]},
-    )
-    run_context_batch(session, store=store, dates=[context_date], batch_run=run)
-    publish_enriched(session, store, unreviewed_date, label="unreviewed-event")
-    session.commit()
-    rebuild_coverage_index(session, store=store)
-    session.commit()
-
-    context = coverage_entry(session, context_date)
-    assert context is not None
-    assert context.review_status == "rule_selected"
-
-    unreviewed = coverage_entry(session, unreviewed_date)
-    assert unreviewed is not None
-    assert unreviewed.has_recorded_event is True
-    assert unreviewed.review_status == "unreviewed"
-
-
-@pytest.mark.integration
-def test_a_human_editorial_decision_reads_as_reviewed(
-    session: Session, tmp_path: Path, reviewed_un_wpp: None
-) -> None:
-    from app.governance import EditorialSelection, EditorialSelectionStatus
-    from app.models import ResolvedClaim
-
-    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
-    profile_date = date(1987, 5, 5)
-    publish_enriched(session, store, profile_date, label="human-reviewed")
-    resolved = session.scalar(
-        select(ResolvedClaim).where(
-            ResolvedClaim.canonical_key == "test:human-reviewed"
-        )
-    )
-    assert resolved is not None
-    session.add(
-        EditorialSelection(
-            profile_date=profile_date,
-            section_key="recorded_on_this_date",
-            resolved_claim_id=resolved.id,
-            status=EditorialSelectionStatus.SELECTED,
-            decision_version=1,
-            display_rank=1,
-            rationale="A human considered this date.",
-            reviewed_by="editor@example.invalid",
-        )
-    )
-    session.commit()
-    rebuild_coverage_index(session, store=store)
-    session.commit()
-
-    record = coverage_entry(session, profile_date)
-    assert record is not None
-    assert record.review_status == "reviewed"
-
-
-@pytest.mark.integration
 def test_rebuild_does_not_overwrite_a_newer_publication(
     session: Session, tmp_path: Path, reviewed_un_wpp: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -489,130 +421,7 @@ def test_rebuild_does_not_overwrite_a_newer_publication(
     assert indexed_version == 2, "rebuild indexed a superseded manifest"
 
 
-@pytest.mark.integration
-def test_a_long_quality_grade_does_not_fail_publication(
-    session: Session, tmp_path: Path
-) -> None:
-    """Coverage is written after the artifact is promoted; a contract-valid
-    grade must never turn a completed publication into a failure."""
-    from app.models import ProfileType
-
-    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
-    profile_date = date(1979, 3, 3)
-    grade = "provisional-B"
-    claim = create_claim(
-        session,
-        source_release_id=_synthetic_release(session, "long-grade").id,
-        source_record_locator="record:long-grade",
-        claim_type="synthetic_assertion",
-        assertion_text="A recorded event.",
-    )
-    resolved = resolve_claim(
-        session,
-        canonical_key="test:long-grade",
-        resolved_value={"statement": "A recorded event."},
-        rationale="Test-only recorded event.",
-        supporting_claim_ids=[claim.id],
-    )
-
-    publish_day_profile(
-        session,
-        store=store,
-        profile_date=profile_date,
-        profile_type=ProfileType.STANDARD_STATISTICAL,
-        payload={
-            "schema_version": "1",
-            "date": profile_date.isoformat(),
-            "profile_type": "standard_statistical",
-            "sections": {
-                "recorded_on_this_date": [
-                    {"statement_id": "event", "statement": "A recorded event."}
-                ]
-            },
-            "quality": {"grade": grade, "explanation": "Longer than eight."},
-        },
-        statement_evidence=[
-            PublicationStatementEvidenceInput(
-                statement_path="/sections/recorded_on_this_date/0",
-                resolved_claim_id=resolved.id,
-            )
-        ],
-    )
-    session.commit()
-
-    record = coverage_entry(session, profile_date)
-    assert record is not None
-    assert record.quality_floor == grade
-
-
-@pytest.mark.integration
-def test_a_blank_reviewer_is_not_a_human_review(
-    session: Session, tmp_path: Path, reviewed_un_wpp: None
-) -> None:
-    """`reviewed_by` is NOT NULL but nothing forbids an empty string, and
-    "not the standing rule" is not the same as "a person decided"."""
-    from app.governance import EditorialSelection, EditorialSelectionStatus
-    from app.models import ResolvedClaim
-
-    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
-    profile_date = date(1978, 11, 11)
-    publish_enriched(session, store, profile_date, label="blank-reviewer")
-    resolved = session.scalar(
-        select(ResolvedClaim).where(
-            ResolvedClaim.canonical_key == "test:blank-reviewer"
-        )
-    )
-    assert resolved is not None
-    session.add(
-        EditorialSelection(
-            profile_date=profile_date,
-            section_key="recorded_on_this_date",
-            resolved_claim_id=resolved.id,
-            status=EditorialSelectionStatus.SELECTED,
-            decision_version=1,
-            display_rank=1,
-            rationale="Selection with no recorded reviewer.",
-            reviewed_by="   ",
-        )
-    )
-    session.commit()
-    rebuild_coverage_index(session, store=store)
-    session.commit()
-
-    record = coverage_entry(session, profile_date)
-    assert record is not None
-    assert record.review_status == "unreviewed"
-
-
 # --- Round 2 review findings (PR #43) ------------------------------------
-
-
-def test_the_quality_floor_orders_grades_by_rank_not_alphabet() -> None:
-    """`max()` over strings puts "A+" above "A", so the floor would report
-    the stronger grade. The contract permits any grade string."""
-    from app.coverage import quality_floor_from_payload
-
-    def payload(*grades: str) -> dict[str, object]:
-        return {
-            "quality": {"grade": grades[0], "explanation": "aggregate"},
-            "sections": {
-                "recorded_on_this_date": [
-                    {
-                        "statement_id": f"s{index}",
-                        "statement": "x",
-                        "details": {"quality_grade": grade},
-                    }
-                    for index, grade in enumerate(grades[1:])
-                ]
-            },
-        }
-
-    assert quality_floor_from_payload(payload("A", "C", "B")) == "C"
-    assert quality_floor_from_payload(payload("A+", "A")) == "A+"
-    # An ungradeable value cannot be ordered, so it is treated as the
-    # weakest thing present rather than silently ranked.
-    assert quality_floor_from_payload(payload("A", "provisional")) == "provisional"
-    assert quality_floor_from_payload(payload("B")) == "B"
 
 
 @pytest.mark.integration
@@ -676,98 +485,6 @@ def test_a_rebuild_does_not_hold_one_lock_per_date(
     session.commit()
 
     assert held == 0, f"{held} advisory locks still held after the rebuild"
-
-
-@pytest.mark.integration
-def test_reconcile_repair_indexes_the_recovered_quality_floor(
-    session: Session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Repair reads and verifies the artifact; discarding it leaves coverage
-    describing the predecessor's grade under the new manifest."""
-    from app.models import ProfileType
-    from app.services import reconcile_publications
-
-    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
-    profile_date = date(1982, 2, 2)
-    release = _synthetic_release(session, "recovered-floor")
-
-    def evidence(label: str) -> list[PublicationStatementEvidenceInput]:
-        claim = create_claim(
-            session,
-            source_release_id=release.id,
-            source_record_locator=f"record:{label}",
-            claim_type="synthetic_assertion",
-            assertion_text=f"Event {label}.",
-        )
-        resolved = resolve_claim(
-            session,
-            canonical_key=f"test:recovered-{label}",
-            resolved_value={"statement": f"Event {label}."},
-            rationale="Test-only recorded event.",
-            supporting_claim_ids=[claim.id],
-        )
-        return [
-            PublicationStatementEvidenceInput(
-                statement_path="/sections/recorded_on_this_date/0",
-                resolved_claim_id=resolved.id,
-            )
-        ]
-
-    def payload(grade: str) -> dict[str, object]:
-        return {
-            "schema_version": "1",
-            "date": profile_date.isoformat(),
-            "profile_type": "standard_statistical",
-            "sections": {
-                "recorded_on_this_date": [
-                    {"statement_id": "event", "statement": f"Event {grade}."}
-                ]
-            },
-            "quality": {"grade": grade, "explanation": "Grade under test."},
-        }
-
-    first = publish_day_profile(
-        session,
-        store=store,
-        profile_date=profile_date,
-        profile_type=ProfileType.STANDARD_STATISTICAL,
-        payload=payload("B"),
-        statement_evidence=evidence("first"),
-    )
-    session.commit()
-    before = coverage_entry(session, profile_date)
-    assert before is not None
-    assert before.quality_floor == "B"
-
-    from app import services as services_module
-
-    def explode(*args: object, **inner: object) -> None:
-        raise RuntimeError("Simulated crash before artifact promotion.")
-
-    monkeypatch.setattr(services_module.StagedProfileWrite, "finalize", explode)
-    with pytest.raises(RuntimeError, match="Simulated crash"):
-        publish_day_profile(
-            session,
-            store=store,
-            profile_date=profile_date,
-            profile_type=ProfileType.STANDARD_STATISTICAL,
-            payload=payload("D"),
-            statement_evidence=evidence("second"),
-            supersedes_manifest_id=first.publication_manifest_id,
-            supersedes_day_profile_id=first.id,
-        )
-    monkeypatch.undo()
-    session.rollback()
-
-    report = reconcile_publications(session, store=store, repair=True)
-    session.commit()
-
-    if report.completed_pending:
-        record = coverage_entry(session, profile_date)
-        assert record is not None
-        assert record.quality_floor == "D", (
-            "coverage kept the predecessor's grade after repair"
-        )
 
 
 # --- Round 3 review findings (PR #43) ------------------------------------
@@ -838,18 +555,18 @@ def test_a_skipped_snapshot_date_is_rechecked_before_deletion(
     snapshot = list(coverage_module.latest_published_manifests(session))
 
     calls = {"n": 0}
-    real_read = coverage_module._read_artifact
+    real_servable = coverage_module._artifact_servable
 
-    def unreadable_once(store_arg: Any, manifest: Any) -> dict[str, Any] | None:
-        # Unreadable while the snapshot pass looks at it, healthy by the
+    def unservable_once(store_arg: Any, manifest: Any) -> bool:
+        # Unservable while the snapshot pass looks at it, healthy by the
         # time the cleanup pass reconsiders it.
         calls["n"] += 1
         if calls["n"] == 1:
-            return None
-        result: dict[str, Any] | None = real_read(store_arg, manifest)
+            return False
+        result: bool = real_servable(store_arg, manifest)
         return result
 
-    monkeypatch.setattr(coverage_module, "_read_artifact", unreadable_once)
+    monkeypatch.setattr(coverage_module, "_artifact_servable", unservable_once)
     monkeypatch.setattr(
         coverage_module, "latest_published_manifests", lambda _session: snapshot
     )
@@ -860,63 +577,6 @@ def test_a_skipped_snapshot_date_is_rechecked_before_deletion(
         "the rebuild deleted a date that was healthy by the time it was dropped"
     )
     assert report.dropped == 0
-
-
-@pytest.mark.integration
-def test_review_status_ignores_selections_for_unpublished_content(
-    session: Session, tmp_path: Path, reviewed_un_wpp: None
-) -> None:
-    """A human may select candidate content that never ships; that decision
-    must not upgrade a profile the reader is served to "reviewed"."""
-    from app.governance import EditorialSelection, EditorialSelectionStatus
-
-    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
-    profile_date = date(1996, 4, 4)
-    run = start_batch_run(
-        session,
-        kind=CONTEXT_BATCH_KIND,
-        requested={"dates": [profile_date.isoformat()]},
-    )
-    run_context_batch(session, store=store, dates=[profile_date], batch_run=run)
-    session.commit()
-
-    # A human decision about a claim that is not in the published manifest.
-    unpublished = resolve_claim(
-        session,
-        canonical_key="test:never-published",
-        resolved_value={"statement": "Considered but not published."},
-        rationale="Test-only candidate.",
-        supporting_claim_ids=[
-            create_claim(
-                session,
-                source_release_id=_synthetic_release(session, "candidate").id,
-                source_record_locator="record:candidate",
-                claim_type="synthetic_assertion",
-                assertion_text="Candidate content.",
-            ).id
-        ],
-    )
-    session.add(
-        EditorialSelection(
-            profile_date=profile_date,
-            section_key="curated_claims",
-            resolved_claim_id=unpublished.id,
-            status=EditorialSelectionStatus.SELECTED,
-            decision_version=1,
-            display_rank=1,
-            rationale="A human considered this candidate.",
-            reviewed_by="editor@example.invalid",
-        )
-    )
-    session.commit()
-    rebuild_coverage_index(session, store=store)
-    session.commit()
-
-    record = coverage_entry(session, profile_date)
-    assert record is not None
-    assert record.review_status == "rule_selected", (
-        "a selection for unpublished content upgraded the served profile"
-    )
 
 
 @pytest.mark.integration
@@ -977,100 +637,3 @@ def test_coverage_follows_the_version_the_day_endpoint_serves(
 # --- Round 5 review findings (PR #43) ------------------------------------
 
 
-@pytest.mark.integration
-def test_a_human_decision_in_another_section_is_not_review_of_this_one(
-    session: Session, tmp_path: Path, reviewed_un_wpp: None
-) -> None:
-    """Selections are keyed by (date, section_key, root). Matching the root
-    alone lets a decision about a different, unpublished section upgrade the
-    served profile."""
-    from app.governance import EditorialSelection, EditorialSelectionStatus
-    from app.models import DerivedValue, PublicationStatementEvidence
-
-    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
-    profile_date = date(1999, 9, 9)
-    run = start_batch_run(
-        session,
-        kind=CONTEXT_BATCH_KIND,
-        requested={"dates": [profile_date.isoformat()]},
-    )
-    run_context_batch(session, store=store, dates=[profile_date], batch_run=run)
-    session.commit()
-
-    manifest_id = session.scalar(
-        select(CoverageEntry.publication_manifest_id).where(
-            CoverageEntry.profile_date == profile_date
-        )
-    )
-    published_root = session.scalar(
-        select(PublicationStatementEvidence.derived_value_id).where(
-            PublicationStatementEvidence.publication_manifest_id == manifest_id,
-            PublicationStatementEvidence.derived_value_id.is_not(None),
-        )
-    )
-    assert published_root is not None
-    assert session.get(DerivedValue, published_root) is not None
-
-    # Same root, but a human decision recorded against a section that this
-    # manifest does not publish.
-    session.add(
-        EditorialSelection(
-            profile_date=profile_date,
-            section_key="wonder_and_progress",
-            derived_value_id=published_root,
-            status=EditorialSelectionStatus.SELECTED,
-            decision_version=1,
-            display_rank=1,
-            rationale="Considered for a section that is not published.",
-            reviewed_by="editor@example.invalid",
-        )
-    )
-    session.commit()
-    rebuild_coverage_index(session, store=store)
-    session.commit()
-
-    record = coverage_entry(session, profile_date)
-    assert record is not None
-    assert record.review_status == "rule_selected", (
-        "a decision about an unpublished section upgraded the served profile"
-    )
-
-
-@pytest.mark.integration
-def test_a_rebuild_does_not_index_an_artifact_that_vanished_mid_pass(
-    session: Session, tmp_path: Path, reviewed_un_wpp: None, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Reading twice leaves a window: the guard passes, the artifact goes
-    away, and the upsert tolerates the second failure."""
-    from app import coverage as coverage_module
-
-    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
-    profile_date = date(2000, 10, 10)
-    run = start_batch_run(
-        session,
-        kind=CONTEXT_BATCH_KIND,
-        requested={"dates": [profile_date.isoformat()]},
-    )
-    run_context_batch(session, store=store, dates=[profile_date], batch_run=run)
-    session.commit()
-
-    reads = {"n": 0}
-    real_read = coverage_module._read_artifact
-
-    def read_then_vanish(store_arg: Any, manifest: Any) -> dict[str, Any] | None:
-        reads["n"] += 1
-        payload: dict[str, Any] | None = real_read(store_arg, manifest)
-        for artifact in (tmp_path / "published").rglob("*.json"):
-            artifact.unlink()
-        return payload
-
-    monkeypatch.setattr(coverage_module, "_read_artifact", read_then_vanish)
-    rebuild_coverage_index(session, store=store)
-    session.commit()
-
-    assert reads["n"] >= 1
-    record = coverage_entry(session, profile_date)
-    assert record is not None
-    # The single verified read is what gets indexed, so the quality floor
-    # comes from the payload rather than being silently preserved.
-    assert record.publication_tier is PublicationTier.CONTEXT_ONLY

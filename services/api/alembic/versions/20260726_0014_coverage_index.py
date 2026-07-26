@@ -56,17 +56,6 @@ def upgrade() -> None:
             nullable=False,
             server_default=sa.text("'{}'::jsonb"),
         ),
-        # The shared contract permits any string for quality.grade, and
-        # coverage is written after the artifact is already promoted: a
-        # length limit here would turn a completed publication into a
-        # failure at its final step.
-        sa.Column("quality_floor", sa.Text, nullable=True),
-        sa.Column(
-            "review_status",
-            sa.String(32),
-            nullable=False,
-            server_default="unreviewed",
-        ),
         sa.Column(
             "refreshed_at",
             sa.DateTime(timezone=True),
@@ -103,7 +92,7 @@ def _backfill_existing_archive() -> None:
         """
         INSERT INTO coverage_entries (
             profile_date, profile_type, publication_manifest_id,
-            publication_tier, has_recorded_event, sections, review_status
+            publication_tier, has_recorded_event, sections
         )
         SELECT
             m.profile_date,
@@ -120,12 +109,7 @@ def _backfill_existing_archive() -> None:
                   "derived_comparisons": 0, "wonder_and_progress": 0,
                   "evidence_notes": 0}'::jsonb
                 || COALESCE(counts.sections, '{}'::jsonb)
-            ),
-            CASE
-                WHEN reviewers.human > 0 THEN 'reviewed'
-                WHEN reviewers.total > 0 THEN 'rule_selected'
-                ELSE 'unreviewed'
-            END
+            )
         FROM publication_manifests AS m
         JOIN day_profiles AS d ON d.publication_manifest_id = m.id
         JOIN (
@@ -165,39 +149,6 @@ def _backfill_existing_archive() -> None:
                 GROUP BY 1
             ) AS per_section
         ) AS counts ON TRUE
-        LEFT JOIN LATERAL (
-            SELECT
-                -- Same normalisation the runtime derivation applies: a
-                -- blank or whitespace-padded reviewer is not a human
-                -- review, and the backfill must not make a stronger claim
-                -- than a rebuild would.
-                COUNT(*) FILTER (WHERE btrim(s.reviewed_by) <> '') AS total,
-                COUNT(*) FILTER (
-                    WHERE btrim(s.reviewed_by) NOT IN (
-                        '', 'standing-rule:annual-context-v1'
-                    )
-                ) AS human
-            FROM editorial_selections AS s
-            WHERE s.profile_date = m.profile_date
-              AND s.status = 'selected'
-              -- Scoped to this manifest's own evidence, as _review_status
-              -- is: a decision about content that was never published is
-              -- not review of what the reader is served.
-              AND (
-                  s.resolved_claim_id IN (
-                      SELECT e.resolved_claim_id
-                      FROM publication_statement_evidence AS e
-                      WHERE e.publication_manifest_id = m.id
-                        AND e.resolved_claim_id IS NOT NULL
-                  )
-                  OR s.derived_value_id IN (
-                      SELECT e.derived_value_id
-                      FROM publication_statement_evidence AS e
-                      WHERE e.publication_manifest_id = m.id
-                        AND e.derived_value_id IS NOT NULL
-                  )
-              )
-        ) AS reviewers ON TRUE
         WHERE m.status = 'published'
         ON CONFLICT (profile_date) DO NOTHING
         """

@@ -916,10 +916,6 @@ class CoverageEntry(Base):
     )
     has_recorded_event: Mapped[bool] = mapped_column(Boolean, default=False)
     sections: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
-    # Text, not a bounded string: the contract permits any quality grade,
-    # and this row is written after the artifact is already promoted.
-    quality_floor: Mapped[str | None] = mapped_column(Text, nullable=True)
-    review_status: Mapped[str] = mapped_column(String(32), default="unreviewed")
     refreshed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

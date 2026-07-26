@@ -253,17 +253,18 @@ def test_the_coverage_index_migration_backfills_an_existing_archive(
                 for row in connection.execute(
                     text(
                         "SELECT profile_date::text, publication_tier::text, "
-                        "review_status, sections::text FROM coverage_entries"
+                        "has_recorded_event, sections::text FROM coverage_entries"
                     )
                 ).all()
             }
         assert set(rows) == {value.isoformat() for value in context_dates}
-        for tier, review_status, sections in rows.values():
+        for tier, has_recorded_event, sections in rows.values():
             assert tier == "context_only"
-            # Selected by the standing rule, which is not a human review.
-            assert review_status == "rule_selected"
+            assert has_recorded_event is False
             assert '"typical_day_in_this_year": 2' in sections
             assert '"wider_historical_context": 3' in sections
+            # All seven keys, zero-filled, exactly as the publisher emits.
+            assert '"curated_claims": 0' in sections
     finally:
         command.upgrade(alembic_config, "head")
         engine.dispose()

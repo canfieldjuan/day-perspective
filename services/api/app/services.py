@@ -1026,12 +1026,9 @@ def reconcile_publications(
         destination = root / manifest.storage_uri
         temp = destination.with_name(destination.name + ".tmp")
         payload_ready = False
-        verified_payload: dict[str, Any] | None = None
         if destination.exists():
             try:
-                verified_payload = store.read(
-                    manifest.storage_uri, manifest.content_hash
-                )
+                store.read(manifest.storage_uri, manifest.content_hash)
                 payload_ready = True
             except (RuntimeError, OSError, ValueError):
                 report.hash_mismatches += 1
@@ -1064,9 +1061,7 @@ def reconcile_publications(
                         store,
                     )
                     staged.finalize()
-                    verified_payload = store.read(
-                        manifest.storage_uri, manifest.content_hash
-                    )
+                    store.read(manifest.storage_uri, manifest.content_hash)
             else:
                 report.details.append(
                     f"pending manifest {manifest.id} staged payload unusable: "
@@ -1083,12 +1078,7 @@ def reconcile_publications(
                 # index would keep the predecessor's quality floor while
                 # pointing at the new manifest. Indexed by date so a repair
                 # of an older version cannot displace a newer served one.
-                _index_served_manifest(
-                    session,
-                    manifest.profile_date,
-                    store=store,
-                    payload_for=(manifest.id, verified_payload),
-                )
+                _index_served_manifest(session, manifest.profile_date)
                 session.commit()
         else:
             report.abandoned_pending += 1
@@ -1146,7 +1136,7 @@ def reconcile_publications(
                 # Index the date, not this manifest: repairing an older
                 # version must not rewrite coverage to it while the day
                 # endpoint still serves a newer healthy one.
-                _index_served_manifest(session, manifest.profile_date, store=store)
+                _index_served_manifest(session, manifest.profile_date)
                 session.commit()
         else:
             report.healthy_published += 1
@@ -1281,13 +1271,7 @@ class PendingPublicationError(RuntimeError):
     """A pending publication with different content blocks this attempt."""
 
 
-def _index_coverage(
-    session: Session,
-    manifest: PublicationManifest,
-    payload: dict[str, Any] | None = None,
-    *,
-    store: PublishedProfileStore | None = None,
-) -> None:
+def _index_coverage(session: Session, manifest: PublicationManifest) -> None:
     """Record this manifest in the coverage index.
 
     Every path that makes a profile readable goes through here: publication,
@@ -1297,18 +1281,10 @@ def _index_coverage(
     """
     from app.coverage import upsert_coverage_entry
 
-    upsert_coverage_entry(
-        session, manifest=manifest, payload=payload, store=store
-    )
+    upsert_coverage_entry(session, manifest=manifest)
 
 
-def _index_served_manifest(
-    session: Session,
-    profile_date: date,
-    *,
-    store: PublishedProfileStore | None = None,
-    payload_for: tuple[UUID, dict[str, Any] | None] | None = None,
-) -> None:
+def _index_served_manifest(session: Session, profile_date: date) -> None:
     """Index whichever manifest a reader is served for this date.
 
     Reconciliation repairs one manifest, but the date may already have a
@@ -1319,14 +1295,8 @@ def _index_served_manifest(
     from app.coverage import _latest_published_manifest, upsert_coverage_entry
 
     served = _latest_published_manifest(session, profile_date)
-    if served is None:
-        return
-    payload = None
-    if payload_for is not None and payload_for[0] == served.id:
-        payload = payload_for[1]
-    upsert_coverage_entry(
-        session, manifest=served, payload=payload, store=store if payload is None else None
-    )
+    if served is not None:
+        upsert_coverage_entry(session, manifest=served)
 
 
 def publication_advisory_lock_key(profile_date: date, profile_type: ProfileType) -> str:
@@ -1410,11 +1380,11 @@ def publish_day_profile(
                 )
             )
             if existing_profile is not None:
-                payload_on_disk = store.read(latest_published.storage_uri, digest)
+                store.read(latest_published.storage_uri, digest)
                 # Re-running the publishers is the obvious way to heal an
                 # index that was never built (or was dropped); if the
                 # idempotent path skipped coverage, that never works.
-                _index_coverage(session, latest_published, payload_on_disk)
+                _index_coverage(session, latest_published)
                 session.commit()
                 return existing_profile
 
@@ -1541,7 +1511,7 @@ def publish_day_profile(
         session.flush()
         # Coverage is publication's final step, so navigation never reads a
         # stale picture of the archive between bulk runs (D034).
-        _index_coverage(session, completed, payload)
+        _index_coverage(session, completed)
         session.commit()
         return profile
     except BaseException:

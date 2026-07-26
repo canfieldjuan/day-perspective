@@ -894,3 +894,25 @@ diagnostic need actually was.
 
 The principle, applied here and to review status: a smaller claim that can
 be proved beats a larger one that keeps needing correction.
+
+**Amendment (PR #43 review round 7, 2026-07-26): the index records only
+what its own evidence proves.** `quality_floor` and `review_status` were
+cut from the entry and deferred to issue #45. Both required either an
+artifact read or an editorial join, threaded through six write paths —
+publication, idempotent republication, two reconciliation-repair paths,
+the rebuild, and the migration backfill — and each new writer was another
+chance for them to disagree. Between them they accounted for most of a
+seven-round review, with `review_status` alone corrected four times, each
+round finding a different side of the governance key
+`(profile_date, section_key, root)`.
+
+What remains — profile type, publication tier, recorded-event flag, and
+per-section published-statement counts — is derived entirely from the
+manifest and its immutable statement evidence. No writer needs a payload
+or an editorial lookup, so there is nothing to thread and no second source
+to disagree with. That is also exactly what navigation needs: how rich a
+date is, and whether it holds a recorded event.
+
+Applied here for the third time in this review, and stated as the rule:
+**a smaller claim that can be proved beats a larger one that keeps needing
+correction.**
