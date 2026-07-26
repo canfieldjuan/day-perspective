@@ -246,7 +246,11 @@ def read_coverage_summary(
     )
 
 
-@app.get("/api/v1/coverage/{profile_date}", response_model=None)
+@app.get(
+    "/api/v1/coverage/{profile_date}",
+    response_model=CoverageDateResponse,
+    responses={404: {"model": CoverageNotIndexedResponse}},
+)
 def read_coverage_for_date(
     profile_date: date,
     session: Annotated[Session, Depends(get_session)],

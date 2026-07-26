@@ -981,3 +981,27 @@ def test_the_coverage_api_serves_richness_and_neighbours(
     # An unpublished date is absent from the index, never an empty profile.
     assert absent.status_code == 404
     assert absent.json()["status"] == "coverage_not_indexed"
+
+
+def test_the_coverage_endpoints_publish_their_schemas() -> None:
+    """response_model=None silently strips an endpoint from OpenAPI, so the
+    Python response model can drift from the shared contract without any
+    consumer noticing."""
+    from app.main import app
+
+    paths = app.openapi()["paths"]
+
+    def schema_ref(path: str, code: str) -> str:
+        response = paths[path]["get"]["responses"][code]
+        ref = response["content"]["application/json"]["schema"].get("$ref", "")
+        return str(ref)
+
+    assert schema_ref("/api/v1/coverage", "200").endswith("CoverageSummaryResponse")
+    assert schema_ref("/api/v1/coverage/{profile_date}", "200").endswith(
+        "CoverageDateResponse"
+    )
+    # The absent-date shape is part of the contract too: a client must be
+    # able to tell "not indexed" from "indexed and empty".
+    assert schema_ref("/api/v1/coverage/{profile_date}", "404").endswith(
+        "CoverageNotIndexedResponse"
+    )
