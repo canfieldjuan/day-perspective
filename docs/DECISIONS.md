@@ -764,3 +764,155 @@ a crash by one entry but never overstate progress.
 
 **Revisit trigger:** Publication becomes parallel across dates, which would
 require the ledger to record worker ownership.
+
+## D034: Coverage is indexed per date, not inferred per request
+
+**Decision:** A `coverage_entries` table records, for each date a reader
+would actually be served: profile type, publication tier, whether a recorded
+event is present, per-section published-statement counts, quality floor,
+review status, and the index version. It is maintained as the final step of
+publication and can be regenerated deterministically
+(`make rebuild-coverage`). Counts come from immutable
+`publication_statement_evidence` rows; the quality floor comes from the
+served payload and is the weakest grade the profile rests on, not its best.
+`GET /api/v1/coverage` and `GET /api/v1/coverage/{date}` serve it, the
+latter including the nearest enriched and nearest recorded-event dates in
+both directions.
+
+**Context:** With every 1950–2025 date carrying annual context, "is
+anything published?" stops distinguishing anything. Navigation needs to know
+where the evidence actually is, and the landing page needs to disclose the
+archive's real shape rather than implying uniform richness.
+
+**Alternatives considered:** Computing richness per request from manifests
+and artifacts (a scan of tens of thousands of rows and files per
+navigation); a boolean published-dates index (superseded, and useless once
+the archive is dense — this closes issue #19); inferring richness in the
+frontend from section contents (splits the definition across languages and
+cannot answer "nearest enriched date").
+
+**Reason:** Publication already knows exactly what it published, so the
+index is a by-product rather than a derivation; the nearest-enriched
+queries that make navigation honest are index scans instead of archive
+walks.
+
+**Consequences:** Dates without a published profile are absent from the
+index rather than present-and-empty, so the API can distinguish "no profile"
+from "sparse profile"; a rebuild drops entries whose newest publication no
+longer serves readers; publication carries one extra write per date.
+
+**Revisit trigger:** Coverage needs per-section quality or provenance
+detail, at which point the entry grows rather than the profile being
+re-read per request.
+
+**Amendment (PR #43 review, 2026-07-26):** four properties were added
+because the first implementation could describe an archive that did not
+exist.
+
+- *Review status is derived from editorial-selection rows, not from the
+  presence of evidence.* The vocabulary is `reviewed` (a reviewer other
+  than a standing rule selected this date's content), `rule_selected` (a
+  standing rule did), and `unreviewed` (no editorial decision is
+  recorded). Calling a recorded event "reviewed" borrowed the credibility
+  of a review that does not exist as data.
+- *Every path that makes a profile readable indexes it* — publication,
+  idempotent republication, and reconciliation repair — through a single
+  seam. A profile the day endpoint serves while coverage reports it
+  missing is a navigation lie, and the idempotent path meant re-running
+  the publishers could not heal a missing index.
+- *A rebuild refuses to index an artifact it cannot read*, and reports it.
+  The day endpoint fails for such a date; sending readers there because
+  the database row looks fine is the same dishonesty in a different
+  place. Rebuilds also re-read each date under its publication lock, so a
+  correction that lands mid-rebuild wins.
+- *The migration backfills an existing archive* (leaving quality floors
+  null, since they live in the artifacts), and the summary aggregates in
+  SQL rather than materializing every entry — that response is
+  constant-size and the archive it describes is not.
+
+The coverage response shapes live in `packages/contracts/src/index.ts`,
+so the vocabulary the API sends is the vocabulary the UI can name.
+
+**Amendment (PR #43 review round 2, 2026-07-26):** four further properties,
+three of which only bite at archive scale or under concurrency.
+
+- *A rebuild holds one date's publication lock at a time and releases it.*
+  Publication's transaction-scoped lock is right for a single date; a
+  rebuild walks the whole archive in one transaction, so transaction-scoped
+  locks would accumulate roughly 27,759 of them, exhaust the lock pool, and
+  block corrections to early dates for the length of the run.
+- *A date absent from the rebuild's snapshot is not assumed stale.* It may
+  have been published while the rebuild ran, so its entry is re-checked
+  under its lock and kept when it is genuinely live. Deleting it would
+  leave the day endpoint serving a profile coverage reports as missing.
+- *Reconciliation passes the payload it already verified* into the index,
+  rather than letting the entry keep the predecessor's quality floor while
+  pointing at the new manifest.
+- *The quality floor is ordered by an explicit rank, not by string
+  comparison* — under which `A+` sorts above `A` and would be reported as
+  the floor. A grade outside the known vocabulary cannot be ordered against
+  it and is therefore treated as the weakest thing present: "we cannot
+  establish how good this is" must never read as "good". The profile
+  contract still permits any grade string; this narrows only the ordering,
+  not the contract.
+
+The migration's section counts are filtered to the contract's seven keys,
+matching the publisher, so identical archive state cannot describe itself
+differently depending on whether it was backfilled or rebuilt. The summary
+endpoint emits `supported_range` as `{minimum, maximum}`, matching both the
+shared contract and the sibling out-of-range response.
+
+**Split (PR #43 review round 3, 2026-07-26):** at ~950 net non-test lines
+the change exceeded the repository's ~800-line split threshold, so it lands
+as two slices: the index and its maintenance (schema, derivation,
+publication integration, `make rebuild-coverage`), then the coverage API
+(the reader-facing record with nearest-richer neighbours, the archive
+summary, both routes, the shared contract types, the web proxies). The seam
+is maintenance versus reads, and `coverage_entry()` — a single indexed row —
+is the boundary the API slice builds on.
+
+This trades §4's preference for vertical slices against §5's size law. The
+first slice ships an operator-visible improvement, a maintained and
+regenerable index plus a migration that backfills an existing archive,
+rather than a user-visible one. Three review rounds and twenty-four
+findings on a single PR is the evidence the size law exists for.
+
+**Amendment (PR #43 review round 6, 2026-07-26): the index carries no
+generation counter.** `index_version` was removed rather than corrected a
+third time. It produced a defect in three separate review rounds — an
+ordinary publication resetting one date to an older generation, two
+overlapping rebuilds writing different generations, and a date published
+mid-rebuild retaining the previous one — and a full-table `MAX()` on every
+publication besides.
+
+It was never load-bearing. Under the per-date lock every writer re-reads
+the current manifest inside the lock and writes what is true at that
+moment, so a stale write cannot occur and there is no ordering to defend.
+The generation counter existed only to resolve disagreements it created.
+`refreshed_at` records when a row was last written, which is what the
+diagnostic need actually was.
+
+The principle, applied here and to review status: a smaller claim that can
+be proved beats a larger one that keeps needing correction.
+
+**Amendment (PR #43 review round 7, 2026-07-26): the index records only
+what its own evidence proves.** `quality_floor` and `review_status` were
+cut from the entry and deferred to issue #45. Both required either an
+artifact read or an editorial join, threaded through six write paths —
+publication, idempotent republication, two reconciliation-repair paths,
+the rebuild, and the migration backfill — and each new writer was another
+chance for them to disagree. Between them they accounted for most of a
+seven-round review, with `review_status` alone corrected four times, each
+round finding a different side of the governance key
+`(profile_date, section_key, root)`.
+
+What remains — profile type, publication tier, recorded-event flag, and
+per-section published-statement counts — is derived entirely from the
+manifest and its immutable statement evidence. No writer needs a payload
+or an editorial lookup, so there is nothing to thread and no second source
+to disagree with. That is also exactly what navigation needs: how rich a
+date is, and whether it holds a recorded event.
+
+Applied here for the third time in this review, and stated as the rule:
+**a smaller claim that can be proved beats a larger one that keeps needing
+correction.**

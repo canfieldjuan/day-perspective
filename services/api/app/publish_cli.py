@@ -13,6 +13,7 @@ from app.batch_publication import (
     start_batch_run,
 )
 from app.config import get_settings
+from app.coverage import rebuild_coverage_index
 from app.database import SessionLocal
 from app.models import BatchRunStatus
 from app.services import LocalFilesystemPublishedProfileStore, reconcile_publications
@@ -64,6 +65,10 @@ def main() -> None:
         "--force-new-version",
         action="store_true",
         help="Publish a superseding version even when content is unchanged.",
+    )
+    subparsers.add_parser(
+        "rebuild-coverage",
+        help="Regenerate the coverage index from published state.",
     )
     args = parser.parse_args()
     settings = get_settings()
@@ -153,6 +158,24 @@ def main() -> None:
             for failed_date, reason in batch_report.failures:
                 print(f"failure date={failed_date.isoformat()} reason={reason}")
             if batch_report.failed:
+                raise SystemExit(1)
+        elif args.command == "rebuild-coverage":
+            rebuild = rebuild_coverage_index(
+                session,
+                store=LocalFilesystemPublishedProfileStore(
+                    settings.published_profile_root
+                ),
+            )
+            session.commit()
+            print(
+                f"indexed={rebuild.indexed} dropped={rebuild.dropped} "
+                f"unreadable={len(rebuild.unreadable)}"
+            )
+            for profile_date in rebuild.unreadable:
+                print(f"unreadable date={profile_date.isoformat()}")
+            if rebuild.unreadable:
+                # An unservable date left out of the index is the honest
+                # outcome, but it is not a clean rebuild.
                 raise SystemExit(1)
 
 

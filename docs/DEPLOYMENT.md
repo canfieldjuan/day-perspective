@@ -18,6 +18,26 @@ published objects and verify manifest hashes. Pipeline workers must run outside
 ordinary request handling and must have separate credentials. The review
 surface must be private and protected by production authentication.
 
+## Schema Upgrade Steps
+
+`20260726_0014` backfills `coverage_entries` from published manifests, so
+applying it to an existing archive does not leave every date reporting
+`coverage_not_indexed`. Every indexed field derives from the manifest and
+its immutable statement evidence, so the backfill and a rebuild produce
+the same rows.
+
+A rebuild is still worth running after a migration on a populated archive,
+because it verifies each date's artifact is readable and drops any that are
+not:
+
+```bash
+make rebuild-coverage
+```
+
+It is idempotent, reports what it indexed and dropped, and exits non-zero
+if any published date's artifact could not be read — an unreadable
+artifact is left out of the index rather than advertised to navigation.
+
 ## Blocking Decisions
 
 - Hosting provider and region

@@ -1074,7 +1074,11 @@ def reconcile_publications(
             if repair:
                 _mark_manifest_published(session, manifest)
                 _ensure_day_profile(session, manifest)
-                session.commit()
+                # The payload was just read and hash-verified; without it the
+                # index would keep the predecessor's quality floor while
+                # pointing at the new manifest. Indexed by date so a repair
+                # of an older version cannot displace a newer served one.
+                _reconcile_coverage(session, manifest, store)
         else:
             report.abandoned_pending += 1
             report.details.append(
@@ -1108,8 +1112,14 @@ def reconcile_publications(
                 f"published manifest {manifest.id} failed verification: "
                 f"{manifest.storage_uri}"
             )
-            if repair and destination.exists():
-                _quarantine(root, destination)
+            if repair:
+                if destination.exists():
+                    _quarantine(root, destination)
+                # Re-derive the date either way: a missing artifact leaves
+                # nothing to quarantine but still must not be advertised,
+                # and a failed older version must not unindex a date whose
+                # newer version is still served.
+                _reconcile_coverage(session, manifest, store)
             continue
         # Detect the missing-profile state regardless of whether mutation is
         # enabled: a report-only run must not call it healthy.
@@ -1128,7 +1138,10 @@ def reconcile_publications(
                     session, manifest.profile_date, manifest.profile_type
                 )
                 _ensure_day_profile(session, manifest)
-                session.commit()
+                # Index the date, not this manifest: repairing an older
+                # version must not rewrite coverage to it while the day
+                # endpoint still serves a newer healthy one.
+                _reconcile_coverage(session, manifest, store)
         else:
             report.healthy_published += 1
 
@@ -1262,6 +1275,42 @@ class PendingPublicationError(RuntimeError):
     """A pending publication with different content blocks this attempt."""
 
 
+def _index_coverage(session: Session, manifest: PublicationManifest) -> None:
+    """Record this manifest in the coverage index.
+
+    Every path that makes a profile readable goes through here: publication,
+    idempotent republication, and reconciliation repair. A profile the day
+    endpoint serves while coverage reports it missing is a navigation lie.
+    Imported lazily because app.coverage reads this module's lock helper.
+    """
+    from app.coverage import upsert_coverage_entry
+
+    upsert_coverage_entry(session, manifest=manifest)
+
+
+def _reconcile_coverage(
+    session: Session,
+    manifest: PublicationManifest,
+    store: PublishedProfileStore,
+) -> None:
+    """Re-derive this date's coverage from what is actually servable.
+
+    Reconciliation changes what a date offers in several ways — completing
+    a pending publication, adding a missing profile row, quarantining a
+    corrupt artifact — and each of those used to adjust the index its own
+    way. Delegating to one derivation means reconciliation and a rebuild
+    cannot disagree, and the per-date lock lives in one place.
+    """
+    from app.coverage import reconcile_date_coverage
+
+    reconcile_date_coverage(
+        session,
+        profile_date=manifest.profile_date,
+        profile_type=manifest.profile_type,
+        store=store,
+    )
+
+
 def publication_advisory_lock_key(profile_date: date, profile_type: ProfileType) -> str:
     return f"publication:{profile_date.isoformat()}:{profile_type.value}"
 
@@ -1344,6 +1393,10 @@ def publish_day_profile(
             )
             if existing_profile is not None:
                 store.read(latest_published.storage_uri, digest)
+                # Re-running the publishers is the obvious way to heal an
+                # index that was never built (or was dropped); if the
+                # idempotent path skipped coverage, that never works.
+                _index_coverage(session, latest_published)
                 session.commit()
                 return existing_profile
 
@@ -1468,6 +1521,9 @@ def publish_day_profile(
             )
             session.add(profile)
         session.flush()
+        # Coverage is publication's final step, so navigation never reads a
+        # stale picture of the archive between bulk runs (D034).
+        _index_coverage(session, completed)
         session.commit()
         return profile
     except BaseException:

@@ -24,6 +24,7 @@ cascade-deleted.
 | `publication_tier` | `context_only`, `partially_enriched`, `reviewed_enriched` | How much a published profile offers, derived from its payload sections at publication time (D031). Stored on `publication_manifests` (indexed) and embedded in the hashed artifact. |
 | `batch_run_status` | `running`, `completed`, `interrupted` | Lifecycle of a batch publication run (D033). |
 | `batch_entry_status` | `published`, `unchanged`, `failed`, `skipped` | Per-date outcome inside a batch run; `unchanged` marks a rerun-safe no-op, `skipped` a dry run (D033). |
+| `coverage_entries` | one row per published date | Archive richness index: tier, recorded-event flag, per-section statement counts (D034). Every field derives from the manifest and its immutable statement evidence. Quality floor and review status are deferred to issue #45. Rebuilt with `make rebuild-coverage`. |
 | `profile_type` | `limited_historical`, `standard_statistical`, `enhanced_structured` |
 | `legal_review_status` | `not_required`, `pending`, `approved`, `restricted`, `rejected` |
 | `pipeline_run_status` | `running`, `succeeded`, `failed`, `cancelled` |
