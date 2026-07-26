@@ -561,11 +561,17 @@ bookmarks per UI_UX_CONTRACT C-15.
 
 **Commands.** `make publish-archive` publishes the whole supported range
 in year-sized ledgered batches; `FROM_YEAR` and `TO_YEAR` narrow it. A
-failing year is recorded and the loop continues, then the target exits
+failing year is recorded and the run continues, then the command exits
 non-zero naming the failed years — one unpublishable year must not cost
 the other seventy-five. Re-running is safe: publication is idempotent, so
 an already-published date reports `unchanged` rather than creating a
 version.
+
+The year loop lives in `app.publish_cli`, not in the Makefile. As a shell
+loop it produced three separate ways for input that publishes nothing to
+exit zero — a mistyped year, an empty value, and an inverted range each
+yielded an empty `seq` and a cheerful `failed_years: none`. Argparse
+rejects the first two and an explicit check rejects the third.
 
 **Recovery.** A killed run leaves its year's batch run `running` with
 outstanding dates; `make publish-context-resume` finishes it, and

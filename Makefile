@@ -103,11 +103,7 @@ publish-context-retry-failed:
 	cd services/api && DATABASE_URL='$(DATABASE_URL)' PUBLISHED_PROFILE_ROOT='$(PROJECT_ROOT)/.local/published-profiles' $(API_PYTHON) -m app.publish_cli publish-context --retry-failed
 
 publish-archive:
-	@# The whole supported range, one ledgered batch per year. A failing
-	@# year is recorded and the loop continues: one unpublishable year must
-	@# not cost the other seventy-five. Re-running is safe — publication is
-	@# idempotent, so an already-published date reports unchanged.
-	cd services/api && DATABASE_URL='$(DATABASE_URL)' PUBLISHED_PROFILE_ROOT='$(PROJECT_ROOT)/.local/published-profiles' sh -c 'if [ $(FROM_YEAR) -gt $(TO_YEAR) ]; then echo "FROM_YEAR $(FROM_YEAR) is after TO_YEAR $(TO_YEAR)"; exit 2; fi; failed=""; for year in $$(seq $(FROM_YEAR) $(TO_YEAR)); do $(API_PYTHON) -m app.publish_cli publish-context --year $$year || failed="$$failed $$year"; done; if [ -n "$$failed" ]; then echo "failed_years:$$failed"; exit 1; fi; echo "failed_years: none"'
+	cd services/api && DATABASE_URL='$(DATABASE_URL)' PUBLISHED_PROFILE_ROOT='$(PROJECT_ROOT)/.local/published-profiles' $(API_PYTHON) -m app.publish_cli publish-archive --from-year $(FROM_YEAR) --to-year $(TO_YEAR) $(ARGS)
 
 golden-canary:
 	cd services/api && DATABASE_URL='$(DATABASE_URL)' PUBLISHED_PROFILE_ROOT='$(PROJECT_ROOT)/.local/published-profiles' $(API_PYTHON) -m app.publish_cli golden-canary $(ARGS)

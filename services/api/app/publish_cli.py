@@ -85,6 +85,24 @@ def main() -> None:
         action="store_true",
         help="Publish a superseding version even when content is unchanged.",
     )
+    archive = subparsers.add_parser(
+        "publish-archive",
+        help="Publish a whole year range as context profiles, year by year.",
+    )
+    # argparse enforces the types, so a mistyped year cannot become an empty
+    # loop that reports success.
+    archive.add_argument("--from-year", type=int, default=1950)
+    archive.add_argument("--to-year", type=int, default=2025)
+    archive.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Plan and ledger each year without publishing.",
+    )
+    archive.add_argument(
+        "--force-new-version",
+        action="store_true",
+        help="Publish a superseding version even when content is unchanged.",
+    )
     canary = subparsers.add_parser(
         "golden-canary",
         help="Publish and validate the golden-100 dates a pipeline supports.",
@@ -211,6 +229,71 @@ def main() -> None:
             for failed_date, reason in batch_report.failures:
                 print(f"failure date={failed_date.isoformat()} reason={reason}")
             if batch_report.failed:
+                raise SystemExit(1)
+        elif args.command == "publish-archive":
+            if args.from_year > args.to_year:
+                raise SystemExit(
+                    f"--from-year {args.from_year} is after --to-year "
+                    f"{args.to_year}."
+                )
+            store = LocalFilesystemPublishedProfileStore(
+                settings.published_profile_root
+            )
+            totals = {"requested": 0, "published": 0, "unchanged": 0, "skipped": 0}
+            failed_years: list[int] = []
+            for year in range(args.from_year, args.to_year + 1):
+                try:
+                    dates = plan_context_dates(year=year)
+                except BatchPlanError as error:
+                    # One unpublishable year must not cost the rest of the
+                    # range, but it must be named rather than skipped.
+                    failed_years.append(year)
+                    print(f"year={year} plan_error={error}")
+                    continue
+                run = start_batch_run(
+                    session,
+                    kind=CONTEXT_BATCH_KIND,
+                    requested={
+                        "dates": [value.isoformat() for value in dates],
+                        "dry_run": args.dry_run,
+                        "force_new_version": args.force_new_version,
+                    },
+                )
+                year_report = run_context_batch(
+                    session,
+                    store=store,
+                    dates=dates,
+                    batch_run=run,
+                    dry_run=args.dry_run,
+                    force_new_version=args.force_new_version,
+                )
+                totals["requested"] += year_report.requested
+                totals["published"] += year_report.published
+                totals["unchanged"] += year_report.unchanged
+                totals["skipped"] += year_report.skipped
+                print(
+                    f"year={year} requested={year_report.requested} "
+                    f"published={year_report.published} "
+                    f"unchanged={year_report.unchanged} "
+                    f"skipped={year_report.skipped} "
+                    f"failed={year_report.failed}"
+                )
+                for failed_date, reason in year_report.failures:
+                    print(f"failure date={failed_date.isoformat()} reason={reason}")
+                if year_report.failed:
+                    failed_years.append(year)
+            print(
+                f"years={args.from_year}-{args.to_year} "
+                f"requested={totals['requested']} "
+                f"published={totals['published']} "
+                f"unchanged={totals['unchanged']} "
+                f"skipped={totals['skipped']} "
+                f"failed_years={len(failed_years)}"
+            )
+            if failed_years:
+                print(
+                    "failed_years=" + ",".join(str(year) for year in failed_years)
+                )
                 raise SystemExit(1)
         elif args.command == "golden-canary":
             store = LocalFilesystemPublishedProfileStore(
