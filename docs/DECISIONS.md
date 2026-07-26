@@ -916,3 +916,70 @@ date is, and whether it holds a recorded event.
 Applied here for the third time in this review, and stated as the rule:
 **a smaller claim that can be proved beats a larger one that keeps needing
 correction.**
+
+## D035: A generated profile is not a reviewed one
+
+**Decision:** The golden set's `publication_status` vocabulary is explicit
+and validated: `not_generated`, `context_published`, and
+`published_and_validated`. The canary records the dates it publishes as
+`context_published`, which does **not** count toward `published_count` and
+therefore cannot satisfy `release_ready`. `manual_review_status` is
+validated against `pending_human_review` / `reviewed` for the same reason.
+An unrecognised value in either field now fails the file.
+
+**Context:** Slice AA4 publishes the 66 golden dates that current pipelines
+support (1900–1949 has no annual-context pipeline, so those 34 stay
+honestly unpublished). Before AA5 publishes 27,759 dates, the machinery
+that marks dates as published must not be able to mark the release gate as
+satisfied on its way past.
+
+**Alternatives considered:** Reusing `published_and_validated` for
+canary-published dates (the mass run would then tick the release gate,
+which is precisely the outcome the gate exists to prevent); leaving the
+status vocabulary unvalidated (a typo read as "not published", silently
+understating the set instead of failing it).
+
+**Reason:** Release readiness is a claim about human review. Publication
+machinery can prove that a profile was generated and validated by
+automated checks; it cannot prove anyone read the page.
+
+**Consequences:** `make validate-golden-set` reports
+`context_published_count` alongside `published_count`, and
+`release_ready` stays false until a human review actually happens.
+`record_canary_publication` never downgrades a `published_and_validated`
+date.
+
+**Revisit trigger:** Per-date human review becomes recorded data, at which
+point `reviewed` can be derived rather than hand-maintained.
+
+## D036: The canary validates meaning, not shape
+
+**Decision:** `validate_context_payload` checks published profiles for
+defects a reader would notice: the daily-equivalent denominator matches the
+year's real length **and** the prose that states it agrees with the number;
+a modeled year says it rests on a projection and an estimated year does not
+claim to; a daily equivalent disclaims being an observation; every section
+has a declared state; a section declared unsupported carries a reason and
+holds no content; and a `context_only` profile carries no recorded event.
+
+**Context:** Schema validity and hash integrity were already enforced, and
+neither would catch a profile telling a reader that 1952 had 365 days or
+that a projection is an observation. The canary is the last cheap place to
+find such a defect: after AA5 the same defect is 27,759 wrong pages.
+
+**Alternatives considered:** Trusting the publishers' unit tests (they
+prove the generator's logic, not that a published artifact is right);
+manual inspection alone (66 dates now, 27,759 later).
+
+**Reason:** The product's value is evidential honesty, so the canary's
+checks are about what a statement claims, not whether it parses.
+
+**Consequences:** The value and the sentence describing it are cross-checked
+against each other, so a correct number under a wrong sentence fails.
+Verified against real published artifacts: corrupting a leap-year
+denominator, contradicting the prose denominator, stripping projection
+wording from a 2025 date, and removing an unsupported section's reason each
+produce an issue.
+
+**Revisit trigger:** A new evidence class ships whose honesty depends on
+properties these checks do not cover.
