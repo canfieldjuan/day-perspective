@@ -28,6 +28,15 @@ test("previous and next step blindly onto honest unpublished arrivals", async ({
 
   await page.goto("/day/1964-03-27");
   await expect(page).toHaveTitle("March 27, 1964 — Day Perspective");
+  // states.spec.ts already gates its click on this; these specs did not.
+  // data-phase flips to "arrived" from client state, so it is a real
+  // hydration signal rather than a sleep. This makes the specs consistent
+  // — it is NOT a diagnosis of the focus flake, which stalls even with
+  // this wait in place.
+  await expect(page.getByTestId("travel-shell")).toHaveAttribute(
+    "data-phase",
+    "arrived"
+  );
 
   await page.getByRole("link", { name: "Next day, March 28, 1964" }).click();
   await expect(page).toHaveURL(/\/day\/1964-03-28$/);
@@ -38,6 +47,10 @@ test("previous and next step blindly onto honest unpublished arrivals", async ({
     })
   ).toBeVisible();
 
+  await expect(page.getByTestId("travel-shell")).toHaveAttribute(
+    "data-phase",
+    "arrived"
+  );
   await page.getByRole("link", { name: "Previous day, March 27, 1964" }).click();
   await expect(page).toHaveURL(/\/day\/1964-03-27$/);
 });
@@ -101,6 +114,10 @@ test("random day lands inside the shell with navigation still present", async ({
   });
 
   await page.goto("/day/1964-03-27");
+  await expect(page.getByTestId("travel-shell")).toHaveAttribute(
+    "data-phase",
+    "arrived"
+  );
   await page.getByRole("button", { name: "Random day" }).click();
   await expect(page).toHaveURL(/\/day\/\d{4}-\d{2}-\d{2}$/);
   await expect(page.getByTestId("day-nav")).toBeVisible();
