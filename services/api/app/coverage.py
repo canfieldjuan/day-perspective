@@ -9,6 +9,8 @@ immutable statement evidence — never from prose, and never from assumption.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from typing import Any, Literal, cast
@@ -27,7 +29,7 @@ from app.models import (
     PublicationStatus,
     PublicationTier,
 )
-from app.services import PublishedProfileStore
+from app.services import PublishedProfileStore, publication_advisory_lock_key
 
 SECTION_KEYS = (
     "recorded_on_this_date",
@@ -114,11 +116,26 @@ def _section_counts(session: Session, manifest_id: UUID) -> dict[str, int]:
     return counts
 
 
+#: Known grades from strongest to weakest. A grade outside this vocabulary
+#: cannot be ordered against it, so it sorts as the weakest thing present:
+#: "we cannot establish how good this is" must never read as "good".
+GRADE_ORDER = ("A", "B", "C", "D", "E", "F")
+
+
+def _weakness(grade: str) -> tuple[int, str]:
+    try:
+        return (GRADE_ORDER.index(grade), grade)
+    except ValueError:
+        return (len(GRADE_ORDER), grade)
+
+
 def quality_floor_from_payload(payload: dict[str, Any]) -> str | None:
     """The weakest grade the profile rests on, not its best.
 
     Read from the published payload, which is the same thing a reader is
-    served; the floor understates rather than flatters.
+    served; the floor understates rather than flatters. Ordering is by an
+    explicit rank rather than string comparison, under which "A+" sorts
+    above "A" and would report the stronger grade as the floor.
     """
     grades: set[str] = set()
     quality = payload.get("quality")
@@ -139,7 +156,7 @@ def quality_floor_from_payload(payload: dict[str, Any]) -> str | None:
                     grades.add(details["quality_grade"])
     if not grades:
         return None
-    return max(grades)
+    return max(grades, key=_weakness)
 
 
 def _review_status(session: Session, profile_date: date) -> CoverageReviewStatus:
@@ -256,6 +273,28 @@ def latest_published_manifests(session: Session) -> list[PublicationManifest]:
     )
 
 
+@contextmanager
+def _date_publication_lock(
+    session: Session, profile_date: date, profile_type: ProfileType
+) -> Iterator[None]:
+    """Hold the publication lock for one date, then release it.
+
+    Publication takes a transaction-scoped lock, which is right for a single
+    date. A rebuild walks the whole archive in one transaction, so
+    transaction-scoped locks would accumulate one per date — roughly 27,759
+    of them — exhausting the lock pool and blocking corrections to early
+    dates for the length of the run.
+    """
+    key = func.hashtextextended(
+        publication_advisory_lock_key(profile_date, profile_type), 0
+    )
+    session.execute(select(func.pg_advisory_lock(key)))
+    try:
+        yield
+    finally:
+        session.execute(select(func.pg_advisory_unlock(key)))
+
+
 def rebuild_coverage_index(
     session: Session,
     *,
@@ -272,47 +311,92 @@ def rebuild_coverage_index(
     lands while this walks its snapshot wins instead of being overwritten by
     the manifest that was newest when the walk began.
     """
-    from app.services import _acquire_publication_lock
-
     if index_version is None:
         index_version = (
             session.scalar(select(func.max(CoverageEntry.index_version))) or 0
         ) + 1
     report = CoverageRebuildReport(index_version=index_version)
     snapshot = latest_published_manifests(session)
+    seen_dates = {manifest.profile_date for manifest in snapshot}
     live_dates = set()
     for stale in snapshot:
-        _acquire_publication_lock(session, stale.profile_date, stale.profile_type)
-        manifest = _latest_published_manifest(session, stale.profile_date)
-        if manifest is None:
-            continue
-        has_profile = session.scalar(
-            select(DayProfile.id).where(
-                DayProfile.publication_manifest_id == manifest.id
-            )
-        )
-        if has_profile is None:
-            # A manifest without its profile row is not served to readers.
-            continue
-        if store is not None:
-            try:
-                store.read(manifest.storage_uri, manifest.content_hash)
-            except (OSError, RuntimeError, ValueError):
+        with _date_publication_lock(session, stale.profile_date, stale.profile_type):
+            manifest = _latest_published_manifest(session, stale.profile_date)
+            if manifest is None or not _has_day_profile(session, manifest):
+                # A manifest without its profile row is not served to readers.
+                continue
+            if store is not None and not _artifact_readable(store, manifest):
                 # The day endpoint fails for this date. Indexing it anyway
                 # would send readers to a page that cannot be served.
                 report.unreadable.append(manifest.profile_date)
                 continue
-        upsert_coverage_entry(
-            session, manifest=manifest, store=store, index_version=index_version
-        )
-        live_dates.add(manifest.profile_date)
-    for entry in session.scalars(select(CoverageEntry)):
-        if entry.profile_date not in live_dates:
-            session.delete(entry)
-            report.dropped += 1
+            upsert_coverage_entry(
+                session, manifest=manifest, store=store, index_version=index_version
+            )
+            live_dates.add(manifest.profile_date)
+    report.dropped = _drop_stale_entries(
+        session, live_dates=live_dates, seen_dates=seen_dates, store=store
+    )
     session.flush()
     report.indexed = len(live_dates)
     return report
+
+
+def _has_day_profile(session: Session, manifest: PublicationManifest) -> bool:
+    return (
+        session.scalar(
+            select(DayProfile.id).where(
+                DayProfile.publication_manifest_id == manifest.id
+            )
+        )
+        is not None
+    )
+
+
+def _artifact_readable(
+    store: PublishedProfileStore, manifest: PublicationManifest
+) -> bool:
+    try:
+        store.read(manifest.storage_uri, manifest.content_hash)
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return True
+
+
+def _drop_stale_entries(
+    session: Session,
+    *,
+    live_dates: set[date],
+    seen_dates: set[date],
+    store: PublishedProfileStore | None,
+) -> int:
+    """Remove entries the archive no longer supports.
+
+    A date absent from the snapshot is not automatically stale: it may have
+    been published *during* the rebuild, in which case its row is newer than
+    anything this run knows about. Deleting it would leave the day endpoint
+    serving a profile that coverage reports as missing, so an unseen date is
+    re-checked under its lock and kept when it is genuinely live.
+    """
+    dropped = 0
+    for entry in list(session.scalars(select(CoverageEntry))):
+        if entry.profile_date in live_dates:
+            continue
+        if entry.profile_date not in seen_dates:
+            with _date_publication_lock(
+                session, entry.profile_date, entry.profile_type
+            ):
+                manifest = _latest_published_manifest(session, entry.profile_date)
+                if (
+                    manifest is not None
+                    and _has_day_profile(session, manifest)
+                    and (store is None or _artifact_readable(store, manifest))
+                ):
+                    live_dates.add(entry.profile_date)
+                    continue
+        session.delete(entry)
+        dropped += 1
+    return dropped
 
 
 def _latest_published_manifest(

@@ -245,8 +245,8 @@ def coverage_overview(
         latest=summary.latest,
         index_version=summary.index_version,
         supported_range={
-            "min": PUBLIC_DATE_MIN.isoformat(),
-            "max": PUBLIC_DATE_MAX.isoformat(),
+            "minimum": PUBLIC_DATE_MIN.isoformat(),
+            "maximum": PUBLIC_DATE_MAX.isoformat(),
         },
     )
 

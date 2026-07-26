@@ -141,6 +141,17 @@ def _backfill_existing_archive() -> None:
                     COUNT(*) AS count
                 FROM publication_statement_evidence AS e
                 WHERE e.publication_manifest_id = m.id
+                  -- Same keys the publisher counts. A path outside the
+                  -- contract vocabulary would otherwise appear only in
+                  -- backfilled rows, so identical archive state would
+                  -- describe itself differently depending on how it was
+                  -- indexed.
+                  AND split_part(e.statement_path, '/', 3) IN (
+                      'recorded_on_this_date', 'typical_day_in_this_year',
+                      'wider_historical_context', 'curated_claims',
+                      'derived_comparisons', 'wonder_and_progress',
+                      'evidence_notes'
+                  )
                 GROUP BY 1
             ) AS per_section
         ) AS counts ON TRUE

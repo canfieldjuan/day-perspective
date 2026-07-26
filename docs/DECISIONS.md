@@ -832,3 +832,32 @@ exist.
 
 The coverage response shapes live in `packages/contracts/src/index.ts`,
 so the vocabulary the API sends is the vocabulary the UI can name.
+
+**Amendment (PR #43 review round 2, 2026-07-26):** four further properties,
+three of which only bite at archive scale or under concurrency.
+
+- *A rebuild holds one date's publication lock at a time and releases it.*
+  Publication's transaction-scoped lock is right for a single date; a
+  rebuild walks the whole archive in one transaction, so transaction-scoped
+  locks would accumulate roughly 27,759 of them, exhaust the lock pool, and
+  block corrections to early dates for the length of the run.
+- *A date absent from the rebuild's snapshot is not assumed stale.* It may
+  have been published while the rebuild ran, so its entry is re-checked
+  under its lock and kept when it is genuinely live. Deleting it would
+  leave the day endpoint serving a profile coverage reports as missing.
+- *Reconciliation passes the payload it already verified* into the index,
+  rather than letting the entry keep the predecessor's quality floor while
+  pointing at the new manifest.
+- *The quality floor is ordered by an explicit rank, not by string
+  comparison* — under which `A+` sorts above `A` and would be reported as
+  the floor. A grade outside the known vocabulary cannot be ordered against
+  it and is therefore treated as the weakest thing present: "we cannot
+  establish how good this is" must never read as "good". The profile
+  contract still permits any grade string; this narrows only the ordering,
+  not the contract.
+
+The migration's section counts are filtered to the contract's seven keys,
+matching the publisher, so identical archive state cannot describe itself
+differently depending on whether it was backfilled or rebuilt. The summary
+endpoint emits `supported_range` as `{minimum, maximum}`, matching both the
+shared contract and the sibling out-of-range response.

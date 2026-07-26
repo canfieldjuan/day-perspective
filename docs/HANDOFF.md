@@ -552,11 +552,6 @@ navigation test's click-initiated soft navigation intermittently stalls
 under parallel e2e server load (never in isolation), mitigated by visible
 test-level retries and tracked on epic #7.
 
-*Correction (2026-07-26, AA3): the root cause was clicks landing before
-client hydration. Specs now wait for `data-phase="arrived"` — a real
-client-state signal — before clicking a link, and the suite runs clean
-without relying on retries. The retries remain as a backstop.*
-
 **Deferred (issues):** typed evidence-class vocabulary in contracts
 (#18), published-dates index endpoint for sighted navigation (#19), CI
 docs-only fast path (#20); dark theme, maps/timelines, search,

@@ -1026,9 +1026,12 @@ def reconcile_publications(
         destination = root / manifest.storage_uri
         temp = destination.with_name(destination.name + ".tmp")
         payload_ready = False
+        verified_payload: dict[str, Any] | None = None
         if destination.exists():
             try:
-                store.read(manifest.storage_uri, manifest.content_hash)
+                verified_payload = store.read(
+                    manifest.storage_uri, manifest.content_hash
+                )
                 payload_ready = True
             except (RuntimeError, OSError, ValueError):
                 report.hash_mismatches += 1
@@ -1061,7 +1064,9 @@ def reconcile_publications(
                         store,
                     )
                     staged.finalize()
-                    store.read(manifest.storage_uri, manifest.content_hash)
+                    verified_payload = store.read(
+                        manifest.storage_uri, manifest.content_hash
+                    )
             else:
                 report.details.append(
                     f"pending manifest {manifest.id} staged payload unusable: "
@@ -1074,7 +1079,10 @@ def reconcile_publications(
             if repair:
                 _mark_manifest_published(session, manifest)
                 _ensure_day_profile(session, manifest)
-                _index_coverage(session, manifest)
+                # The payload was just read and hash-verified; without it the
+                # index would keep the predecessor's quality floor while
+                # pointing at the new manifest.
+                _index_coverage(session, manifest, verified_payload)
                 session.commit()
         else:
             report.abandoned_pending += 1
@@ -1129,7 +1137,7 @@ def reconcile_publications(
                     session, manifest.profile_date, manifest.profile_type
                 )
                 _ensure_day_profile(session, manifest)
-                _index_coverage(session, manifest)
+                _index_coverage(session, manifest, store=store)
                 session.commit()
         else:
             report.healthy_published += 1
@@ -1268,6 +1276,8 @@ def _index_coverage(
     session: Session,
     manifest: PublicationManifest,
     payload: dict[str, Any] | None = None,
+    *,
+    store: PublishedProfileStore | None = None,
 ) -> None:
     """Record this manifest in the coverage index.
 
@@ -1278,7 +1288,9 @@ def _index_coverage(
     """
     from app.coverage import upsert_coverage_entry
 
-    upsert_coverage_entry(session, manifest=manifest, payload=payload)
+    upsert_coverage_entry(
+        session, manifest=manifest, payload=payload, store=store
+    )
 
 
 def publication_advisory_lock_key(profile_date: date, profile_type: ProfileType) -> str:

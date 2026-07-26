@@ -350,7 +350,10 @@ def test_the_coverage_api_serves_richness_and_neighbours(
     assert body["by_tier"]["context_only"] == 3
     assert body["by_tier"]["reviewed_enriched"] == 1
     assert body["with_recorded_event"] == 1
-    assert body["supported_range"] == {"min": "1900-01-01", "max": "2025-12-31"}
+    assert body["supported_range"] == {
+        "minimum": "1900-01-01",
+        "maximum": "2025-12-31",
+    }
 
     assert detail.status_code == 200
     record = detail.json()
@@ -789,3 +792,187 @@ def test_a_blank_reviewer_is_not_a_human_review(
     record = coverage_for_date(session, profile_date)
     assert record is not None
     assert record.review_status == "unreviewed"
+
+
+# --- Round 2 review findings (PR #43) ------------------------------------
+
+
+def test_the_quality_floor_orders_grades_by_rank_not_alphabet() -> None:
+    """`max()` over strings puts "A+" above "A", so the floor would report
+    the stronger grade. The contract permits any grade string."""
+    from app.coverage import quality_floor_from_payload
+
+    def payload(*grades: str) -> dict[str, object]:
+        return {
+            "quality": {"grade": grades[0], "explanation": "aggregate"},
+            "sections": {
+                "recorded_on_this_date": [
+                    {
+                        "statement_id": f"s{index}",
+                        "statement": "x",
+                        "details": {"quality_grade": grade},
+                    }
+                    for index, grade in enumerate(grades[1:])
+                ]
+            },
+        }
+
+    assert quality_floor_from_payload(payload("A", "C", "B")) == "C"
+    assert quality_floor_from_payload(payload("A+", "A")) == "A+"
+    # An ungradeable value cannot be ordered, so it is treated as the
+    # weakest thing present rather than silently ranked.
+    assert quality_floor_from_payload(payload("A", "provisional")) == "provisional"
+    assert quality_floor_from_payload(payload("B")) == "B"
+
+
+@pytest.mark.integration
+def test_a_rebuild_keeps_a_date_published_while_it_was_running(
+    session: Session, tmp_path: Path, reviewed_un_wpp: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A date published after the snapshot is not in it, so the cleanup pass
+    would delete the row publication had just written."""
+    from app import coverage as coverage_module
+    from app.un_wpp import publish_context_profile
+
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+    existing = date(1991, 5, 5)
+    published_mid_rebuild = date(1991, 5, 6)
+    publish_context_profile(session, store=store, profile_date=existing)
+    session.commit()
+    snapshot = list(coverage_module.latest_published_manifests(session))
+
+    publish_context_profile(session, store=store, profile_date=published_mid_rebuild)
+    session.commit()
+    assert coverage_for_date(session, published_mid_rebuild) is not None
+
+    monkeypatch.setattr(
+        coverage_module, "latest_published_manifests", lambda _session: snapshot
+    )
+    report = rebuild_coverage_index(session, store=store)
+    session.commit()
+
+    assert coverage_for_date(session, published_mid_rebuild) is not None, (
+        "the rebuild deleted a date published while it ran"
+    )
+    assert report.dropped == 0
+
+
+@pytest.mark.integration
+def test_a_rebuild_does_not_hold_one_lock_per_date(
+    session: Session, tmp_path: Path, reviewed_un_wpp: None
+) -> None:
+    """At archive scale a transaction-scoped lock per date exhausts the lock
+    pool and blocks corrections for the length of the run."""
+    from sqlalchemy import text
+
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+    dates = [date(1992, 7, day) for day in range(1, 7)]
+    run = start_batch_run(
+        session,
+        kind=CONTEXT_BATCH_KIND,
+        requested={"dates": [value.isoformat() for value in dates]},
+    )
+    run_context_batch(session, store=store, dates=dates, batch_run=run)
+    session.commit()
+
+    rebuild_coverage_index(session, store=store)
+
+    held = session.execute(
+        text(
+            "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' "
+            "AND pid = pg_backend_pid()"
+        )
+    ).scalar_one()
+    session.commit()
+
+    assert held == 0, f"{held} advisory locks still held after the rebuild"
+
+
+@pytest.mark.integration
+def test_reconcile_repair_indexes_the_recovered_quality_floor(
+    session: Session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Repair reads and verifies the artifact; discarding it leaves coverage
+    describing the predecessor's grade under the new manifest."""
+    from app.models import ProfileType
+    from app.services import reconcile_publications
+
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+    profile_date = date(1982, 2, 2)
+    release = _synthetic_release(session, "recovered-floor")
+
+    def evidence(label: str) -> list[PublicationStatementEvidenceInput]:
+        claim = create_claim(
+            session,
+            source_release_id=release.id,
+            source_record_locator=f"record:{label}",
+            claim_type="synthetic_assertion",
+            assertion_text=f"Event {label}.",
+        )
+        resolved = resolve_claim(
+            session,
+            canonical_key=f"test:recovered-{label}",
+            resolved_value={"statement": f"Event {label}."},
+            rationale="Test-only recorded event.",
+            supporting_claim_ids=[claim.id],
+        )
+        return [
+            PublicationStatementEvidenceInput(
+                statement_path="/sections/recorded_on_this_date/0",
+                resolved_claim_id=resolved.id,
+            )
+        ]
+
+    def payload(grade: str) -> dict[str, object]:
+        return {
+            "schema_version": "1",
+            "date": profile_date.isoformat(),
+            "profile_type": "standard_statistical",
+            "sections": {
+                "recorded_on_this_date": [
+                    {"statement_id": "event", "statement": f"Event {grade}."}
+                ]
+            },
+            "quality": {"grade": grade, "explanation": "Grade under test."},
+        }
+
+    first = publish_day_profile(
+        session,
+        store=store,
+        profile_date=profile_date,
+        profile_type=ProfileType.STANDARD_STATISTICAL,
+        payload=payload("B"),
+        statement_evidence=evidence("first"),
+    )
+    session.commit()
+    assert coverage_for_date(session, profile_date).quality_floor == "B"
+
+    from app import services as services_module
+
+    def explode(*args: object, **inner: object) -> None:
+        raise RuntimeError("Simulated crash before artifact promotion.")
+
+    monkeypatch.setattr(services_module.StagedProfileWrite, "finalize", explode)
+    with pytest.raises(RuntimeError, match="Simulated crash"):
+        publish_day_profile(
+            session,
+            store=store,
+            profile_date=profile_date,
+            profile_type=ProfileType.STANDARD_STATISTICAL,
+            payload=payload("D"),
+            statement_evidence=evidence("second"),
+            supersedes_manifest_id=first.publication_manifest_id,
+            supersedes_day_profile_id=first.id,
+        )
+    monkeypatch.undo()
+    session.rollback()
+
+    report = reconcile_publications(session, store=store, repair=True)
+    session.commit()
+
+    if report.completed_pending:
+        record = coverage_for_date(session, profile_date)
+        assert record is not None
+        assert record.quality_floor == "D", (
+            "coverage kept the predecessor's grade after repair"
+        )

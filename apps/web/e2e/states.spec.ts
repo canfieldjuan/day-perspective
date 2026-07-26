@@ -1,9 +1,9 @@
 import { expect, test } from "@playwright/test";
 
-// Click-initiated soft navigation can be swallowed if it lands before the
-// client has hydrated. Specs now wait for data-phase="arrived" — a real
-// client-state signal — before clicking, which addresses the cause rather
-// than the symptom; the retries remain as a cheap backstop under load.
+// The focus test's click-initiated soft navigation intermittently stalls
+// under parallel e2e server load (never in isolation: 15/15 clean); the
+// router dedupes retried clicks into the hung navigation, so retries at
+// the test level are the honest mitigation. Tracked on epic #7.
 test.describe.configure({ retries: 2 });
 
 function unpublishedBody(date: string, profileType: string) {
