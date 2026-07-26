@@ -87,7 +87,7 @@ test("a context-only date says what it has and what it does not", async ({
     "This date currently has demographic context only."
   );
   await expect(page.getByTestId("publication-tier")).toContainText(
-    "No reviewed recorded events are published for October 12, 1983."
+    "No recorded events are published for October 12, 1983."
   );
 });
 
@@ -97,7 +97,7 @@ test("a distant enriched date is named exactly, never called nearby", async ({
   await arrive(page, "1983-10-12", coverageBody("1983-10-12", "1964-03-27", null));
 
   const discovery = page.getByTestId("coverage-discovery");
-  await expect(discovery).toContainText("The closest reviewed date is farther away");
+  await expect(discovery).toContainText("The closest evidence-backed date is farther away");
   await expect(discovery).toContainText("March 27, 1964, nineteen years earlier.");
   await expect(
     page.getByRole("link", { name: "Jump to March 27, 1964" })
@@ -115,7 +115,7 @@ test("the empty direction is explained rather than left as a silent gap", async 
   await arrive(page, "1983-10-12", coverageBody("1983-10-12", "1964-03-27", null));
 
   await expect(page.getByTestId("coverage-discovery")).toContainText(
-    "No reviewed enriched date is currently published after October 12, 1983."
+    "No evidence-backed date is currently published after October 12, 1983."
   );
 });
 
@@ -129,7 +129,7 @@ test("both directions are offered without preselecting either", async ({
   );
 
   const discovery = page.getByTestId("coverage-discovery");
-  await expect(discovery).toContainText("Closest reviewed dates");
+  await expect(discovery).toContainText("Closest evidence-backed dates");
   await expect(discovery).toContainText("September 3, 1975 · eight years earlier");
   await expect(discovery).toContainText("March 27, 1984 · about five months later");
   await expect(page.getByRole("link", { name: "Go earlier" })).toBeVisible();
@@ -142,7 +142,7 @@ test("an archive with no enriched dates offers no journey to nowhere", async ({
   await arrive(page, "1983-10-12", coverageBody("1983-10-12", null, null));
 
   await expect(page.getByTestId("coverage-discovery")).toContainText(
-    "No reviewed enriched dates are currently available from this archive index."
+    "No evidence-backed dates are currently available from this archive index."
   );
 });
 
@@ -153,5 +153,5 @@ test("unreadable coverage claims nothing about the archive", async ({ page }) =>
   await expect(page.getByTestId("coverage-discovery")).toHaveCount(0);
   await expect(page.getByTestId("publication-tier")).toHaveCount(0);
   // Silence, not a claim that the archive is empty.
-  await expect(page.getByText(/No reviewed enriched dates/)).toHaveCount(0);
+  await expect(page.getByText(/No evidence-backed dates/)).toHaveCount(0);
 });

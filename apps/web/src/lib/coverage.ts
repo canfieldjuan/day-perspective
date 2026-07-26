@@ -76,11 +76,15 @@ export type DiscoveryKind =
 export interface DiscoveryState {
   kind: DiscoveryKind;
   /**
-   * Whether the page actually carries annual or period context. The
-   * context_only tier also admits an evidence-notes-only profile, so the
-   * demographic claim is derived from the sections rather than the tier.
+   * Whether the page carries the annual demographic equivalents, which live
+   * in typical_day_in_this_year. Derived from that section alone:
+   * wider_historical_context is any surrounding-period condition, and UCDP
+   * publishes armed-conflict counts there, so its presence proves period
+   * context rather than demographic context.
    */
   hasDemographicContext: boolean;
+  /** Whether the page carries surrounding-period context of any kind. */
+  hasPeriodContext: boolean;
   tier: PublicationTier | null;
   before: EnrichedDestination | null;
   after: EnrichedDestination | null;
@@ -134,6 +138,7 @@ export function discoveryStateFor(
     return {
       kind: "unknown",
       hasDemographicContext: false,
+      hasPeriodContext: false,
       tier: null,
       before: null,
       after: null,
@@ -144,9 +149,8 @@ export function discoveryStateFor(
   }
 
   const sections = coverage.sections ?? {};
-  const hasDemographicContext =
-    (sections.typical_day_in_this_year ?? 0) > 0 ||
-    (sections.wider_historical_context ?? 0) > 0;
+  const hasDemographicContext = (sections.typical_day_in_this_year ?? 0) > 0;
+  const hasPeriodContext = (sections.wider_historical_context ?? 0) > 0;
 
   const before = destination(
     date,
@@ -171,6 +175,7 @@ export function discoveryStateFor(
     return {
       kind: "on-enriched-date",
       hasDemographicContext,
+    hasPeriodContext,
       tier,
       before,
       after,
@@ -184,6 +189,7 @@ export function discoveryStateFor(
     return {
       kind: "both-directions",
       hasDemographicContext,
+    hasPeriodContext,
       tier,
       before,
       after,
@@ -197,6 +203,7 @@ export function discoveryStateFor(
     return {
       kind: "one-direction",
       hasDemographicContext,
+    hasPeriodContext,
       tier,
       before,
       after,
@@ -209,6 +216,7 @@ export function discoveryStateFor(
   return {
     kind: "none-available",
     hasDemographicContext,
+    hasPeriodContext,
     tier,
     before: null,
     after: null,

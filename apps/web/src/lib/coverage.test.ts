@@ -177,3 +177,24 @@ describe("demographic claim is earned, not assumed", () => {
     expect(state.hasDemographicContext).toBe(false);
   });
 });
+
+describe("period context is not demographic context", () => {
+  it("does not read armed-conflict context as demographic", () => {
+    // wider_historical_context is any surrounding-period condition; UCDP
+    // publishes armed-conflict counts there.
+    const state = discoveryStateFor(
+      { ...base, sections: { wider_historical_context: 3 } },
+      "1983-10-12"
+    );
+    expect(state.hasDemographicContext).toBe(false);
+    expect(state.hasPeriodContext).toBe(true);
+  });
+
+  it("reads the annual daily equivalents as demographic", () => {
+    const state = discoveryStateFor(
+      { ...base, sections: { typical_day_in_this_year: 2 } },
+      "1983-10-12"
+    );
+    expect(state.hasDemographicContext).toBe(true);
+  });
+});

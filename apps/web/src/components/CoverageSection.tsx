@@ -70,8 +70,10 @@ export function CoverageSection({ date }: { date: string }) {
               demographic sentence is earned from the sections rather than
               assumed from the tier. */}
           {state.hasDemographicContext
-            ? `This date currently has demographic context only. No reviewed recorded events are published for ${monument}.`
-            : `No reviewed recorded events are published for ${monument}.`}
+            ? `This date currently has demographic context only. No recorded events are published for ${monument}.`
+            : state.hasPeriodContext
+              ? `This date currently has period context only. No recorded events are published for ${monument}.`
+              : `No recorded events are published for ${monument}.`}
         </p>
       ) : null}
       <CoverageDiscovery date={date} state={state} />

@@ -41,15 +41,17 @@ export function CoverageDiscovery({
       data-discovery-state={state.kind}
     >
       <h2 className={styles.heading} id="find-reviewed-evidence">
-        Find reviewed evidence
+        Find evidence-backed dates
       </h2>
       {state.kind === "none-available" ? (
         <p className={styles.explanation}>
-          No reviewed enriched dates are currently available from this archive
+          No evidence-backed dates are currently available from this archive
           index. You can continue chronologically, choose another date
           {state.hasDemographicContext
             ? ", or explore the available demographic context"
-            : ""}
+            : state.hasPeriodContext
+              ? ", or explore the available period context"
+              : ""}
           .
         </p>
       ) : null}
@@ -77,7 +79,7 @@ function BothDirections({ state }: { state: DiscoveryState }) {
   }
   return (
     <>
-      <p className={styles.explanation}>Closest reviewed dates</p>
+      <p className={styles.explanation}>Closest evidence-backed dates</p>
       <ul className={styles.destinations}>
         <li>{destinationLabel(before)}</li>
         <li>{destinationLabel(after)}</li>
@@ -135,9 +137,9 @@ function OneDirection({
       ? "Continue to a richer date"
       : band === "months"
         ? destination.sameCalendarYear
-          ? `A reviewed date is available ${destination.direction} in the year`
-          : "The closest reviewed date is a few months away"
-        : "The closest reviewed date is farther away";
+          ? `An evidence-backed date is available ${destination.direction} in the year`
+          : "The closest evidence-backed date is a few months away"
+        : "The closest evidence-backed date is farther away";
 
   return (
     <>
@@ -164,7 +166,7 @@ function OneDirection({
         // An absence is explained rather than rendered as a disabled arrow
         // with no reason given.
         <p className={styles.absence}>
-          No reviewed enriched date is currently published{" "}
+          No evidence-backed date is currently published{" "}
           {state.missingDirection === "after" ? "after" : "before"} {monument}.
         </p>
       ) : null}
