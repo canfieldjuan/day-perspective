@@ -169,8 +169,7 @@ def main() -> None:
             session.commit()
             print(
                 f"indexed={rebuild.indexed} dropped={rebuild.dropped} "
-                f"unreadable={len(rebuild.unreadable)} "
-                f"index_version={rebuild.index_version}"
+                f"unreadable={len(rebuild.unreadable)}"
             )
             for profile_date in rebuild.unreadable:
                 print(f"unreadable date={profile_date.isoformat()}")

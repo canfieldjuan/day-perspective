@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.adapters.base import LocalFilesystemRawSourceStore
@@ -376,33 +376,6 @@ def test_rebuild_refuses_to_advertise_an_unreadable_artifact(
 
 
 @pytest.mark.integration
-def test_publication_after_a_rebuild_keeps_the_index_generation(
-    session: Session, tmp_path: Path, reviewed_un_wpp: None
-) -> None:
-    """A date written by an ordinary publication must not report an older
-    generation than the summary claims the index is on."""
-    from app.un_wpp import publish_context_profile
-
-    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
-    first = date(1985, 9, 9)
-    second = date(1985, 9, 10)
-    publish_context_profile(session, store=store, profile_date=first)
-    session.commit()
-    rebuild_coverage_index(session, store=store)
-    rebuild_coverage_index(session, store=store)
-    session.commit()
-    generation = session.scalar(select(func.max(CoverageEntry.index_version)))
-    assert generation is not None and generation >= 2
-
-    publish_context_profile(session, store=store, profile_date=second)
-    session.commit()
-
-    record = coverage_entry(session, second)
-    assert record is not None
-    assert record.index_version == generation
-
-
-@pytest.mark.integration
 def test_review_status_reflects_recorded_review_not_evidence_presence(
     session: Session, tmp_path: Path, reviewed_un_wpp: None
 ) -> None:
@@ -706,32 +679,6 @@ def test_a_rebuild_does_not_hold_one_lock_per_date(
 
 
 @pytest.mark.integration
-def test_an_older_rebuild_does_not_lower_a_newer_generation(
-    session: Session, tmp_path: Path, reviewed_un_wpp: None
-) -> None:
-    """Two overlapping rebuilds each allocate a generation. If the older one
-    writes after the newer, the archive reports two generations at once."""
-    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
-    dates = [date(1998, 2, day) for day in range(1, 4)]
-    run = start_batch_run(
-        session,
-        kind=CONTEXT_BATCH_KIND,
-        requested={"dates": [value.isoformat() for value in dates]},
-    )
-    run_context_batch(session, store=store, dates=dates, batch_run=run)
-    session.commit()
-
-    rebuild_coverage_index(session, store=store, index_version=5)
-    # An older job, started earlier, finishing after the newer one.
-    rebuild_coverage_index(session, store=store, index_version=3)
-
-    generations = set(
-        session.scalars(select(CoverageEntry.index_version).distinct())
-    )
-    assert generations == {5}, f"index reports mixed generations: {generations}"
-
-
-@pytest.mark.integration
 def test_reconcile_repair_indexes_the_recovered_quality_floor(
     session: Session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -899,7 +846,8 @@ def test_a_skipped_snapshot_date_is_rechecked_before_deletion(
         calls["n"] += 1
         if calls["n"] == 1:
             return None
-        return real_read(store_arg, manifest)
+        result: dict[str, Any] | None = real_read(store_arg, manifest)
+        return result
 
     monkeypatch.setattr(coverage_module, "_read_artifact", unreadable_once)
     monkeypatch.setattr(
@@ -1111,7 +1059,7 @@ def test_a_rebuild_does_not_index_an_artifact_that_vanished_mid_pass(
 
     def read_then_vanish(store_arg: Any, manifest: Any) -> dict[str, Any] | None:
         reads["n"] += 1
-        payload = real_read(store_arg, manifest)
+        payload: dict[str, Any] | None = real_read(store_arg, manifest)
         for artifact in (tmp_path / "published").rglob("*.json"):
             artifact.unlink()
         return payload

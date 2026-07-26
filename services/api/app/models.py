@@ -920,7 +920,6 @@ class CoverageEntry(Base):
     # and this row is written after the artifact is already promoted.
     quality_floor: Mapped[str | None] = mapped_column(Text, nullable=True)
     review_status: Mapped[str] = mapped_column(String(32), default="unreviewed")
-    index_version: Mapped[int] = mapped_column(Integer, default=1)
     refreshed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

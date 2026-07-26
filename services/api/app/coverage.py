@@ -71,7 +71,6 @@ class CoverageRebuildReport:
 
     indexed: int = 0
     dropped: int = 0
-    index_version: int = 1
     unreadable: list[date] = field(default_factory=list)
 
 
@@ -189,19 +188,12 @@ def _review_status(
     return STANDING_RULE_REVIEW_STATUS
 
 
-def _current_index_version(session: Session) -> int:
-    """The generation the index is already on, so an ordinary publication
-    does not silently regress one date to an older one."""
-    return session.scalar(select(func.max(CoverageEntry.index_version))) or 1
-
-
 def upsert_coverage_entry(
     session: Session,
     *,
     manifest: PublicationManifest,
     payload: dict[str, Any] | None = None,
     store: PublishedProfileStore | None = None,
-    index_version: int | None = None,
 ) -> CoverageEntry:
     """Record this date's richness. Called as publication's final step.
 
@@ -210,8 +202,6 @@ def upsert_coverage_entry(
     store. Without either, an existing floor is preserved rather than
     silently nulled.
     """
-    if index_version is None:
-        index_version = _current_index_version(session)
     counts = _section_counts(session, manifest.id)
     has_event = counts[RECORDED_SECTION] > 0
     entry = session.scalar(
@@ -237,7 +227,6 @@ def upsert_coverage_entry(
         "sections": counts,
         "quality_floor": floor,
         "review_status": _review_status(session, manifest),
-        "index_version": index_version,
         "refreshed_at": datetime.now(UTC),
     }
     if entry is None:
@@ -305,7 +294,6 @@ def rebuild_coverage_index(
     session: Session,
     *,
     store: PublishedProfileStore | None = None,
-    index_version: int | None = None,
 ) -> CoverageRebuildReport:
     """Regenerate the whole index from published state.
 
@@ -318,12 +306,7 @@ def rebuild_coverage_index(
     manifest that was newest when the walk began, and nothing this run holds
     accumulates across the archive.
     """
-    if index_version is None:
-        index_version = (
-            session.scalar(select(func.max(CoverageEntry.index_version))) or 0
-        ) + 1
-        session.commit()
-    report = CoverageRebuildReport(index_version=index_version)
+    report = CoverageRebuildReport()
     snapshot = latest_published_manifests(session)
     session.commit()
     live_dates = set()
@@ -332,11 +315,6 @@ def rebuild_coverage_index(
             manifest = _latest_published_manifest(session, stale.profile_date)
             if manifest is None:
                 # No published manifest with a profile row: not served.
-                continue
-            if _superseded_by_newer_rebuild(session, stale.profile_date, index_version):
-                # A later rebuild already owns this date. Writing our older
-                # generation would leave the index reporting two.
-                live_dates.add(stale.profile_date)
                 continue
             payload = None
             if store is not None:
@@ -347,35 +325,13 @@ def rebuild_coverage_index(
                     # served.
                     report.unreadable.append(manifest.profile_date)
                     continue
-            upsert_coverage_entry(
-                session,
-                manifest=manifest,
-                payload=payload,
-                index_version=index_version,
-            )
+            upsert_coverage_entry(session, manifest=manifest, payload=payload)
             live_dates.add(manifest.profile_date)
     report.dropped = _drop_stale_entries(
-        session, live_dates=live_dates, store=store, index_version=index_version
+        session, live_dates=live_dates, store=store
     )
     report.indexed = len(live_dates)
     return report
-
-
-def _superseded_by_newer_rebuild(
-    session: Session, profile_date: date, index_version: int
-) -> bool:
-    """True when a later rebuild generation already covers this date.
-
-    Two overlapping rebuilds each allocate a generation; without this the
-    older one can write its lower generation over the newer one's row, and
-    the archive then reports two generations at once.
-    """
-    existing = session.scalar(
-        select(CoverageEntry.index_version).where(
-            CoverageEntry.profile_date == profile_date
-        )
-    )
-    return existing is not None and existing > index_version
 
 
 def _read_artifact(
@@ -398,7 +354,6 @@ def _drop_stale_entries(
     *,
     live_dates: set[date],
     store: PublishedProfileStore | None,
-    index_version: int,
 ) -> int:
     """Remove entries the archive no longer supports.
 
@@ -422,9 +377,6 @@ def _drop_stale_entries(
                 select(CoverageEntry).where(CoverageEntry.profile_date == profile_date)
             )
             if entry is None:
-                continue
-            if entry.index_version > index_version:
-                # Written by a newer rebuild since this run started.
                 continue
             manifest = _latest_published_manifest(session, profile_date)
             if manifest is not None and (

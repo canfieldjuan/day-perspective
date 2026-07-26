@@ -67,7 +67,6 @@ def upgrade() -> None:
             nullable=False,
             server_default="unreviewed",
         ),
-        sa.Column("index_version", sa.Integer, nullable=False, server_default="1"),
         sa.Column(
             "refreshed_at",
             sa.DateTime(timezone=True),
@@ -104,8 +103,7 @@ def _backfill_existing_archive() -> None:
         """
         INSERT INTO coverage_entries (
             profile_date, profile_type, publication_manifest_id,
-            publication_tier, has_recorded_event, sections, review_status,
-            index_version
+            publication_tier, has_recorded_event, sections, review_status
         )
         SELECT
             m.profile_date,
@@ -127,15 +125,18 @@ def _backfill_existing_archive() -> None:
                 WHEN reviewers.human > 0 THEN 'reviewed'
                 WHEN reviewers.total > 0 THEN 'rule_selected'
                 ELSE 'unreviewed'
-            END,
-            1
+            END
         FROM publication_manifests AS m
         JOIN day_profiles AS d ON d.publication_manifest_id = m.id
         JOIN (
-            SELECT profile_date, MAX(version) AS version
-            FROM publication_manifests
-            WHERE status = 'published'
-            GROUP BY profile_date
+            -- Newest published version that actually has a profile row:
+            -- main.py joins day_profiles before ordering, so an incomplete
+            -- newest manifest does not make the date unservable.
+            SELECT pm.profile_date, MAX(pm.version) AS version
+            FROM publication_manifests AS pm
+            JOIN day_profiles AS dp ON dp.publication_manifest_id = pm.id
+            WHERE pm.status = 'published'
+            GROUP BY pm.profile_date
         ) AS newest
           ON newest.profile_date = m.profile_date AND newest.version = m.version
         LEFT JOIN LATERAL (

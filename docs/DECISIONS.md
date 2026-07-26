@@ -876,3 +876,21 @@ first slice ships an operator-visible improvement, a maintained and
 regenerable index plus a migration that backfills an existing archive,
 rather than a user-visible one. Three review rounds and twenty-four
 findings on a single PR is the evidence the size law exists for.
+
+**Amendment (PR #43 review round 6, 2026-07-26): the index carries no
+generation counter.** `index_version` was removed rather than corrected a
+third time. It produced a defect in three separate review rounds — an
+ordinary publication resetting one date to an older generation, two
+overlapping rebuilds writing different generations, and a date published
+mid-rebuild retaining the previous one — and a full-table `MAX()` on every
+publication besides.
+
+It was never load-bearing. Under the per-date lock every writer re-reads
+the current manifest inside the lock and writes what is true at that
+moment, so a stale write cannot occur and there is no ordering to defend.
+The generation counter existed only to resolve disagreements it created.
+`refreshed_at` records when a row was last written, which is what the
+diagnostic need actually was.
+
+The principle, applied here and to review status: a smaller claim that can
+be proved beats a larger one that keeps needing correction.
