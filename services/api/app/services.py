@@ -1115,6 +1115,11 @@ def reconcile_publications(
             )
             if repair and destination.exists():
                 _quarantine(root, destination)
+                # Quarantine makes the date unservable, so it must leave the
+                # index too: /api/v1/day returns 503 for it, and coverage
+                # pointing navigation at it would be a lie.
+                _unindex_date(session, manifest.profile_date)
+                session.commit()
             continue
         # Detect the missing-profile state regardless of whether mutation is
         # enabled: a report-only run must not call it healthy.
@@ -1282,6 +1287,17 @@ def _index_coverage(session: Session, manifest: PublicationManifest) -> None:
     from app.coverage import upsert_coverage_entry
 
     upsert_coverage_entry(session, manifest=manifest)
+
+
+def _unindex_date(session: Session, profile_date: date) -> None:
+    """Drop a date from the index when it stops being servable."""
+    from app.models import CoverageEntry
+
+    entry = session.scalar(
+        select(CoverageEntry).where(CoverageEntry.profile_date == profile_date)
+    )
+    if entry is not None:
+        session.delete(entry)
 
 
 def _index_served_manifest(session: Session, profile_date: date) -> None:

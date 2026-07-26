@@ -185,7 +185,10 @@ def rebuild_coverage_index(
             upsert_coverage_entry(session, manifest=manifest)
             live_dates.add(manifest.profile_date)
     report.dropped = _drop_stale_entries(
-        session, live_dates=live_dates, store=store
+        session,
+        live_dates=live_dates,
+        store=store,
+        report_unreadable=report.unreadable,
     )
     report.indexed = len(live_dates)
     return report
@@ -212,6 +215,7 @@ def _drop_stale_entries(
     *,
     live_dates: set[date],
     store: PublishedProfileStore | None,
+    report_unreadable: list[date],
 ) -> int:
     """Remove entries the archive no longer supports.
 
@@ -241,6 +245,10 @@ def _drop_stale_entries(
                 store is None or _artifact_servable(store, manifest)
             ):
                 live_dates.add(profile_date)
+                # It failed the snapshot pass but is servable now, so the
+                # run is not reporting an unreadable artifact for it.
+                if profile_date in report_unreadable:
+                    report_unreadable.remove(profile_date)
                 continue
             session.delete(entry)
             dropped += 1

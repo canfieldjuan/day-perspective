@@ -637,3 +637,67 @@ def test_coverage_follows_the_version_the_day_endpoint_serves(
 # --- Round 5 review findings (PR #43) ------------------------------------
 
 
+
+
+# --- Round 8 review findings (PR #43) ------------------------------------
+
+
+@pytest.mark.integration
+def test_quarantining_a_bad_artifact_removes_it_from_the_index(
+    session: Session, tmp_path: Path, reviewed_un_wpp: None
+) -> None:
+    """Repair makes a hash-mismatched date unservable; leaving it indexed
+    points navigation at a page that returns 503."""
+    from app.services import reconcile_publications
+    from app.un_wpp import publish_context_profile
+
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+    profile_date = date(2001, 5, 5)
+    publish_context_profile(session, store=store, profile_date=profile_date)
+    session.commit()
+    assert coverage_entry(session, profile_date) is not None
+
+    for artifact in (tmp_path / "published").rglob("*.json"):
+        artifact.write_text('{"tampered": true}', encoding="utf-8")
+
+    report = reconcile_publications(session, store=store, repair=True)
+    session.commit()
+
+    assert report.hash_mismatches >= 1
+    assert coverage_entry(session, profile_date) is None, (
+        "a quarantined date is still advertised by coverage"
+    )
+
+
+@pytest.mark.integration
+def test_a_date_that_recovers_mid_rebuild_is_not_reported_unreadable(
+    session: Session, tmp_path: Path, reviewed_un_wpp: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The CLI exits non-zero on an unreadable artifact. A date that is
+    healthy by the end of the run must not fail it."""
+    from app import coverage as coverage_module
+    from app.un_wpp import publish_context_profile
+
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+    profile_date = date(2002, 6, 6)
+    publish_context_profile(session, store=store, profile_date=profile_date)
+    session.commit()
+
+    calls = {"n": 0}
+    real_servable = coverage_module._artifact_servable
+
+    def unservable_once(store_arg: Any, manifest: Any) -> bool:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return False
+        result: bool = real_servable(store_arg, manifest)
+        return result
+
+    monkeypatch.setattr(coverage_module, "_artifact_servable", unservable_once)
+    report = rebuild_coverage_index(session, store=store)
+    session.commit()
+
+    assert coverage_entry(session, profile_date) is not None
+    assert report.unreadable == [], (
+        "a recovered date still fails the rebuild"
+    )
