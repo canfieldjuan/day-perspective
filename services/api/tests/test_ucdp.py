@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
@@ -206,9 +207,10 @@ def test_superseded_ucdp_input_blocks_stale_annual_publication(
         assertion_json=prior.assertion_json,
     )
 
-    with pytest.raises(
-        ValueError, match="exactly 25 current accepted claims"
-    ):
+    # Still blocked, now by the accepted-status check rather than a fixed
+    # count: supersession leaves an unreviewed claim for the year, and the
+    # year's claims must all be accepted.
+    with pytest.raises(ValueError, match="requires accepted claims for 1964"):
         build_ucdp_annual_profile_content(session)
 
 
@@ -478,3 +480,121 @@ def test_ucdp_ged_quality_preserves_unknown_source_date_precision(
     assert assessment.findings["temporal_precision"] == "unknown"
     assert assessment.public_grade == "C"
     assert (assessment.public_explanation or "").startswith("Grade C:")
+
+
+@pytest.mark.integration
+def test_ucdp_annual_review_is_keyed_by_year_not_by_claim_count(
+    session: Session, tmp_path: Path
+) -> None:
+    """Full UCDP coverage is blocked by fixture-shaped constraints, not by a
+    real invariant: review required exactly 25 claims, and the canonical key
+    and derivation hard-coded 1964."""
+    from app.ucdp import ingest_ucdp_annual, review_ucdp_annual
+
+    result = ingest_ucdp_annual(
+        session,
+        fixture_path=ANNUAL_FIXTURE,
+        raw_store=LocalFilesystemRawSourceStore(tmp_path / "raw"),
+    )
+    assert result.source_release_id is not None
+
+    derived = review_ucdp_annual(session, result.source_release_id, year=1964)
+
+    assert derived.period_start == date(1964, 1, 1)
+    assert derived.value_numeric is not None and derived.value_numeric > 0
+    # The count is of that year's records, not of every claim in the release.
+    assert int(derived.value_numeric) == 25
+
+
+@pytest.mark.integration
+def test_a_year_without_claims_is_named_rather_than_miscounted(
+    session: Session, tmp_path: Path
+) -> None:
+    """A year the dataset does not cover must fail by name. Counting zero
+    would publish an absence as a fact."""
+    from app.ucdp import ingest_ucdp_annual, review_ucdp_annual
+
+    result = ingest_ucdp_annual(
+        session,
+        fixture_path=ANNUAL_FIXTURE,
+        raw_store=LocalFilesystemRawSourceStore(tmp_path / "raw"),
+    )
+    assert result.source_release_id is not None
+
+    with pytest.raises(ValueError, match="1971"):
+        review_ucdp_annual(session, result.source_release_id, year=1971)
+
+
+@pytest.mark.integration
+def test_annual_content_is_built_for_a_requested_year(
+    session: Session, tmp_path: Path
+) -> None:
+    from app.ucdp import (
+        build_ucdp_annual_profile_content,
+        ingest_ucdp_annual,
+        review_ucdp_annual,
+    )
+
+    result = ingest_ucdp_annual(
+        session,
+        fixture_path=ANNUAL_FIXTURE,
+        raw_store=LocalFilesystemRawSourceStore(tmp_path / "raw"),
+    )
+    assert result.source_release_id is not None
+    review_ucdp_annual(session, result.source_release_id, year=1964)
+
+    content = build_ucdp_annual_profile_content(session, year=1964)
+
+    statement = content.statements[0]
+    assert "1964" in str(statement["statement"])
+    # Still period context, never an event on a date.
+    assert "annual context" in str(statement["statement"])
+
+    with pytest.raises(ValueError, match="1971"):
+        build_ucdp_annual_profile_content(session, year=1971)
+
+
+@pytest.mark.integration
+def test_annual_context_records_no_provenance_for_an_unrelated_date(
+    session: Session, tmp_path: Path
+) -> None:
+    """Reviewing a year must not file an editorial selection against the
+    golden date. That would be a false audit record, not a cosmetic one."""
+    from app.governance import EditorialSelection
+    from app.ucdp import GOLDEN_DATE, ingest_ucdp_annual, review_ucdp_annual
+
+    result = ingest_ucdp_annual(
+        session,
+        fixture_path=ANNUAL_FIXTURE,
+        raw_store=LocalFilesystemRawSourceStore(tmp_path / "raw"),
+    )
+    assert result.source_release_id is not None
+    derived = review_ucdp_annual(session, result.source_release_id, year=1964)
+
+    selections = list(
+        session.scalars(
+            select(EditorialSelection).where(
+                EditorialSelection.derived_value_id == derived.id
+            )
+        )
+    )
+    assert selections, "the reviewed root must be recorded as selected"
+    # Its own year, so the golden date is correct here — the point is that
+    # the date follows the year rather than being fixed.
+    assert all(
+        selection.profile_date.year == 1964 for selection in selections
+    )
+    assert any(selection.profile_date == GOLDEN_DATE for selection in selections)
+
+
+def test_annual_statement_text_names_no_single_date() -> None:
+    """The statement serves every date in its year, so no date-specific
+    copy may survive in it. Asserted against the source rather than one
+    rendered example, so a new hard-coded date fails too."""
+    from pathlib import Path as _Path
+
+    source = _Path(__file__).resolve().parents[1] / "app" / "ucdp.py"
+    text = source.read_text(encoding="utf-8")
+    builder = text[text.index("def build_ucdp_annual_profile_content") :]
+    for banned in ["March 27", "March 27, 1964", "Twenty-five"]:
+        assert banned not in builder, f"date-specific copy survives: {banned}"
