@@ -945,7 +945,9 @@ def test_reconcile_repair_indexes_the_recovered_quality_floor(
         statement_evidence=evidence("first"),
     )
     session.commit()
-    assert coverage_for_date(session, profile_date).quality_floor == "B"
+    before = coverage_for_date(session, profile_date)
+    assert before is not None
+    assert before.quality_floor == "B"
 
     from app import services as services_module
 
