@@ -1,4 +1,5 @@
 import {
+  DAY_PROFILE_SECTION_KEYS,
   PUBLICATION_TIERS,
   type CoverageDateResponse,
   type PublicationTier
@@ -16,6 +17,28 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 
 function isNeighbour(value: unknown): boolean {
   return value === null || (typeof value === "string" && isSupportedPublicDate(value));
+}
+
+/**
+ * Section counts must be real counts under known keys.
+ *
+ * Accepting any object let `true` or `"2"` coerce through the numeric
+ * comparisons downstream and render a confident claim about content the
+ * page may not have — which is the one thing this validator exists to
+ * prevent.
+ */
+function isSectionCounts(value: unknown): boolean {
+  const record = asRecord(value);
+  if (record === undefined) {
+    return false;
+  }
+  return Object.entries(record).every(
+    ([key, count]) =>
+      (DAY_PROFILE_SECTION_KEYS as readonly string[]).includes(key) &&
+      typeof count === "number" &&
+      Number.isInteger(count) &&
+      count >= 0
+  );
 }
 
 /**
@@ -37,7 +60,7 @@ export function isCoverageResponse(
       response.publication_tier as string
     ) &&
     typeof response.has_recorded_event === "boolean" &&
-    asRecord(response.sections) !== undefined &&
+    isSectionCounts(response.sections) &&
     isNeighbour(response.nearest_enriched_before) &&
     isNeighbour(response.nearest_enriched_after) &&
     isNeighbour(response.nearest_recorded_event_before) &&

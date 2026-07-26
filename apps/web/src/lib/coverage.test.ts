@@ -209,3 +209,37 @@ describe("the ordinary profile carries both kinds of context", () => {
     expect(state.hasPeriodContext).toBe(true);
   });
 });
+
+describe("section counts are validated, not assumed", () => {
+  it("rejects values that would coerce through a numeric comparison", () => {
+    // true > 0 and "2" > 0 are both true in JavaScript, so an unvalidated
+    // count renders a confident claim from a malformed response.
+    for (const bad of [true, "2", null, 1.5, -1, {}] as unknown[]) {
+      expect(
+        isCoverageResponse(
+          { ...base, sections: { typical_day_in_this_year: bad } },
+          "1983-10-12"
+        )
+      ).toBe(false);
+    }
+  });
+
+  it("rejects counts under keys outside the contract", () => {
+    expect(
+      isCoverageResponse(
+        { ...base, sections: { recordedXonYthisZdate: 2 } },
+        "1983-10-12"
+      )
+    ).toBe(false);
+  });
+
+  it("accepts real counts, including zero and an empty map", () => {
+    expect(
+      isCoverageResponse(
+        { ...base, sections: { typical_day_in_this_year: 0, evidence_notes: 3 } },
+        "1983-10-12"
+      )
+    ).toBe(true);
+    expect(isCoverageResponse({ ...base, sections: {} }, "1983-10-12")).toBe(true);
+  });
+});
