@@ -1078,8 +1078,7 @@ def reconcile_publications(
                 # index would keep the predecessor's quality floor while
                 # pointing at the new manifest. Indexed by date so a repair
                 # of an older version cannot displace a newer served one.
-                _index_served_manifest(session, manifest.profile_date)
-                session.commit()
+                _reconcile_coverage(session, manifest, store)
         else:
             report.abandoned_pending += 1
             report.details.append(
@@ -1113,13 +1112,14 @@ def reconcile_publications(
                 f"published manifest {manifest.id} failed verification: "
                 f"{manifest.storage_uri}"
             )
-            if repair and destination.exists():
-                _quarantine(root, destination)
-                # Quarantine makes the date unservable, so it must leave the
-                # index too: /api/v1/day returns 503 for it, and coverage
-                # pointing navigation at it would be a lie.
-                _unindex_date(session, manifest.profile_date)
-                session.commit()
+            if repair:
+                if destination.exists():
+                    _quarantine(root, destination)
+                # Re-derive the date either way: a missing artifact leaves
+                # nothing to quarantine but still must not be advertised,
+                # and a failed older version must not unindex a date whose
+                # newer version is still served.
+                _reconcile_coverage(session, manifest, store)
             continue
         # Detect the missing-profile state regardless of whether mutation is
         # enabled: a report-only run must not call it healthy.
@@ -1141,8 +1141,7 @@ def reconcile_publications(
                 # Index the date, not this manifest: repairing an older
                 # version must not rewrite coverage to it while the day
                 # endpoint still serves a newer healthy one.
-                _index_served_manifest(session, manifest.profile_date)
-                session.commit()
+                _reconcile_coverage(session, manifest, store)
         else:
             report.healthy_published += 1
 
@@ -1289,30 +1288,27 @@ def _index_coverage(session: Session, manifest: PublicationManifest) -> None:
     upsert_coverage_entry(session, manifest=manifest)
 
 
-def _unindex_date(session: Session, profile_date: date) -> None:
-    """Drop a date from the index when it stops being servable."""
-    from app.models import CoverageEntry
+def _reconcile_coverage(
+    session: Session,
+    manifest: PublicationManifest,
+    store: PublishedProfileStore,
+) -> None:
+    """Re-derive this date's coverage from what is actually servable.
 
-    entry = session.scalar(
-        select(CoverageEntry).where(CoverageEntry.profile_date == profile_date)
-    )
-    if entry is not None:
-        session.delete(entry)
-
-
-def _index_served_manifest(session: Session, profile_date: date) -> None:
-    """Index whichever manifest a reader is served for this date.
-
-    Reconciliation repairs one manifest, but the date may already have a
-    newer healthy version that the day endpoint prefers. Indexing the
-    repaired manifest directly would describe the older version while
-    readers get the newer one.
+    Reconciliation changes what a date offers in several ways — completing
+    a pending publication, adding a missing profile row, quarantining a
+    corrupt artifact — and each of those used to adjust the index its own
+    way. Delegating to one derivation means reconciliation and a rebuild
+    cannot disagree, and the per-date lock lives in one place.
     """
-    from app.coverage import _latest_published_manifest, upsert_coverage_entry
+    from app.coverage import reconcile_date_coverage
 
-    served = _latest_published_manifest(session, profile_date)
-    if served is not None:
-        upsert_coverage_entry(session, manifest=served)
+    reconcile_date_coverage(
+        session,
+        profile_date=manifest.profile_date,
+        profile_type=manifest.profile_type,
+        store=store,
+    )
 
 
 def publication_advisory_lock_key(profile_date: date, profile_type: ProfileType) -> str:

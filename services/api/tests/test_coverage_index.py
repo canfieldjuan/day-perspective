@@ -701,3 +701,79 @@ def test_a_date_that_recovers_mid_rebuild_is_not_reported_unreadable(
     assert report.unreadable == [], (
         "a recovered date still fails the rebuild"
     )
+
+
+# --- Round 9 review findings (PR #43) ------------------------------------
+
+
+@pytest.mark.integration
+def test_a_missing_artifact_is_unindexed_even_with_nothing_to_quarantine(
+    session: Session, tmp_path: Path, reviewed_un_wpp: None
+) -> None:
+    """Verification fails whether the artifact is corrupt or absent; only
+    the corrupt case leaves a file to move."""
+    from app.services import reconcile_publications
+    from app.un_wpp import publish_context_profile
+
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+    profile_date = date(2003, 7, 7)
+    publish_context_profile(session, store=store, profile_date=profile_date)
+    session.commit()
+    assert coverage_entry(session, profile_date) is not None
+
+    for artifact in (tmp_path / "published").rglob("*.json"):
+        artifact.unlink()
+
+    reconcile_publications(session, store=store, repair=True)
+    session.commit()
+
+    assert coverage_entry(session, profile_date) is None, (
+        "a date with no artifact is still advertised by coverage"
+    )
+
+
+@pytest.mark.integration
+def test_quarantining_an_older_version_keeps_the_served_one_indexed(
+    session: Session, tmp_path: Path, reviewed_un_wpp: None
+) -> None:
+    """Unindexing by date would remove a date whose newer version is
+    perfectly servable."""
+    from app.models import PublicationStatus
+    from app.services import reconcile_publications
+    from app.un_wpp import publish_context_profile
+
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+    profile_date = date(2004, 8, 8)
+    first = publish_context_profile(session, store=store, profile_date=profile_date)
+    session.commit()
+    first_manifest = session.get(PublicationManifest, first.publication_manifest_id)
+    assert first_manifest is not None
+    older_uri = first_manifest.storage_uri
+
+    publish_context_profile(
+        session, store=store, profile_date=profile_date, force_new_version=True
+    )
+    session.commit()
+    served = session.scalar(
+        select(PublicationManifest)
+        .where(
+            PublicationManifest.profile_date == profile_date,
+            PublicationManifest.status == PublicationStatus.PUBLISHED,
+        )
+        .order_by(PublicationManifest.version.desc())
+        .limit(1)
+    )
+    assert served is not None and served.version == 2
+
+    # Corrupt only the older version's artifact.
+    (tmp_path / "published" / older_uri).write_text("{}", encoding="utf-8")
+
+    report = reconcile_publications(session, store=store, repair=True)
+    session.commit()
+
+    assert report.hash_mismatches >= 1
+    record = coverage_entry(session, profile_date)
+    assert record is not None, (
+        "quarantining an older version unindexed a servable date"
+    )
+    assert record.publication_manifest_id == served.id

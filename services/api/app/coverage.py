@@ -278,6 +278,41 @@ def _latest_published_manifest(
     )
 
 
+def reconcile_date_coverage(
+    session: Session,
+    *,
+    profile_date: date,
+    profile_type: ProfileType,
+    store: PublishedProfileStore | None = None,
+) -> None:
+    """Re-derive one date's coverage from what is actually servable.
+
+    The single answer to "this date changed, fix its index entry". It is
+    the same step the rebuild performs per date, so reconciliation cannot
+    disagree with a rebuild about what a date should look like.
+
+    Deriving the whole answer, rather than adding or removing at each call
+    site, is what makes it correct in the cases that individually caught me
+    out: a missing artifact leaves nothing to quarantine but still must be
+    unindexed; a failed *older* version must not unindex a date whose newer
+    version is served; and the decision must happen under the date's
+    publication lock so a concurrent correction is not undone.
+    """
+    with _date_transaction(session, profile_date, profile_type):
+        manifest = _latest_published_manifest(session, profile_date)
+        servable = manifest is not None and (
+            store is None or _artifact_servable(store, manifest)
+        )
+        if manifest is not None and servable:
+            upsert_coverage_entry(session, manifest=manifest)
+            return
+        entry = session.scalar(
+            select(CoverageEntry).where(CoverageEntry.profile_date == profile_date)
+        )
+        if entry is not None:
+            session.delete(entry)
+
+
 def coverage_entry(session: Session, profile_date: date) -> CoverageEntry | None:
     """The indexed row for one date, or None when the date is not indexed.
 
