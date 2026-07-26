@@ -33,6 +33,94 @@ from app.un_wpp import (
 
 CONTEXT_BATCH_KIND = "context-profiles"
 
+#: Ledger keys naming the source releases a context profile rests on. Both
+#: are recorded so a resume can tell that either moved underneath it; they
+#: are separate keys because the releases move independently.
+RELEASE_LEDGER_KEYS = ("source_release_id", "ucdp_source_release_id")
+
+
+def current_context_releases(session: Session) -> dict[str, UUID | None]:
+    """The releases a context publication would use right now."""
+    from app.golden_canary import (
+        current_ucdp_release_id,
+        current_un_wpp_release_id,
+    )
+
+    return {
+        "source_release_id": current_un_wpp_release_id(session),
+        "ucdp_source_release_id": current_ucdp_release_id(session),
+    }
+
+
+def context_batch_request(
+    session: Session,
+    *,
+    dates: Sequence[date],
+    dry_run: bool,
+    force_new_version: bool,
+) -> dict[str, object]:
+    """What a context batch run records about how it was requested.
+
+    The releases are recorded even when null, so an absent key keeps meaning
+    "written before pinning existed" rather than "no release was in use".
+    """
+    request: dict[str, object] = {
+        "dates": [value.isoformat() for value in dates],
+        "dry_run": dry_run,
+        "force_new_version": force_new_version,
+    }
+    for key, release in current_context_releases(session).items():
+        request[key] = str(release) if release is not None else None
+    return request
+
+
+def batch_run_is_resumable(
+    recorded: dict[str, object] | None,
+    *,
+    dates: Sequence[date] | None,
+    current_releases: dict[str, UUID | None],
+) -> bool:
+    """Whether an interrupted run's recorded inputs still hold.
+
+    A run recorded against a different date plan, or against a release that
+    has since been superseded, cannot be finished without producing a mixed
+    result: the dates already published rest on the old inputs and the
+    resumed ones would rest on the new. Such a run is skipped rather than
+    resumed, so it cannot block newer interrupted runs behind a ledger there
+    is no command to clear.
+
+    ``dates`` is the plan the caller intends to run. Pass None where there
+    is none to compare against — a context resume finishes whatever run the
+    ledger holds rather than a freshly-computed range, and comparing that
+    run's dates against themselves would be a check that cannot fail.
+
+    Every release is checked separately, because they move independently,
+    and an *absent* key is distinguished from a key recorded as null. Only
+    the absent one is unconstrained, meaning a ledger written before
+    pinning existed. A recorded null is a fact about the run: the source was
+    not ingested, so those dates published without its content. Ingesting it
+    afterwards and resuming would give the remaining dates content the
+    earlier ones lack — the same mixed archive by a quieter route.
+    """
+    recorded = recorded or {}
+    # A ledger is JSON, so its shape is not guaranteed by the type checker.
+    # A "dates" key that is not a list is not a plan that matches.
+    raw_dates = recorded.get("dates")
+    recorded_dates = raw_dates if isinstance(raw_dates, list) else []
+    dates_match = dates is None or [
+        date.fromisoformat(str(value)) for value in recorded_dates
+    ] in ([], list(dates))
+    def unchanged(recorded_value: object, current: UUID | None) -> bool:
+        if recorded_value is None or current is None:
+            return recorded_value is None and current is None
+        return str(recorded_value) == str(current)
+
+    releases_match = all(
+        key not in recorded or unchanged(recorded[key], current)
+        for key, current in current_releases.items()
+    )
+    return dates_match and releases_match
+
 
 class BatchPlanError(ValueError):
     """The requested date selection is not publishable."""
@@ -176,13 +264,18 @@ def recoverable_batch_run(
     )
     newest: PublicationBatchRun | None = None
     for run in candidates:
-        newest = run
-        if not outstanding_dates(session, batch_run=run, only_failed=only_failed):
-            continue
         # A run this caller cannot resume — because its recorded inputs no
         # longer match — must be stepped over, not returned. Returning it
         # would block every later resume behind a ledger nothing can clear.
+        #
+        # The test is applied before `newest` is recorded, not only before
+        # the return. Recording it first and skipping afterwards let the
+        # fallback hand back the very run the caller rejected, which in the
+        # ordinary single-interrupted-run case defeated the guard entirely.
         if is_resumable is not None and not is_resumable(run):
+            continue
+        newest = run
+        if not outstanding_dates(session, batch_run=run, only_failed=only_failed):
             continue
         return run
     return newest

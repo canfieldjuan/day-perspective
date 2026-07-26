@@ -1003,6 +1003,81 @@ def build_ucdp_annual_profile_content(
     )
 
 
+@dataclass(frozen=True)
+class UCDPReviewSweep:
+    """What a whole-release review pass did, per year."""
+
+    years_covered: tuple[int, ...]
+    reviewed: int
+    already_current: int
+    failed: int
+    failures: tuple[tuple[int, str], ...]
+
+
+def release_years(session: Session, release_id: UUID) -> tuple[int, ...]:
+    """Every year the release carries records for, ascending."""
+    return tuple(
+        sorted(
+            int(value)
+            for value in session.scalars(
+                select(Claim.assertion_json["year"].astext)
+                .where(Claim.source_release_id == release_id)
+                .distinct()
+            )
+            if str(value).isdigit()
+        )
+    )
+
+
+def review_ucdp_annual_release(
+    session: Session, release_id: UUID
+) -> UCDPReviewSweep:
+    """Review every year the release covers.
+
+    Since UC2 an unreviewed year fails its dates closed (D037), so before
+    the archive can be republished every year in the release needs a
+    derivation. Reviewing them one at a time by hand is 80 invocations.
+
+    Each year commits on its own, so an interrupted sweep keeps the years it
+    finished and a rerun resumes rather than restarting. A year that fails
+    is rolled back, named and counted rather than aborting the pass: the
+    alternative is discovering it 27,825 dates later, as a wall of
+    publication failures with no explanation.
+    """
+    years = release_years(session, release_id)
+    reviewed = 0
+    already_current = 0
+    failures: list[tuple[int, str]] = []
+    for year in years:
+        existing = set(
+            session.scalars(
+                select(DerivedValue.id).where(
+                    DerivedValue.value_kind
+                    == "active_state_based_conflict_count",
+                    DerivedValue.period_start == date(year, 1, 1),
+                )
+            )
+        )
+        try:
+            derived = review_ucdp_annual(session, release_id, year=year)
+            session.commit()
+        except Exception as error:  # noqa: BLE001 - recorded, not swallowed
+            session.rollback()
+            failures.append((year, str(error)))
+            continue
+        if derived.id in existing:
+            already_current += 1
+        else:
+            reviewed += 1
+    return UCDPReviewSweep(
+        years_covered=years,
+        reviewed=reviewed,
+        already_current=already_current,
+        failed=len(failures),
+        failures=tuple(failures),
+    )
+
+
 def optional_annual_context(
     session: Session, *, year: int, statement_index: int
 ) -> UCDPAnnualProfileContent | None:
