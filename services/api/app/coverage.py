@@ -28,7 +28,7 @@ from app.models import (
     PublicationStatementEvidence,
     PublicationStatus,
 )
-from app.services import PublishedProfileStore, publication_advisory_lock_key
+from app.services import PublishedProfileStore, _acquire_publication_lock
 
 SECTION_KEYS = (
     "recorded_on_this_date",
@@ -266,25 +266,26 @@ def latest_published_manifests(session: Session) -> list[PublicationManifest]:
 
 
 @contextmanager
-def _date_publication_lock(
+def _date_transaction(
     session: Session, profile_date: date, profile_type: ProfileType
 ) -> Iterator[None]:
-    """Hold the publication lock for one date, then release it.
+    """One date's work as its own locked transaction.
 
-    Publication takes a transaction-scoped lock, which is right for a single
-    date. A rebuild walks the whole archive in one transaction, so
-    transaction-scoped locks would accumulate one per date — roughly 27,759
-    of them — exhausting the lock pool and blocking corrections to early
-    dates for the length of the run.
+    The lock is transaction-scoped, so PostgreSQL releases it at commit, on
+    the same backend that took it. A session-scoped lock plus an explicit
+    unlock is unsafe here: committing inside the lock can return the
+    connection to the pool, and the unlock may then run on a different
+    backend, silently leaking the lock and blocking publication for that
+    date. Committing per date also keeps row locks from accumulating across
+    the run, and keeps advisory locks from accumulating with them.
     """
-    key = func.hashtextextended(
-        publication_advisory_lock_key(profile_date, profile_type), 0
-    )
-    session.execute(select(func.pg_advisory_lock(key)))
+    _acquire_publication_lock(session, profile_date, profile_type)
     try:
         yield
-    finally:
-        session.execute(select(func.pg_advisory_unlock(key)))
+        session.commit()
+    except BaseException:
+        session.rollback()
+        raise
 
 
 def rebuild_coverage_index(
@@ -292,7 +293,6 @@ def rebuild_coverage_index(
     *,
     store: PublishedProfileStore | None = None,
     index_version: int | None = None,
-    commit_each_date: bool = True,
 ) -> CoverageRebuildReport:
     """Regenerate the whole index from published state.
 
@@ -300,22 +300,30 @@ def rebuild_coverage_index(
     or was superseded by an unpublished manifest are dropped rather than
     left describing an archive that no longer exists.
 
-    Each date is re-read under its publication lock, so a correction that
-    lands while this walks its snapshot wins instead of being overwritten by
-    the manifest that was newest when the walk began.
+    Each date is its own locked transaction, so a correction that lands
+    while this walks its snapshot wins instead of being overwritten by the
+    manifest that was newest when the walk began, and nothing this run holds
+    accumulates across the archive.
     """
     if index_version is None:
         index_version = (
             session.scalar(select(func.max(CoverageEntry.index_version))) or 0
         ) + 1
+        session.commit()
     report = CoverageRebuildReport(index_version=index_version)
     snapshot = latest_published_manifests(session)
+    session.commit()
     live_dates = set()
     for stale in snapshot:
-        with _date_publication_lock(session, stale.profile_date, stale.profile_type):
+        with _date_transaction(session, stale.profile_date, stale.profile_type):
             manifest = _latest_published_manifest(session, stale.profile_date)
-            if manifest is None or not _has_day_profile(session, manifest):
-                # A manifest without its profile row is not served to readers.
+            if manifest is None:
+                # No published manifest with a profile row: not served.
+                continue
+            if _superseded_by_newer_rebuild(session, stale.profile_date, index_version):
+                # A later rebuild already owns this date. Writing our older
+                # generation would leave the index reporting two.
+                live_dates.add(stale.profile_date)
                 continue
             if store is not None and not _artifact_readable(store, manifest):
                 # The day endpoint fails for this date. Indexing it anyway
@@ -326,32 +334,28 @@ def rebuild_coverage_index(
                 session, manifest=manifest, store=store, index_version=index_version
             )
             live_dates.add(manifest.profile_date)
-            if commit_each_date:
-                # Releasing the advisory lock is not enough: an uncommitted
-                # upsert keeps this row's write lock, so a correction to an
-                # already-processed date would block at its own final
-                # coverage write until the whole archive finished.
-                session.commit()
     report.dropped = _drop_stale_entries(
-        session,
-        live_dates=live_dates,
-        store=store,
-        commit=commit_each_date,
+        session, live_dates=live_dates, store=store, index_version=index_version
     )
-    session.flush()
     report.indexed = len(live_dates)
     return report
 
 
-def _has_day_profile(session: Session, manifest: PublicationManifest) -> bool:
-    return (
-        session.scalar(
-            select(DayProfile.id).where(
-                DayProfile.publication_manifest_id == manifest.id
-            )
+def _superseded_by_newer_rebuild(
+    session: Session, profile_date: date, index_version: int
+) -> bool:
+    """True when a later rebuild generation already covers this date.
+
+    Two overlapping rebuilds each allocate a generation; without this the
+    older one can write its lower generation over the newer one's row, and
+    the archive then reports two generations at once.
+    """
+    existing = session.scalar(
+        select(CoverageEntry.index_version).where(
+            CoverageEntry.profile_date == profile_date
         )
-        is not None
     )
+    return existing is not None and existing > index_version
 
 
 def _artifact_readable(
@@ -369,33 +373,42 @@ def _drop_stale_entries(
     *,
     live_dates: set[date],
     store: PublishedProfileStore | None,
-    commit: bool,
+    index_version: int,
 ) -> int:
     """Remove entries the archive no longer supports.
 
-    Every entry that did not survive this pass is re-checked under its own
-    lock before deletion — including dates that were in the snapshot but
-    were skipped, because a skipped date can be republished healthy while
-    the rebuild is still running. Deleting such a row would leave the day
-    endpoint serving a profile that coverage reports as missing.
+    Every entry that did not survive this pass is re-checked in its own
+    locked transaction before deletion — including dates that were in the
+    snapshot but were skipped, because a skipped date can be republished
+    healthy while the rebuild is still running. Deleting such a row would
+    leave the day endpoint serving a profile that coverage reports as
+    missing.
     """
     dropped = 0
-    for entry in list(session.scalars(select(CoverageEntry))):
-        if entry.profile_date in live_dates:
-            continue
-        with _date_publication_lock(session, entry.profile_date, entry.profile_type):
-            manifest = _latest_published_manifest(session, entry.profile_date)
-            if (
-                manifest is not None
-                and _has_day_profile(session, manifest)
-                and (store is None or _artifact_readable(store, manifest))
+    candidates = [
+        (entry.profile_date, entry.profile_type)
+        for entry in session.scalars(select(CoverageEntry))
+        if entry.profile_date not in live_dates
+    ]
+    session.commit()
+    for profile_date, profile_type in candidates:
+        with _date_transaction(session, profile_date, profile_type):
+            entry = session.scalar(
+                select(CoverageEntry).where(CoverageEntry.profile_date == profile_date)
+            )
+            if entry is None:
+                continue
+            if entry.index_version > index_version:
+                # Written by a newer rebuild since this run started.
+                continue
+            manifest = _latest_published_manifest(session, profile_date)
+            if manifest is not None and (
+                store is None or _artifact_readable(store, manifest)
             ):
-                live_dates.add(entry.profile_date)
+                live_dates.add(profile_date)
                 continue
             session.delete(entry)
             dropped += 1
-            if commit:
-                session.commit()
     return dropped
 
 

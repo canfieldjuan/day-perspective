@@ -706,6 +706,32 @@ def test_a_rebuild_does_not_hold_one_lock_per_date(
 
 
 @pytest.mark.integration
+def test_an_older_rebuild_does_not_lower_a_newer_generation(
+    session: Session, tmp_path: Path, reviewed_un_wpp: None
+) -> None:
+    """Two overlapping rebuilds each allocate a generation. If the older one
+    writes after the newer, the archive reports two generations at once."""
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+    dates = [date(1998, 2, day) for day in range(1, 4)]
+    run = start_batch_run(
+        session,
+        kind=CONTEXT_BATCH_KIND,
+        requested={"dates": [value.isoformat() for value in dates]},
+    )
+    run_context_batch(session, store=store, dates=dates, batch_run=run)
+    session.commit()
+
+    rebuild_coverage_index(session, store=store, index_version=5)
+    # An older job, started earlier, finishing after the newer one.
+    rebuild_coverage_index(session, store=store, index_version=3)
+
+    generations = set(
+        session.scalars(select(CoverageEntry.index_version).distinct())
+    )
+    assert generations == {5}, f"index reports mixed generations: {generations}"
+
+
+@pytest.mark.integration
 def test_reconcile_repair_indexes_the_recovered_quality_floor(
     session: Session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -168,7 +168,25 @@ def _backfill_existing_archive() -> None:
                     )
                 ) AS human
             FROM editorial_selections AS s
-            WHERE s.profile_date = m.profile_date AND s.status = 'selected'
+            WHERE s.profile_date = m.profile_date
+              AND s.status = 'selected'
+              -- Scoped to this manifest's own evidence, as _review_status
+              -- is: a decision about content that was never published is
+              -- not review of what the reader is served.
+              AND (
+                  s.resolved_claim_id IN (
+                      SELECT e.resolved_claim_id
+                      FROM publication_statement_evidence AS e
+                      WHERE e.publication_manifest_id = m.id
+                        AND e.resolved_claim_id IS NOT NULL
+                  )
+                  OR s.derived_value_id IN (
+                      SELECT e.derived_value_id
+                      FROM publication_statement_evidence AS e
+                      WHERE e.publication_manifest_id = m.id
+                        AND e.derived_value_id IS NOT NULL
+                  )
+              )
         ) AS reviewers ON TRUE
         WHERE m.status = 'published'
         ON CONFLICT (profile_date) DO NOTHING
