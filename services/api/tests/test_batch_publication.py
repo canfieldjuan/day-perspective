@@ -17,6 +17,7 @@ from app.adapters.base import LocalFilesystemRawSourceStore
 from app.batch_publication import (
     CONTEXT_BATCH_KIND,
     BatchPlanError,
+    latest_batch_run,
     outstanding_dates,
     plan_context_dates,
     run_context_batch,
@@ -375,3 +376,54 @@ def test_retry_failed_leaves_a_run_open_while_dates_remain_unattempted(
     run_context_batch(session, store=store, dates=failed_only, batch_run=run)
     assert run.status is BatchRunStatus.INTERRUPTED
     assert date(1978, 4, 2) in outstanding_dates(session, batch_run=run)
+
+
+@pytest.mark.integration
+def test_recovery_reaches_an_older_unfinished_run(
+    session: Session, tmp_path: Path, reviewed_un_wpp: None
+) -> None:
+    """Year-by-year publication keeps going after a year is interrupted, so
+    by recovery time the unfinished run is not the newest one."""
+    from app.batch_publication import recoverable_batch_run
+
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+    stranded_dates = [date(1990, 1, 1), date(1990, 1, 2)]
+    stranded = start_batch_run(
+        session,
+        kind=CONTEXT_BATCH_KIND,
+        requested={"dates": [value.isoformat() for value in stranded_dates]},
+    )
+    # Only the first date is attempted, as a killed year would leave it.
+    run_context_batch(
+        session, store=store, dates=stranded_dates[:1], batch_run=stranded
+    )
+    assert outstanding_dates(session, batch_run=stranded) == stranded_dates[1:]
+
+    later_dates = [date(1991, 1, 1)]
+    later = start_batch_run(
+        session,
+        kind=CONTEXT_BATCH_KIND,
+        requested={"dates": [value.isoformat() for value in later_dates]},
+    )
+    run_context_batch(session, store=store, dates=later_dates, batch_run=later)
+    assert outstanding_dates(session, batch_run=later) == []
+
+    # The newest run owes nothing; recovery must still find the stranded one.
+    newest = latest_batch_run(session, kind=CONTEXT_BATCH_KIND)
+    assert newest is not None and newest.id == later.id
+    recovered = recoverable_batch_run(session, kind=CONTEXT_BATCH_KIND)
+    assert recovered is not None
+    assert recovered.id == stranded.id
+
+    report = run_context_batch(
+        session,
+        store=store,
+        dates=outstanding_dates(session, batch_run=recovered),
+        batch_run=recovered,
+    )
+
+    assert report.published == 1
+    assert outstanding_dates(session, batch_run=stranded) == []
+    # With nothing outstanding anywhere, recovery falls back to the newest.
+    fallback = recoverable_batch_run(session, kind=CONTEXT_BATCH_KIND)
+    assert fallback is not None and fallback.id == later.id

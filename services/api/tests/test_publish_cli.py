@@ -20,6 +20,16 @@ from tests.test_publication_atomicity import (
 )
 
 
+def _settings_for(tmp_path: Path) -> object:
+    """Settings pointing publication storage at a scratch directory."""
+    from app.config import get_settings
+
+    settings = get_settings()
+    return type(settings)(
+        **{**settings.__dict__, "published_profile_root": tmp_path / "published"}
+    )
+
+
 @pytest.mark.integration
 def test_reconcile_command_reports_and_repairs(
     session: Session,
@@ -198,3 +208,51 @@ def test_resuming_a_killed_dry_run_does_not_publish_for_real(
             )
         )
     ), "Resuming a dry run published real profiles."
+
+
+@pytest.mark.integration
+def test_publish_archive_refuses_input_it_cannot_publish(
+    session: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A range that publishes nothing must never report success. The year
+    loop lives here rather than in shell precisely so these cannot pass:
+    a mistyped year, an inverted range, and an unsupported year each
+    produced an empty loop and a clean exit when the loop was a Makefile
+    for-statement."""
+    monkeypatch.setattr(
+        publish_cli, "get_settings", lambda: _settings_for(tmp_path)
+    )
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["publish_cli", "publish-archive", "--from-year", "foo", "--to-year", "2025"],
+    )
+    with pytest.raises(SystemExit) as mistyped:
+        publish_cli.main()
+    assert mistyped.value.code != 0
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["publish_cli", "publish-archive", "--from-year", "2025", "--to-year", "1950"],
+    )
+    with pytest.raises(SystemExit) as inverted:
+        publish_cli.main()
+    assert inverted.value.code != 0
+    assert "is after" in str(inverted.value)
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["publish_cli", "publish-archive", "--from-year", "1900", "--to-year", "1900"],
+    )
+    with pytest.raises(SystemExit) as unsupported:
+        publish_cli.main()
+    assert unsupported.value.code != 0
+    reported = capsys.readouterr().out
+    assert "plan_error" in reported
+    assert "failed_years=1900" in reported

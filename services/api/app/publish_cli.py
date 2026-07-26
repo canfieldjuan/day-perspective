@@ -7,9 +7,9 @@ from pathlib import Path
 from app.batch_publication import (
     CONTEXT_BATCH_KIND,
     BatchPlanError,
-    latest_batch_run,
     outstanding_dates,
     plan_context_dates,
+    recoverable_batch_run,
     run_context_batch,
     start_batch_run,
 )
@@ -24,7 +24,7 @@ from app.golden_canary import (
     record_canary_publication,
     start_golden_canary_run,
 )
-from app.models import BatchRunStatus
+from app.models import BatchRunStatus, PublicationBatchRun
 from app.services import LocalFilesystemPublishedProfileStore, reconcile_publications
 
 #: Repo-root-relative, resolved from this module: the CLI runs with its
@@ -72,14 +72,32 @@ def main() -> None:
     context.add_argument(
         "--resume",
         action="store_true",
-        help="Continue the most recent run's unfinished and failed dates.",
+        help="Continue the oldest run that still owes dates; repeat until none remain.",
     )
     context.add_argument(
         "--retry-failed",
         action="store_true",
-        help="Re-attempt only the most recent run's failed dates.",
+        help="Re-attempt failed dates, oldest run with failures first.",
     )
     context.add_argument(
+        "--force-new-version",
+        action="store_true",
+        help="Publish a superseding version even when content is unchanged.",
+    )
+    archive = subparsers.add_parser(
+        "publish-archive",
+        help="Publish a whole year range as context profiles, year by year.",
+    )
+    # argparse enforces the types, so a mistyped year cannot become an empty
+    # loop that reports success.
+    archive.add_argument("--from-year", type=int, default=1950)
+    archive.add_argument("--to-year", type=int, default=2025)
+    archive.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Plan and ledger each year without publishing.",
+    )
+    archive.add_argument(
         "--force-new-version",
         action="store_true",
         help="Publish a superseding version even when content is unchanged.",
@@ -97,7 +115,7 @@ def main() -> None:
     canary.add_argument(
         "--resume",
         action="store_true",
-        help="Continue the most recent canary run's unfinished and failed dates.",
+        help="Continue the oldest canary run that still owes dates.",
     )
     canary.add_argument(
         "--validate-only",
@@ -149,7 +167,11 @@ def main() -> None:
                 settings.published_profile_root
             )
             if args.resume or args.retry_failed:
-                run = latest_batch_run(session, kind=CONTEXT_BATCH_KIND)
+                run = recoverable_batch_run(
+                    session,
+                    kind=CONTEXT_BATCH_KIND,
+                    only_failed=args.retry_failed,
+                )
                 if run is None:
                     raise SystemExit("No context batch run exists to resume.")
                 dates = outstanding_dates(
@@ -207,6 +229,71 @@ def main() -> None:
                 print(f"failure date={failed_date.isoformat()} reason={reason}")
             if batch_report.failed:
                 raise SystemExit(1)
+        elif args.command == "publish-archive":
+            if args.from_year > args.to_year:
+                raise SystemExit(
+                    f"--from-year {args.from_year} is after --to-year "
+                    f"{args.to_year}."
+                )
+            store = LocalFilesystemPublishedProfileStore(
+                settings.published_profile_root
+            )
+            totals = {"requested": 0, "published": 0, "unchanged": 0, "skipped": 0}
+            failed_years: list[int] = []
+            for year in range(args.from_year, args.to_year + 1):
+                try:
+                    dates = plan_context_dates(year=year)
+                except BatchPlanError as error:
+                    # One unpublishable year must not cost the rest of the
+                    # range, but it must be named rather than skipped.
+                    failed_years.append(year)
+                    print(f"year={year} plan_error={error}")
+                    continue
+                run = start_batch_run(
+                    session,
+                    kind=CONTEXT_BATCH_KIND,
+                    requested={
+                        "dates": [value.isoformat() for value in dates],
+                        "dry_run": args.dry_run,
+                        "force_new_version": args.force_new_version,
+                    },
+                )
+                year_report = run_context_batch(
+                    session,
+                    store=store,
+                    dates=dates,
+                    batch_run=run,
+                    dry_run=args.dry_run,
+                    force_new_version=args.force_new_version,
+                )
+                totals["requested"] += year_report.requested
+                totals["published"] += year_report.published
+                totals["unchanged"] += year_report.unchanged
+                totals["skipped"] += year_report.skipped
+                print(
+                    f"year={year} requested={year_report.requested} "
+                    f"published={year_report.published} "
+                    f"unchanged={year_report.unchanged} "
+                    f"skipped={year_report.skipped} "
+                    f"failed={year_report.failed}"
+                )
+                for failed_date, reason in year_report.failures:
+                    print(f"failure date={failed_date.isoformat()} reason={reason}")
+                if year_report.failed:
+                    failed_years.append(year)
+            print(
+                f"years={args.from_year}-{args.to_year} "
+                f"requested={totals['requested']} "
+                f"published={totals['published']} "
+                f"unchanged={totals['unchanged']} "
+                f"skipped={totals['skipped']} "
+                f"failed_years={len(failed_years)}"
+            )
+            if failed_years:
+                print(
+                    "failed_years=" + ",".join(str(year) for year in failed_years)
+                )
+                raise SystemExit(1)
         elif args.command == "golden-canary":
             store = LocalFilesystemPublishedProfileStore(
                 settings.published_profile_root
@@ -227,33 +314,47 @@ def main() -> None:
             subject = plan.publishable
             if not args.validate_only:
                 if args.resume:
-                    run = latest_batch_run(session, kind=GOLDEN_CANARY_KIND)
+                    current_release = current_un_wpp_release_id(session)
+
+                    def resumable(candidate: PublicationBatchRun) -> bool:
+                        """Whether this run's recorded inputs still hold.
+
+                        A run recorded against a different golden set or a
+                        superseded release cannot be finished without
+                        producing a mixed verdict. Such a run is skipped so
+                        it cannot block newer interrupted runs behind a
+                        ledger there is no command to clear.
+                        """
+                        recorded = candidate.requested or {}
+                        dates_match = [
+                            date.fromisoformat(str(value))
+                            for value in recorded.get("dates", [])
+                        ] in ([], plan.publishable)
+                        recorded_release = recorded.get("source_release_id")
+                        release_matches = (
+                            recorded_release is None
+                            or current_release is None
+                            or str(current_release) == str(recorded_release)
+                        )
+                        return dates_match and release_matches
+
+                    run = recoverable_batch_run(
+                        session,
+                        kind=GOLDEN_CANARY_KIND,
+                        is_resumable=resumable,
+                    )
                     if run is None:
                         raise SystemExit("No golden canary run exists to resume.")
-                    recorded_dates = [
+                    if not resumable(run):
+                        raise SystemExit(
+                            "No resumable canary run: the golden set or UN WPP "
+                            "release has changed since every unfinished run "
+                            "started. Start a fresh canary run instead."
+                        )
+                    subject = [
                         date.fromisoformat(str(value))
                         for value in (run.requested or {}).get("dates", [])
-                    ]
-                    if recorded_dates and recorded_dates != plan.publishable:
-                        raise SystemExit(
-                            "The golden set no longer matches the run being "
-                            "resumed; finish or discard that run first."
-                        )
-                    recorded_release = (run.requested or {}).get("source_release_id")
-                    current_release = current_un_wpp_release_id(session)
-                    if (
-                        recorded_release is not None
-                        and current_release is not None
-                        and str(current_release) != str(recorded_release)
-                    ):
-                        # Resuming would publish the remaining dates from a
-                        # different release than the completed ones, and
-                        # validate a mixture that tests neither fully.
-                        raise SystemExit(
-                            "A newer UN WPP release was ingested since this "
-                            "run started; start a fresh canary run instead."
-                        )
-                    subject = recorded_dates or plan.publishable
+                    ] or plan.publishable
                     dates = outstanding_dates(session, batch_run=run)
                     # Finish the run as it was requested: resuming a forced
                     # republication without the flag would leave half the

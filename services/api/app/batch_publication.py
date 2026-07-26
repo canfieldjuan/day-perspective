@@ -8,7 +8,7 @@ its ledger rather than restarted from the beginning.
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from uuid import UUID
@@ -152,6 +152,40 @@ def latest_batch_run(
         .order_by(PublicationBatchRun.started_at.desc())
         .limit(1)
     )
+
+
+def recoverable_batch_run(
+    session: Session,
+    *,
+    kind: str = CONTEXT_BATCH_KIND,
+    only_failed: bool = False,
+    is_resumable: Callable[[PublicationBatchRun], bool] | None = None,
+) -> PublicationBatchRun | None:
+    """The oldest run that still owes dates, else the most recent run.
+
+    Recovery must not be limited to the newest run. A year-by-year archive
+    publication keeps going after a year fails or is killed, so by the time
+    an operator recovers, several newer runs exist and the unfinished one is
+    not the latest. Draining oldest-first means repeated --resume finishes
+    every outstanding run rather than looking only at the last.
+    """
+    candidates = session.scalars(
+        select(PublicationBatchRun)
+        .where(PublicationBatchRun.kind == kind)
+        .order_by(PublicationBatchRun.started_at.asc())
+    )
+    newest: PublicationBatchRun | None = None
+    for run in candidates:
+        newest = run
+        if not outstanding_dates(session, batch_run=run, only_failed=only_failed):
+            continue
+        # A run this caller cannot resume — because its recorded inputs no
+        # longer match — must be stepped over, not returned. Returning it
+        # would block every later resume behind a ledger nothing can clear.
+        if is_resumable is not None and not is_resumable(run):
+            continue
+        return run
+    return newest
 
 
 def outstanding_dates(
