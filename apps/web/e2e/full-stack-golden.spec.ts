@@ -44,3 +44,41 @@ test("serves the reviewed golden artifact through the complete runtime path", as
     "Content hash"
   );
 });
+
+test("an ordinary context-only date is honest about what it holds", async ({
+  page
+}) => {
+  test.skip(
+    process.env.DAY_PERSPECTIVE_FULL_STACK !== "1",
+    "Run through make web-e2e-full-stack with FastAPI and a published archive."
+  );
+
+  // The definition of done for AA6, against the real archive rather than a
+  // mock: an ordinary 1983 date must say what it has, what it lacks, and
+  // where the nearest reviewed evidence actually is.
+  await page.goto("/day/1983-10-12");
+
+  await expect(page.getByTestId("publication-tier")).toContainText(
+    "This date currently has demographic context only."
+  );
+  await expect(page.getByTestId("publication-tier")).toContainText(
+    "No reviewed recorded events are published for October 12, 1983."
+  );
+
+  const discovery = page.getByTestId("coverage-discovery");
+  await expect(discovery).toContainText("Find reviewed evidence");
+  // The real archive holds exactly one enriched date, decades away.
+  await expect(discovery).toContainText("March 27, 1964");
+  await expect(discovery).toContainText("years earlier");
+  await expect(discovery).toContainText(
+    "No reviewed enriched date is currently published after October 12, 1983."
+  );
+
+  // Chronological navigation keeps its meaning alongside discovery.
+  await expect(
+    page.getByRole("navigation", { name: "Date navigation" })
+  ).toBeVisible();
+  await expect(
+    page.getByRole("navigation", { name: "Evidence discovery" })
+  ).toBeVisible();
+});

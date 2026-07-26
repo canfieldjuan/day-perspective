@@ -1,5 +1,12 @@
 import { expect, test } from "@playwright/test";
 
+// Same undiagnosed stall tracked on epic #7 and mitigated in states.spec.ts:
+// a click-initiated soft navigation intermittently hangs under parallel e2e
+// load, never in isolation (6/6 clean). #44 established that hydration is
+// not the cause, so this is mitigation, not a fix. Coverage requests on
+// every day page raise the load and made it reachable here too.
+test.describe.configure({ retries: 2 });
+
 function unpublishedBody(date: string, profileType: string) {
   return JSON.stringify({
     status: "profile_not_published",

@@ -1,4 +1,7 @@
-import type { CoverageDateResponse } from "@day-perspective/contracts";
+import type {
+  CoverageDateResponse,
+  CoverageSummaryResponse
+} from "@day-perspective/contracts";
 
 import { isCoverageResponse } from "./coverage";
 
@@ -27,6 +30,37 @@ export async function fetchCoverage(
     }
     const payload: unknown = await response.json();
     return isCoverageResponse(payload, date) ? payload : null;
+  } catch {
+    return null;
+  }
+}
+
+
+function isSummary(payload: unknown): payload is CoverageSummaryResponse {
+  const record =
+    payload && typeof payload === "object" && !Array.isArray(payload)
+      ? (payload as Record<string, unknown>)
+      : undefined;
+  return (
+    record !== undefined &&
+    record.status === "coverage_summary" &&
+    typeof record.total_published === "number" &&
+    typeof record.with_recorded_event === "number"
+  );
+}
+
+/** The archive's shape, or null when it cannot be read. */
+export async function fetchCoverageSummary(): Promise<CoverageSummaryResponse | null> {
+  try {
+    const response = await fetch(`${apiBaseUrl()}/api/v1/coverage`, {
+      cache: "no-store",
+      headers: { Accept: "application/json" }
+    });
+    if (!response.ok) {
+      return null;
+    }
+    const payload: unknown = await response.json();
+    return isSummary(payload) ? payload : null;
   } catch {
     return null;
   }
