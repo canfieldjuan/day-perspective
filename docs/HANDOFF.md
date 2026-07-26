@@ -570,6 +570,10 @@ version.
 **Recovery.** A killed run leaves its year's batch run `running` with
 outstanding dates; `make publish-context-resume` finishes it, and
 `make publish-context-retry-failed` re-attempts only the failed dates.
+Both drain the **oldest run that still owes dates**, not merely the newest
+one, because the archive loop keeps publishing after a year is
+interrupted — by recovery time the unfinished run is several years back.
+Repeat the command until it reports nothing outstanding.
 `make reconcile-publications` reports interrupted publication state and
 `make reconcile-publications-repair` applies recovery. Coverage is
 maintained as publication's final step, so it does not normally need

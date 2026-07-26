@@ -154,6 +154,33 @@ def latest_batch_run(
     )
 
 
+def recoverable_batch_run(
+    session: Session,
+    *,
+    kind: str = CONTEXT_BATCH_KIND,
+    only_failed: bool = False,
+) -> PublicationBatchRun | None:
+    """The oldest run that still owes dates, else the most recent run.
+
+    Recovery must not be limited to the newest run. A year-by-year archive
+    publication keeps going after a year fails or is killed, so by the time
+    an operator recovers, several newer runs exist and the unfinished one is
+    not the latest. Draining oldest-first means repeated --resume finishes
+    every outstanding run rather than looking only at the last.
+    """
+    candidates = session.scalars(
+        select(PublicationBatchRun)
+        .where(PublicationBatchRun.kind == kind)
+        .order_by(PublicationBatchRun.started_at.asc())
+    )
+    newest: PublicationBatchRun | None = None
+    for run in candidates:
+        newest = run
+        if outstanding_dates(session, batch_run=run, only_failed=only_failed):
+            return run
+    return newest
+
+
 def outstanding_dates(
     session: Session, *, batch_run: PublicationBatchRun, only_failed: bool = False
 ) -> list[date]:

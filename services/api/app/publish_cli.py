@@ -10,6 +10,7 @@ from app.batch_publication import (
     latest_batch_run,
     outstanding_dates,
     plan_context_dates,
+    recoverable_batch_run,
     run_context_batch,
     start_batch_run,
 )
@@ -149,7 +150,11 @@ def main() -> None:
                 settings.published_profile_root
             )
             if args.resume or args.retry_failed:
-                run = latest_batch_run(session, kind=CONTEXT_BATCH_KIND)
+                run = recoverable_batch_run(
+                    session,
+                    kind=CONTEXT_BATCH_KIND,
+                    only_failed=args.retry_failed,
+                )
                 if run is None:
                     raise SystemExit("No context batch run exists to resume.")
                 dates = outstanding_dates(
