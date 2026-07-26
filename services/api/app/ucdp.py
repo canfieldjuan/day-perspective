@@ -392,6 +392,9 @@ def review_ucdp_annual(
         )
         if str((claim.assertion_json or {}).get("year")) == str(year)
     ]
+    # The golden date when reviewing its own year, so existing provenance is
+    # unchanged; otherwise the first day of the reviewed year.
+    selection_date = GOLDEN_DATE if year == GOLDEN_DATE.year else date(year, 1, 1)
     if not claims:
         # An absent year is named rather than counted as zero: a zero would
         # assert that no conflicts were active.
@@ -548,9 +551,13 @@ def review_ucdp_annual(
                 comparability_status=ComparabilityStatus.COMPARABLE,
             )
         )
+    # Recorded against a date inside the reviewed year. Keying this to the
+    # golden date would file an audit record claiming a 1971 root was
+    # selected for 1964-03-27 — a false provenance entry, not a cosmetic
+    # one.
     record_editorial_selection(
         session,
-        profile_date=GOLDEN_DATE,
+        profile_date=selection_date,
         section_key="wider_historical_context",
         derived_value_id=derived.id,
         status=EditorialSelectionStatus.SELECTED,
@@ -578,8 +585,9 @@ def review_ucdp_annual(
                 public_grade="B",
                 public_explanation=(
                     "Grade B: an official, versioned conflict-year dataset with "
-                    f"documented definitions. The count describes {year} as a whole "
-                    "and does not establish conditions on March 27."
+                    "documented definitions. Each count describes its year as a "
+                    "whole and does not establish conditions on any date within "
+                    "it."
                 ),
                 legal_review_status=LegalReviewStatus.NOT_REQUIRED,
             )
@@ -719,7 +727,11 @@ def build_ucdp_annual_profile_content(
     assert_release_publication_eligible(
         session,
         source_release_id=release.id,
-        profile_date=GOLDEN_DATE,
+        # Validated against a date in the requested year, matching the
+        # selection recorded at review time.
+        profile_date=(
+            GOLDEN_DATE if year == GOLDEN_DATE.year else date(year, 1, 1)
+        ),
         resolved_root_ids_by_section={},
         derived_root_ids_by_section={"wider_historical_context": {derived.id}},
     )
@@ -728,7 +740,7 @@ def build_ucdp_annual_profile_content(
         "statement": (
             f"UCDP/PRIO records {int(derived.value_numeric or 0)} state-based "
             f"armed conflicts as active at some point in {year}. This is annual "
-            "context, not a March 27 count."
+            "context, not a count for any single date in it."
         ),
         "details": {
             "title": f"State-based armed conflicts active in {year}",

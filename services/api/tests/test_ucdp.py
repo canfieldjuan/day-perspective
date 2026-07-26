@@ -552,3 +552,49 @@ def test_annual_content_is_built_for_a_requested_year(
 
     with pytest.raises(ValueError, match="1971"):
         build_ucdp_annual_profile_content(session, year=1971)
+
+
+@pytest.mark.integration
+def test_annual_context_records_no_provenance_for_an_unrelated_date(
+    session: Session, tmp_path: Path
+) -> None:
+    """Reviewing a year must not file an editorial selection against the
+    golden date. That would be a false audit record, not a cosmetic one."""
+    from app.governance import EditorialSelection
+    from app.ucdp import GOLDEN_DATE, ingest_ucdp_annual, review_ucdp_annual
+
+    result = ingest_ucdp_annual(
+        session,
+        fixture_path=ANNUAL_FIXTURE,
+        raw_store=LocalFilesystemRawSourceStore(tmp_path / "raw"),
+    )
+    assert result.source_release_id is not None
+    derived = review_ucdp_annual(session, result.source_release_id, year=1964)
+
+    selections = list(
+        session.scalars(
+            select(EditorialSelection).where(
+                EditorialSelection.derived_value_id == derived.id
+            )
+        )
+    )
+    assert selections, "the reviewed root must be recorded as selected"
+    # Its own year, so the golden date is correct here — the point is that
+    # the date follows the year rather than being fixed.
+    assert all(
+        selection.profile_date.year == 1964 for selection in selections
+    )
+    assert any(selection.profile_date == GOLDEN_DATE for selection in selections)
+
+
+def test_annual_statement_text_names_no_single_date() -> None:
+    """The statement serves every date in its year, so no date-specific
+    copy may survive in it. Asserted against the source rather than one
+    rendered example, so a new hard-coded date fails too."""
+    from pathlib import Path as _Path
+
+    source = _Path(__file__).resolve().parents[1] / "app" / "ucdp.py"
+    text = source.read_text(encoding="utf-8")
+    builder = text[text.index("def build_ucdp_annual_profile_content") :]
+    for banned in ["March 27", "March 27, 1964", "Twenty-five"]:
+        assert banned not in builder, f"date-specific copy survives: {banned}"
