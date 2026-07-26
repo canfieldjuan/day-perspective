@@ -157,7 +157,10 @@ export function describeDistance(from: string, to: string): string | null {
     } ${direction}`;
   }
 
-  const months = wholeMonths(start, end);
+  // Rounded, not truncated: the band is chosen in days, so a 365-day gap
+  // spanning eleven whole calendar months must still be a year rather than
+  // "zero years and eleven months".
+  const months = nearestMonths(start, end);
   const years = Math.floor(months / 12);
   const remainderMonths = months % 12;
   const yearText = `${spell(years)} ${years === 1 ? "year" : "years"}`;

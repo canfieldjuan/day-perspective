@@ -129,3 +129,31 @@ describe("discoveryStateFor", () => {
     expect(state.hasAnyEnrichedDestination).toBe(false);
   });
 });
+
+describe("evidential honesty about the destination", () => {
+  it("marks a destination that genuinely holds a recorded event", () => {
+    const state = discoveryStateFor(
+      {
+        ...base,
+        nearest_enriched_after: "1983-10-17",
+        nearest_recorded_event_after: "1983-10-17"
+      },
+      "1983-10-12"
+    );
+    expect(state.after?.hasRecordedEvent).toBe(true);
+  });
+
+  it("does not promise recorded events for a partially enriched neighbour", () => {
+    // nearest_enriched_* spans partially_enriched, which carries curated or
+    // comparison content and no recorded event.
+    const state = discoveryStateFor(
+      {
+        ...base,
+        nearest_enriched_after: "1983-10-17",
+        nearest_recorded_event_after: "1990-01-01"
+      },
+      "1983-10-12"
+    );
+    expect(state.after?.hasRecordedEvent).toBe(false);
+  });
+});

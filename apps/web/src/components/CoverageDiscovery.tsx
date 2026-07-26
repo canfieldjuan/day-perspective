@@ -80,25 +80,30 @@ function BothDirections({ state }: { state: DiscoveryState }) {
         <li>{destinationLabel(after)}</li>
       </ul>
       <p className={styles.controls}>
-        {/* Focus order favours the closer destination; neither is
-            preselected, because neither is automatically preferable. */}
-        <Link
-          autoFocus={false}
-          className={styles.jump}
-          data-closer={closer === "before" ? "true" : undefined}
-          href={"/day/" + before.date}
-          onClick={() => markNavigation()}
-        >
-          Go earlier
-        </Link>
-        <Link
-          className={styles.jump}
-          data-closer={closer === "after" ? "true" : undefined}
-          href={"/day/" + after.date}
-          onClick={() => markNavigation()}
-        >
-          Go later
-        </Link>
+        {/* Rendered in proximity order, so keyboard order genuinely reaches
+            the closer destination first. An attribute alone would describe
+            an ordering without producing one. Neither is preselected,
+            because neither is automatically preferable. */}
+        {(closer === "after"
+          ? [
+              { destination: after, label: "Go later", side: "after" },
+              { destination: before, label: "Go earlier", side: "before" }
+            ]
+          : [
+              { destination: before, label: "Go earlier", side: "before" },
+              { destination: after, label: "Go later", side: "after" }
+            ]
+        ).map(({ destination, label, side }) => (
+          <Link
+            className={styles.jump}
+            data-closer={closer === side ? "true" : undefined}
+            href={"/day/" + destination.date}
+            key={side}
+            onClick={() => markNavigation()}
+          >
+            {label}
+          </Link>
+        ))}
       </p>
     </>
   );
@@ -132,7 +137,11 @@ function OneDirection({
       <p className={styles.lead}>{lead}</p>
       <p className={styles.explanation}>
         {band === "days"
-          ? `${target} has reviewed recorded events, ${destination.distance}.`
+          ? `${target} ${
+              destination.hasRecordedEvent
+                ? "has reviewed recorded events"
+                : "carries more than annual context"
+            }, ${destination.distance}.`
           : `${target}, ${destination.distance}.`}
       </p>
       <p className={styles.controls}>

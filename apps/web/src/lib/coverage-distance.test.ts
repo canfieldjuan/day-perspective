@@ -104,3 +104,27 @@ describe("direction symmetry", () => {
     }
   });
 });
+
+describe("band and count use compatible units", () => {
+  it("never reports zero years inside the year band", () => {
+    // 365 days, but only eleven whole calendar months.
+    expect(distanceBand("2019-03-01", "2020-02-29")).toBe("years");
+    expect(describeDistance("2019-03-01", "2020-02-29")).toBe("one year later");
+    expect(describeDistance("2019-03-01", "2020-02-29")).not.toContain("zero");
+  });
+
+  it("keeps every year-band description free of a zero-year phrase", () => {
+    const probes: Array<[string, string]> = [
+      ["1983-10-12", "1984-10-11"],
+      ["2019-03-01", "2020-02-29"],
+      ["1964-03-27", "1965-03-26"],
+      ["2000-02-29", "2001-02-28"]
+    ];
+    for (const [from, to] of probes) {
+      if (distanceBand(from, to) !== "years") {
+        continue;
+      }
+      expect(describeDistance(from, to)).not.toContain("zero");
+    }
+  });
+});

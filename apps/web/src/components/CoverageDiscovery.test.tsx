@@ -65,7 +65,13 @@ describe("CoverageDiscovery", () => {
   });
 
   it("invites a genuinely close date differently", () => {
-    renderFor({ nearest_enriched_after: "1964-03-27" }, "1964-03-26");
+    renderFor(
+      {
+        nearest_enriched_after: "1964-03-27",
+        nearest_recorded_event_after: "1964-03-27"
+      },
+      "1964-03-26"
+    );
 
     expect(screen.getByText("Continue to a richer date")).toBeInTheDocument();
     expect(
@@ -74,6 +80,27 @@ describe("CoverageDiscovery", () => {
     expect(
       screen.getByRole("link", { name: "Explore March 27, 1964" })
     ).toBeInTheDocument();
+  });
+
+  it("does not promise recorded events a nearby destination does not hold", () => {
+    // nearest_enriched_* spans partially_enriched, which carries curated or
+    // comparison content and no recorded event.
+    renderFor(
+      {
+        nearest_enriched_after: "1964-03-27",
+        nearest_recorded_event_after: null
+      },
+      "1964-03-26"
+    );
+
+    expect(
+      screen.getByText(
+        "March 27, 1964 carries more than annual context, one day later."
+      )
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/has reviewed recorded events/)
+    ).toBeNull();
   });
 
   it("offers both directions without preselecting either", () => {
@@ -94,9 +121,24 @@ describe("CoverageDiscovery", () => {
     const later = screen.getByRole("link", { name: "Go later" });
     expect(earlier).toHaveAttribute("href", "/day/1975-09-03");
     expect(later).toHaveAttribute("href", "/day/1984-03-27");
-    // The closer destination is marked for focus order, not selected.
+    // Keyboard order must genuinely reach the closer destination first;
+    // asserting the attribute alone proved nothing about focus order.
     expect(later).toHaveAttribute("data-closer", "true");
     expect(earlier).not.toHaveAttribute("data-closer");
+    const ordered = screen.getAllByRole("link");
+    expect(ordered.indexOf(later)).toBeLessThan(ordered.indexOf(earlier));
+  });
+
+  it("puts the closer destination first when the earlier one is closer", () => {
+    renderFor({
+      nearest_enriched_before: "1983-09-30",
+      nearest_enriched_after: "1990-01-01"
+    });
+    const ordered = screen.getAllByRole("link");
+    const earlier = screen.getByRole("link", { name: "Go earlier" });
+    const later = screen.getByRole("link", { name: "Go later" });
+    expect(ordered.indexOf(earlier)).toBeLessThan(ordered.indexOf(later));
+    expect(earlier).toHaveAttribute("data-closer", "true");
   });
 
   it("says the index is empty only when it is", () => {

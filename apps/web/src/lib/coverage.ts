@@ -1,7 +1,8 @@
 import {
   PUBLICATION_TIERS,
   type CoverageDateResponse,
-  type PublicationTier
+  type PublicationTier,
+  type RandomEnrichedResponse
 } from "@day-perspective/contracts";
 
 import { describeDistance, distanceBand, type DistanceBand } from "./coverage-distance";
@@ -49,6 +50,13 @@ export interface EnrichedDestination {
   date: string;
   distance: string | null;
   band: DistanceBand | null;
+  /**
+   * Whether this destination actually holds a reviewed recorded event.
+   * "Enriched" spans partially_enriched too, which carries curated or
+   * comparison content and no recorded event — so the interface must not
+   * promise events it cannot show.
+   */
+  hasRecordedEvent: boolean;
 }
 
 export type DiscoveryKind =
@@ -78,14 +86,19 @@ export interface DiscoveryState {
   hasAnyEnrichedDestination: boolean;
 }
 
-function destination(from: string, to: unknown): EnrichedDestination | null {
+function destination(
+  from: string,
+  to: unknown,
+  recordedEventDate: unknown
+): EnrichedDestination | null {
   if (typeof to !== "string" || !isSupportedPublicDate(to)) {
     return null;
   }
   return {
     date: to,
     distance: describeDistance(from, to),
-    band: distanceBand(from, to)
+    band: distanceBand(from, to),
+    hasRecordedEvent: to === recordedEventDate
   };
 }
 
@@ -119,8 +132,16 @@ export function discoveryStateFor(
     };
   }
 
-  const before = destination(date, coverage.nearest_enriched_before);
-  const after = destination(date, coverage.nearest_enriched_after);
+  const before = destination(
+    date,
+    coverage.nearest_enriched_before,
+    coverage.nearest_recorded_event_before
+  );
+  const after = destination(
+    date,
+    coverage.nearest_enriched_after,
+    coverage.nearest_recorded_event_after
+  );
   const hasAnyEnrichedDestination = before !== null || after !== null;
   const closer =
     before !== null && after !== null
@@ -178,6 +199,17 @@ export function discoveryStateFor(
 }
 
 
+/** Validated against the shared contract rather than a local status check. */
+function isRandomEnriched(payload: unknown): payload is RandomEnrichedResponse {
+  const record = asRecord(payload);
+  return (
+    record !== undefined &&
+    record.status === "enriched_date" &&
+    typeof record.date === "string" &&
+    isSupportedPublicDate(record.date)
+  );
+}
+
 /**
  * Resolve a random enriched date through the same-origin proxy, or null
  * when the archive holds none. Null means "hide the control": offering a
@@ -193,14 +225,7 @@ export async function randomEnrichedDate(): Promise<string | null> {
       return null;
     }
     const payload: unknown = await response.json();
-    const record = asRecord(payload);
-    if (record?.status !== "enriched_date") {
-      return null;
-    }
-    const value = record.date;
-    return typeof value === "string" && isSupportedPublicDate(value)
-      ? value
-      : null;
+    return isRandomEnriched(payload) ? payload.date : null;
   } catch {
     return null;
   }
