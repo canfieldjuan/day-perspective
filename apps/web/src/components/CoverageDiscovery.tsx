@@ -125,11 +125,15 @@ function OneDirection({
 
   // The copy is graded by real distance. Calling a nineteen-year jump
   // "nearby" would be the interface lying on the archive's behalf.
+  // A 32-364 day gap can still cross December 31, so the year is compared
+  // rather than inferred from the band.
   const lead =
     band === "days"
       ? "Continue to a richer date"
       : band === "months"
-        ? "A reviewed date is available in the same year"
+        ? destination.sameCalendarYear
+          ? `A reviewed date is available ${destination.direction} in the year`
+          : "The closest reviewed date is a few months away"
         : "The closest reviewed date is farther away";
 
   return (

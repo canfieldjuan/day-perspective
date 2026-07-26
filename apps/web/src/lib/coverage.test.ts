@@ -157,3 +157,23 @@ describe("evidential honesty about the destination", () => {
     expect(state.after?.hasRecordedEvent).toBe(false);
   });
 });
+
+describe("demographic claim is earned, not assumed", () => {
+  it("reports demographic context when the sections carry it", () => {
+    const state = discoveryStateFor(
+      { ...base, sections: { typical_day_in_this_year: 2 } },
+      "1983-10-12"
+    );
+    expect(state.hasDemographicContext).toBe(true);
+  });
+
+  it("does not claim demographic context for an evidence-notes-only profile", () => {
+    // context_only admits annual, period and evidence-note content alike,
+    // so the tier alone cannot justify the sentence.
+    const state = discoveryStateFor(
+      { ...base, sections: { evidence_notes: 1 } },
+      "1983-10-12"
+    );
+    expect(state.hasDemographicContext).toBe(false);
+  });
+});

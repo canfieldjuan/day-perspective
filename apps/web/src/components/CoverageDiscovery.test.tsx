@@ -103,6 +103,26 @@ describe("CoverageDiscovery", () => {
     ).toBeNull();
   });
 
+  it("does not claim a shared year across a year boundary", () => {
+    // 87 days, so the months band — but December 31 to March 27 is not
+    // "the same year".
+    renderFor(
+      { nearest_enriched_after: "1964-03-27" },
+      "1963-12-31"
+    );
+    expect(
+      screen.getByText("The closest reviewed date is a few months away")
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/in the year/)).toBeNull();
+  });
+
+  it("names the direction when the destination is in the same year", () => {
+    renderFor({ nearest_enriched_before: "1964-03-27" }, "1964-08-15");
+    expect(
+      screen.getByText("A reviewed date is available earlier in the year")
+    ).toBeInTheDocument();
+  });
+
   it("offers both directions without preselecting either", () => {
     renderFor({
       nearest_enriched_before: "1975-09-03",

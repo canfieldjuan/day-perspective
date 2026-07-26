@@ -66,8 +66,12 @@ export function CoverageSection({ date }: { date: string }) {
     <>
       {coverage?.publication_tier === "context_only" ? (
         <p className="coverage-tier" data-testid="publication-tier">
-          This date currently has demographic context only. No reviewed
-          recorded events are published for {monument}.
+          {/* The tier also admits an evidence-notes-only profile, so the
+              demographic sentence is earned from the sections rather than
+              assumed from the tier. */}
+          {state.hasDemographicContext
+            ? `This date currently has demographic context only. No reviewed recorded events are published for ${monument}.`
+            : `No reviewed recorded events are published for ${monument}.`}
         </p>
       ) : null}
       <CoverageDiscovery date={date} state={state} />

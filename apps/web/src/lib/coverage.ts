@@ -49,6 +49,9 @@ export interface EnrichedDestination {
   date: string;
   distance: string | null;
   band: DistanceBand | null;
+  direction: "earlier" | "later";
+  /** True when the destination falls in the same calendar year as the page. */
+  sameCalendarYear: boolean;
   /**
    * Whether this destination actually holds a reviewed recorded event.
    * "Enriched" spans partially_enriched too, which carries curated or
@@ -72,6 +75,12 @@ export type DiscoveryKind =
 
 export interface DiscoveryState {
   kind: DiscoveryKind;
+  /**
+   * Whether the page actually carries annual or period context. The
+   * context_only tier also admits an evidence-notes-only profile, so the
+   * demographic claim is derived from the sections rather than the tier.
+   */
+  hasDemographicContext: boolean;
   tier: PublicationTier | null;
   before: EnrichedDestination | null;
   after: EnrichedDestination | null;
@@ -97,6 +106,8 @@ function destination(
     date: to,
     distance: describeDistance(from, to),
     band: distanceBand(from, to),
+    direction: to > from ? "later" : "earlier",
+    sameCalendarYear: to.slice(0, 4) === from.slice(0, 4),
     hasRecordedEvent: to === recordedEventDate
   };
 }
@@ -122,6 +133,7 @@ export function discoveryStateFor(
   if (coverage === null) {
     return {
       kind: "unknown",
+      hasDemographicContext: false,
       tier: null,
       before: null,
       after: null,
@@ -130,6 +142,11 @@ export function discoveryStateFor(
       hasAnyEnrichedDestination: false
     };
   }
+
+  const sections = coverage.sections ?? {};
+  const hasDemographicContext =
+    (sections.typical_day_in_this_year ?? 0) > 0 ||
+    (sections.wider_historical_context ?? 0) > 0;
 
   const before = destination(
     date,
@@ -153,6 +170,7 @@ export function discoveryStateFor(
   if (tier !== "context_only") {
     return {
       kind: "on-enriched-date",
+      hasDemographicContext,
       tier,
       before,
       after,
@@ -165,6 +183,7 @@ export function discoveryStateFor(
   if (before !== null && after !== null) {
     return {
       kind: "both-directions",
+      hasDemographicContext,
       tier,
       before,
       after,
@@ -177,6 +196,7 @@ export function discoveryStateFor(
   if (before !== null || after !== null) {
     return {
       kind: "one-direction",
+      hasDemographicContext,
       tier,
       before,
       after,
@@ -188,6 +208,7 @@ export function discoveryStateFor(
 
   return {
     kind: "none-available",
+    hasDemographicContext,
     tier,
     before: null,
     after: null,
