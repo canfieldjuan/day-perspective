@@ -374,16 +374,28 @@ def ingest_ucdp_annual(
         raise
 
 
-def review_ucdp_annual(session: Session, source_release_id: UUID) -> DerivedValue:
-    claims = list(
-        session.scalars(
+def review_ucdp_annual(
+    session: Session, source_release_id: UUID, *, year: int = 1964
+) -> DerivedValue:
+    """Derive one year's active state-based conflict count.
+
+    Keyed by year rather than by claim count. The previous fixed count of 25
+    encoded the shape of the 1964 fixture, not an invariant, and made every
+    other year unreviewable.
+    """
+    claims = [
+        claim
+        for claim in session.scalars(
             select(Claim)
             .where(Claim.source_release_id == source_release_id)
             .order_by(Claim.source_record_locator)
         )
-    )
-    if len(claims) != 25:
-        raise ValueError("UCDP annual review requires 25 source claims.")
+        if str((claim.assertion_json or {}).get("year")) == str(year)
+    ]
+    if not claims:
+        # An absent year is named rather than counted as zero: a zero would
+        # assert that no conflicts were active.
+        raise ValueError(f"UCDP annual review found no claims for {year}.")
     reviewable_statuses = {
         ClaimAssertionStatus.CANDIDATE,
         ClaimAssertionStatus.IN_REVIEW,
@@ -408,7 +420,7 @@ def review_ucdp_annual(session: Session, source_release_id: UUID) -> DerivedValu
                 reviewed_by="development-fixture-review",
             )
         conflict_id = str((claim.assertion_json or {})["conflict_id"])
-        canonical_key = f"ucdp-prio:conflict:{conflict_id}:1964"
+        canonical_key = f"ucdp-prio:conflict:{conflict_id}:{year}"
         prior = session.scalar(
             select(ResolvedClaim)
             .where(ResolvedClaim.canonical_key == canonical_key)
@@ -459,14 +471,14 @@ def review_ucdp_annual(session: Session, source_release_id: UUID) -> DerivedValu
             "resolved_claims": sorted(
                 f"{row.id}:{row.version}" for row in resolved
             ),
-            "year": 1964,
+            "year": year,
             "operation": "count unique conflict-year records",
         }
     )
     derived = session.scalar(
         select(DerivedValue).where(
             DerivedValue.value_kind == "active_state_based_conflict_count",
-            DerivedValue.period_start == date(1964, 1, 1),
+            DerivedValue.period_start == date(year, 1, 1),
             DerivedValue.input_fingerprint == fingerprint,
         )
     )
@@ -499,12 +511,12 @@ def review_ucdp_annual(session: Session, source_release_id: UUID) -> DerivedValu
             methodology_id=methodology.id,
             provenance_resolved_claim_id=resolved[0].id,
             value_kind="active_state_based_conflict_count",
-            period_start=date(1964, 1, 1),
-            period_end=date(1964, 12, 31),
+            period_start=date(year, 1, 1),
+            period_end=date(year, 12, 31),
             temporal_assignment=TemporalAssignment.PERIOD_CONTEXT,
             value_numeric=Decimal(len(resolved)),
             value_json={
-                "year": 1964,
+                "year": year,
                 "count": len(resolved),
                 "unit": "conflict-year records",
                 "date_specific": False,
@@ -529,8 +541,8 @@ def review_ucdp_annual(session: Session, source_release_id: UUID) -> DerivedValu
                 metric_id=metric.id,
                 source_release_id=source_release_id,
                 provenance_resolved_claim_id=resolved[0].id,
-                period_start=date(1964, 1, 1),
-                period_end=date(1964, 12, 31),
+                period_start=date(year, 1, 1),
+                period_end=date(year, 12, 31),
                 coverage_fraction=Decimal("1"),
                 data_status=DataStatus.FINAL,
                 comparability_status=ComparabilityStatus.COMPARABLE,
@@ -566,7 +578,7 @@ def review_ucdp_annual(session: Session, source_release_id: UUID) -> DerivedValu
                 public_grade="B",
                 public_explanation=(
                     "Grade B: an official, versioned conflict-year dataset with "
-                    "documented definitions. The count describes 1964 as a whole "
+                    f"documented definitions. The count describes {year} as a whole "
                     "and does not establish conditions on March 27."
                 ),
                 legal_review_status=LegalReviewStatus.NOT_REQUIRED,
@@ -576,7 +588,14 @@ def review_ucdp_annual(session: Session, source_release_id: UUID) -> DerivedValu
     return derived
 
 
-def build_ucdp_annual_profile_content(session: Session) -> UCDPAnnualProfileContent:
+def build_ucdp_annual_profile_content(
+    session: Session, *, year: int = 1964
+) -> UCDPAnnualProfileContent:
+    """Assemble one year's annual conflict context.
+
+    Selects that year's claims rather than the whole release, so a release
+    covering many years serves each of them.
+    """
     source = session.scalar(select(Source).where(Source.slug == UCDP_SOURCE_SLUG))
     if source is None:
         raise ValueError("UCDP annual source has not been ingested.")
@@ -590,17 +609,25 @@ def build_ucdp_annual_profile_content(session: Session) -> UCDPAnnualProfileCont
     )
     if release is None:
         raise ValueError("UCDP annual release has not been ingested.")
-    current_claims = list(
-        session.scalars(
+    current_claims = [
+        claim
+        for claim in session.scalars(
             select(Claim).where(Claim.source_release_id == release.id)
         )
-    )
-    if len(current_claims) != 25 or any(
+        if str((claim.assertion_json or {}).get("year")) == str(year)
+    ]
+    if not current_claims:
+        # Named rather than counted as zero: an absent year is not a year
+        # without conflicts.
+        raise ValueError(
+            f"UCDP annual publication found no claims for {year}."
+        )
+    if any(
         claim.assertion_status != ClaimAssertionStatus.ACCEPTED
         for claim in current_claims
     ):
         raise ValueError(
-            "UCDP annual publication requires exactly 25 current accepted claims."
+            f"UCDP annual publication requires accepted claims for {year}."
         )
     unresolved_task = session.scalar(
         select(ReviewTask).where(
@@ -643,7 +670,7 @@ def build_ucdp_annual_profile_content(session: Session) -> UCDPAnnualProfileCont
         select(DerivedValue)
         .where(
             DerivedValue.value_kind == "active_state_based_conflict_count",
-            DerivedValue.period_start == date(1964, 1, 1),
+            DerivedValue.period_start == date(year, 1, 1),
         )
         .order_by(DerivedValue.created_at.desc())
     ):
@@ -697,21 +724,24 @@ def build_ucdp_annual_profile_content(session: Session) -> UCDPAnnualProfileCont
         derived_root_ids_by_section={"wider_historical_context": {derived.id}},
     )
     statement: dict[str, object] = {
-        "statement_id": "ucdp-1964-active-conflicts",
+        "statement_id": f"ucdp-{year}-active-conflicts",
         "statement": (
             f"UCDP/PRIO records {int(derived.value_numeric or 0)} state-based "
-            "armed conflicts as active at some point in 1964. This is annual "
+            f"armed conflicts as active at some point in {year}. This is annual "
             "context, not a March 27 count."
         ),
         "details": {
-            "title": "State-based armed conflicts active in 1964",
+            "title": f"State-based armed conflicts active in {year}",
             "value": int(derived.value_numeric or 0),
             "unit": "conflict-year records",
             "temporal_assignment": TemporalAssignment.PERIOD_CONTEXT.value,
             "data_status": derived.data_status.value,
             "missing_data_explanation": (
-                "This source does not provide a day-specific worldwide conflict "
-                "count for March 27, 1964."
+                # Year-general rather than naming one date: this content now
+                # serves every date in the year, and the claim is equally
+                # true for all of them.
+                "This source does not provide a day-specific worldwide "
+                f"conflict count for any date in {year}."
             ),
         },
         "provenance_note": (
@@ -721,7 +751,8 @@ def build_ucdp_annual_profile_content(session: Session) -> UCDPAnnualProfileCont
         "provenance": {
             "root_type": "derived_value",
             "published_statement": (
-                "Twenty-five catalogued conflict-year records are counted for 1964."
+                f"{int(derived.value_numeric or 0)} catalogued conflict-year "
+                f"records are counted for {year}."
             ),
             "derived_value": {
                 "kind": derived.value_kind,
