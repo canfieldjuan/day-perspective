@@ -227,31 +227,46 @@ def _drop_stale_entries(
     missing.
     """
     dropped = 0
-    candidates = [
-        (entry.profile_date, entry.profile_type)
+    # Candidates are every date this pass did not settle: entries that did
+    # not survive, and dates skipped as unreadable. A date skipped with no
+    # existing row would otherwise never get the locked recheck this
+    # function promises, so a transient read failure would leave a healthy
+    # date unindexed and fail the run.
+    candidates = {
+        entry.profile_date: entry.profile_type
         for entry in session.scalars(select(CoverageEntry))
         if entry.profile_date not in live_dates
-    ]
-    session.commit()
-    for profile_date, profile_type in candidates:
-        with _date_transaction(session, profile_date, profile_type):
-            entry = session.scalar(
-                select(CoverageEntry).where(CoverageEntry.profile_date == profile_date)
+    }
+    for profile_date in report_unreadable:
+        if profile_date in candidates:
+            continue
+        profile_type = session.scalar(
+            select(PublicationManifest.profile_type).where(
+                PublicationManifest.profile_date == profile_date
             )
-            if entry is None:
-                continue
+        )
+        if profile_type is not None:
+            candidates[profile_date] = profile_type
+    session.commit()
+    for profile_date, profile_type in sorted(candidates.items()):
+        with _date_transaction(session, profile_date, profile_type):
             manifest = _latest_published_manifest(session, profile_date)
             if manifest is not None and (
                 store is None or _artifact_servable(store, manifest)
             ):
+                # Servable now, whether or not it was during the first pass
+                # and whether or not it already had a row.
+                upsert_coverage_entry(session, manifest=manifest)
                 live_dates.add(profile_date)
-                # It failed the snapshot pass but is servable now, so the
-                # run is not reporting an unreadable artifact for it.
                 if profile_date in report_unreadable:
                     report_unreadable.remove(profile_date)
                 continue
-            session.delete(entry)
-            dropped += 1
+            entry = session.scalar(
+                select(CoverageEntry).where(CoverageEntry.profile_date == profile_date)
+            )
+            if entry is not None:
+                session.delete(entry)
+                dropped += 1
     return dropped
 
 

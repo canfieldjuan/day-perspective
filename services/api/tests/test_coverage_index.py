@@ -777,3 +777,48 @@ def test_quarantining_an_older_version_keeps_the_served_one_indexed(
         "quarantining an older version unindexed a servable date"
     )
     assert record.publication_manifest_id == served.id
+
+
+# --- Round 10 review findings (PR #43) -----------------------------------
+
+
+@pytest.mark.integration
+def test_a_transiently_unreadable_new_date_is_still_indexed(
+    session: Session, tmp_path: Path, reviewed_un_wpp: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A date with no existing entry that fails its first read must still
+    get the locked recheck, or a transient failure leaves a healthy date
+    unindexed and fails the run."""
+    from app import coverage as coverage_module
+    from app.un_wpp import publish_context_profile
+
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+    profile_date = date(2005, 9, 9)
+    publish_context_profile(session, store=store, profile_date=profile_date)
+    session.commit()
+
+    # Drop the row, as an earlier rebuild would have while the artifact was
+    # unavailable: the date is published and servable but not indexed.
+    session.execute(delete_coverage_entries())
+    session.commit()
+    assert coverage_entry(session, profile_date) is None
+
+    calls = {"n": 0}
+    real_servable = coverage_module._artifact_servable
+
+    def unservable_once(store_arg: Any, manifest: Any) -> bool:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return False
+        result: bool = real_servable(store_arg, manifest)
+        return result
+
+    monkeypatch.setattr(coverage_module, "_artifact_servable", unservable_once)
+    report = rebuild_coverage_index(session, store=store)
+    session.commit()
+
+    assert coverage_entry(session, profile_date) is not None, (
+        "a transient read failure left a servable date unindexed"
+    )
+    assert report.unreadable == []
+    assert report.indexed == 1
