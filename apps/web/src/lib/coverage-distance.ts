@@ -100,10 +100,21 @@ function wholeMonths(a: Date, b: Date): number {
 function nearestMonths(a: Date, b: Date): number {
   const [from, to] = a.getTime() <= b.getTime() ? [a, b] : [b, a];
   const months = wholeMonths(from, to);
+  // Clamped to the destination month's last day. setUTCMonth rolls a
+  // nonexistent date forward — January 31 plus one month becomes March 3,
+  // not February 28 — which moves the very boundary being measured against.
   const anchor = (count: number) => {
-    const shifted = new Date(from.getTime());
-    shifted.setUTCMonth(shifted.getUTCMonth() + count);
-    return shifted.getTime();
+    const year = from.getUTCFullYear();
+    const month = from.getUTCMonth() + count;
+    const firstOfTarget = new Date(Date.UTC(year, month, 1));
+    const lastDay = new Date(
+      Date.UTC(firstOfTarget.getUTCFullYear(), firstOfTarget.getUTCMonth() + 1, 0)
+    ).getUTCDate();
+    return Date.UTC(
+      firstOfTarget.getUTCFullYear(),
+      firstOfTarget.getUTCMonth(),
+      Math.min(from.getUTCDate(), lastDay)
+    );
   };
   // Compared against the real month boundaries either side, because months
   // are not all the same length: fifteen days into March is not the same

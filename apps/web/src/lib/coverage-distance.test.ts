@@ -128,3 +128,25 @@ describe("band and count use compatible units", () => {
     }
   });
 });
+
+describe("month-end anchors", () => {
+  it("clamps rather than rolling a nonexistent date forward", () => {
+    // January 31 plus one month is February 28, not March 3. Rolling over
+    // moves the boundary the rounding is measured against.
+    expect(describeDistance("1983-01-31", "1983-03-17")).toBe(
+      "about two months later"
+    );
+    expect(describeDistance("1983-03-17", "1983-01-31")).toBe(
+      "about two months earlier"
+    );
+  });
+
+  it("stays correct across a leap-year month end", () => {
+    expect(describeDistance("2020-01-31", "2020-02-29")).toBe(
+      "twenty-nine days later"
+    );
+    expect(describeDistance("2019-01-31", "2019-04-15")).toBe(
+      "about two months later"
+    );
+  });
+});

@@ -168,6 +168,21 @@ describe("CoverageDiscovery", () => {
     ).toBeInTheDocument();
   });
 
+  it("suggests exploring context only when the page has some", () => {
+    renderFor({ sections: { typical_day_in_this_year: 2 } });
+    expect(
+      screen.getByText(/or explore the available demographic context/)
+    ).toBeInTheDocument();
+  });
+
+  it("does not suggest context an evidence-notes-only page cannot show", () => {
+    renderFor({ sections: { evidence_notes: 1 } });
+    expect(
+      screen.getByText(/No reviewed enriched dates are currently available/)
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/demographic context/)).toBeNull();
+  });
+
   it("renders nothing on an enriched page, which is not sparse", () => {
     renderFor({
       publication_tier: "reviewed_enriched",

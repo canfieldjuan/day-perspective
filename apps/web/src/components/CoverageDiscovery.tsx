@@ -46,8 +46,11 @@ export function CoverageDiscovery({
       {state.kind === "none-available" ? (
         <p className={styles.explanation}>
           No reviewed enriched dates are currently available from this archive
-          index. You can continue chronologically, choose another date, or
-          explore the available demographic context.
+          index. You can continue chronologically, choose another date
+          {state.hasDemographicContext
+            ? ", or explore the available demographic context"
+            : ""}
+          .
         </p>
       ) : null}
       {state.kind === "both-directions" ? (
