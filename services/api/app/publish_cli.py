@@ -219,11 +219,26 @@ def main() -> None:
                 f"unsupported_era={len(plan.unsupported)}"
             )
             canary_report = None
+            # What this invocation is responsible for. A resume finishes the
+            # run it recorded, so it must also validate that run's dates:
+            # validating a freshly-loaded golden set could pass on unrelated
+            # pre-existing profiles while the resumed dates go unchecked.
+            subject = plan.publishable
             if not args.validate_only:
                 if args.resume:
                     run = latest_batch_run(session, kind=GOLDEN_CANARY_KIND)
                     if run is None:
                         raise SystemExit("No golden canary run exists to resume.")
+                    recorded_dates = [
+                        date.fromisoformat(str(value))
+                        for value in (run.requested or {}).get("dates", [])
+                    ]
+                    if recorded_dates and recorded_dates != plan.publishable:
+                        raise SystemExit(
+                            "The golden set no longer matches the run being "
+                            "resumed; finish or discard that run first."
+                        )
+                    subject = recorded_dates or plan.publishable
                     dates = outstanding_dates(session, batch_run=run)
                     # Finish the run as it was requested: resuming a forced
                     # republication without the flag would leave half the
@@ -259,9 +274,7 @@ def main() -> None:
                 )
                 for failed_date, reason in canary_report.failures:
                     print(f"failure date={failed_date.isoformat()} reason={reason}")
-            validation = CanaryValidation.of(
-                session, store=store, dates=plan.publishable
-            )
+            validation = CanaryValidation.of(session, store=store, dates=subject)
             print(
                 f"validated={validation.checked} "
                 f"missing={len(validation.missing)} "
@@ -273,16 +286,18 @@ def main() -> None:
                 for issue in issues:
                     print(f"issue {issue}")
             if args.update_golden_set:
-                if not validation.clean:
-                    # Recording an unvalidated date would put a claim in the
-                    # golden set that the canary just failed to support.
+                # A failed batch can still validate clean, because validation
+                # reads whatever manifest is current — including an older one
+                # the failed republish did not replace. Recording then claims
+                # a canary that did not happen.
+                if not validation.clean or (
+                    canary_report is not None and canary_report.failed
+                ):
                     raise SystemExit(
-                        "Refusing to record canary publication: validation "
-                        "is not clean."
+                        "Refusing to record canary publication: the run did "
+                        "not complete cleanly."
                     )
-                changed = record_canary_publication(
-                    args.golden_set, dates=plan.publishable
-                )
+                changed = record_canary_publication(args.golden_set, dates=subject)
                 print(f"golden_set_updated={changed}")
             if not validation.clean or (
                 canary_report is not None and canary_report.failed

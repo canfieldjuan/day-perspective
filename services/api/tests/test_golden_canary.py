@@ -103,6 +103,13 @@ def _mapping(payload: dict[str, object], key: str) -> dict[str, Any]:
     return dict(value)
 
 
+def _support(payload: dict[str, object], key: str) -> None:
+    """Declare a section available, for tests that put content in it."""
+    states = _mapping(payload, "section_states")
+    states[key] = {"status": "available"}
+    payload["section_states"] = states
+
+
 def _payload(
     *,
     profile_date: str = "1952-02-29",
@@ -328,6 +335,74 @@ class TestPayloadValidation:
         issues = validate_context_payload(payload)
 
         assert any("carries no recorded-event" in issue for issue in issues), issues
+
+
+    def test_a_modeled_context_statement_must_say_it_is_projected(self) -> None:
+        # Context statements carry data_status too, and say "projects"
+        # rather than "projection" — a check scoped to daily equivalents
+        # would never see this regression.
+        payload = _payload()
+        sections = _mapping(payload, "sections")
+        sections["wider_historical_context"] = [
+            {
+                "statement_id": "population",
+                "statement": "UN WPP estimates the mid-2025 world population "
+                "at about 8.232 billion.",
+                "details": {"data_status": "modeled"},
+            }
+        ]
+        payload["sections"] = sections
+        _support(payload, "wider_historical_context")
+
+        issues = validate_context_payload(payload)
+
+        assert any("without saying so" in issue for issue in issues), issues
+
+    def test_a_modeled_context_statement_that_says_projects_passes(self) -> None:
+        payload = _payload()
+        sections = _mapping(payload, "sections")
+        sections["wider_historical_context"] = [
+            {
+                "statement_id": "population",
+                "statement": "UN WPP projects the mid-2025 world population "
+                "at about 8.232 billion.",
+                "details": {"data_status": "modeled"},
+            }
+        ]
+        payload["sections"] = sections
+        _support(payload, "wider_historical_context")
+
+        assert validate_context_payload(payload) == []
+
+    def test_an_estimated_context_statement_may_not_claim_projection(self) -> None:
+        payload = _payload()
+        sections = _mapping(payload, "sections")
+        sections["wider_historical_context"] = [
+            {
+                "statement_id": "population",
+                "statement": "UN WPP projects the mid-1952 world population "
+                "at about 2.6 billion.",
+                "details": {"data_status": "estimated"},
+            }
+        ]
+        payload["sections"] = sections
+        _support(payload, "wider_historical_context")
+
+        issues = validate_context_payload(payload)
+
+        assert any("as a projection" in issue for issue in issues), issues
+
+    def test_a_non_string_unsupported_reason_is_rejected(self) -> None:
+        # str() would make 123 look like a perfectly good reason, while the
+        # web contract rejects the payload and shows an error instead.
+        payload = _payload()
+        states = _mapping(payload, "section_states")
+        states["curated_claims"] = {"status": "not_yet_supported", "reason": 123}
+        payload["section_states"] = states
+
+        issues = validate_context_payload(payload)
+
+        assert any("without a usable reason" in issue for issue in issues), issues
 
 
 class TestGoldenSetStatuses:

@@ -153,11 +153,12 @@ def validate_context_payload(payload: dict[str, Any]) -> list[str]:
                         f"{key} is declared not_yet_supported but carries content",
                     )
                 )
-            if not str(state.get("reason") or "").strip():
+            reason = state.get("reason")
+            if not isinstance(reason, str) or not reason.strip():
                 issues.append(
                     _issue(
                         profile_date,
-                        f"{key} is not_yet_supported without telling the reader why",
+                        f"{key} is not_yet_supported without a usable reason",
                     )
                 )
         elif status != "available":
@@ -183,6 +184,9 @@ def validate_context_payload(payload: dict[str, Any]) -> list[str]:
                 "reviewed_enriched profile carries no recorded-event statement",
             )
         )
+
+    for statement in _statements(sections):
+        issues.extend(_validate_data_status(statement, profile_date=profile_date))
 
     expected_days = 366 if calendar.isleap(year) else 365
     marked, unmarked = _daily_equivalents(sections)
@@ -291,23 +295,57 @@ def _validate_daily_equivalent(
                 f"{statement_id} does not name the profile's year {year}",
             )
         )
+    return issues
+
+
+#: How a profile says a number is modeled rather than observed. Context
+#: statements say "projects"; daily equivalents say "projection".
+PROJECTION_WORDS = ("projection", "projects", "projected")
+
+
+def _statements(sections: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        statement
+        for statements in sections.values()
+        if isinstance(statements, list)
+        for statement in statements
+        if isinstance(statement, dict)
+    ]
+
+
+def _validate_data_status(
+    statement: dict[str, Any], *, profile_date: str
+) -> list[str]:
+    """A modeled number must say so, and an estimate must not claim to be one.
+
+    Applied to every statement carrying a data status, not only daily
+    equivalents: the generated profile puts data_status on its wider-context
+    statements too, and a modeled 2025 population that regresses to saying
+    "estimates" is exactly the defect this canary exists to catch.
+    """
+    details = statement.get("details")
+    if not isinstance(details, dict) or "data_status" not in details:
+        return []
+    statement_id = str(statement.get("statement_id", "?"))
+    text = str(statement.get("statement", "")).lower()
     projected = details.get("data_status") == MODELED_STATUS
-    claims_projection = "projection" in text.lower()
+    claims_projection = any(word in text for word in PROJECTION_WORDS)
     if projected and not claims_projection:
-        issues.append(
+        return [
             _issue(
                 profile_date,
                 f"{statement_id} rests on a projection without saying so",
             )
-        )
+        ]
     if not projected and claims_projection:
-        issues.append(
+        return [
             _issue(
                 profile_date,
-                f"{statement_id} calls an estimate a projection",
+                f"{statement_id} presents a {details.get('data_status')} value "
+                "as a projection",
             )
-        )
-    return issues
+        ]
+    return []
 
 
 @dataclass
@@ -339,7 +377,12 @@ class CanaryValidation:
         )
         if manifest is None:
             raise LookupError(f"No published profile for {profile_date.isoformat()}.")
-        return store.read(manifest.storage_uri, manifest.content_hash)
+        payload = store.read(manifest.storage_uri, manifest.content_hash)
+        # The endpoint treats the manifest as the authority for the tier, so
+        # an artifact published before the tier existed still reaches readers
+        # tiered. Validating the raw artifact would skip the tier checks on
+        # exactly those profiles.
+        return {**payload, "publication_tier": manifest.publication_tier.value}
 
     @classmethod
     def of(
