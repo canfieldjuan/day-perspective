@@ -19,6 +19,8 @@ from app.database import SessionLocal
 from app.golden_canary import (
     GOLDEN_CANARY_KIND,
     CanaryValidation,
+    canary_run_is_resumable,
+    current_ucdp_release_id,
     current_un_wpp_release_id,
     plan_golden_canary,
     record_canary_publication,
@@ -314,29 +316,20 @@ def main() -> None:
             subject = plan.publishable
             if not args.validate_only:
                 if args.resume:
-                    current_release = current_un_wpp_release_id(session)
+                    # Every release a context profile rests on, checked
+                    # separately: since UC2 there are two, and they move
+                    # independently.
+                    current_releases = {
+                        "source_release_id": current_un_wpp_release_id(session),
+                        "ucdp_source_release_id": current_ucdp_release_id(session),
+                    }
 
                     def resumable(candidate: PublicationBatchRun) -> bool:
-                        """Whether this run's recorded inputs still hold.
-
-                        A run recorded against a different golden set or a
-                        superseded release cannot be finished without
-                        producing a mixed verdict. Such a run is skipped so
-                        it cannot block newer interrupted runs behind a
-                        ledger there is no command to clear.
-                        """
-                        recorded = candidate.requested or {}
-                        dates_match = [
-                            date.fromisoformat(str(value))
-                            for value in recorded.get("dates", [])
-                        ] in ([], plan.publishable)
-                        recorded_release = recorded.get("source_release_id")
-                        release_matches = (
-                            recorded_release is None
-                            or current_release is None
-                            or str(current_release) == str(recorded_release)
+                        return canary_run_is_resumable(
+                            candidate.requested,
+                            dates=plan.publishable,
+                            current_releases=current_releases,
                         )
-                        return dates_match and release_matches
 
                     run = recoverable_batch_run(
                         session,

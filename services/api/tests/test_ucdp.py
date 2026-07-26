@@ -40,6 +40,8 @@ from app.ucdp import (
     review_ucdp_ged,
 )
 
+from .helpers import synthetic_ucdp_multiyear_csv
+
 ROOT = Path(__file__).resolve().parents[3]
 ANNUAL_FIXTURE = (
     ROOT / "data/fixtures/ucdp/ucdp-prio-26.1-conflicts-1964.csv"
@@ -643,29 +645,6 @@ def test_a_new_ucdp_payload_never_overwrites_the_prior_release(
     assert len({release.raw_checksum_sha256 for release in releases}) == 2
 
 
-def _synthetic_multiyear_csv(
-    rows: list[tuple[str, str]], version: str = "26.1"
-) -> str:
-    """A deliberately synthetic multi-year release.
-
-    SYNTHETIC — not UCDP data. It exercises the generalized invariants,
-    which the committed 1964 excerpt cannot because it covers one year. The
-    excerpt stays the provenance canary; this never leaves the test suite
-    and must never be published.
-    """
-    header = (
-        "conflict_id,location,side_a,side_b,year,intensity_level,"
-        "type_of_conflict,start_date,start_prec,region,version"
-    )
-    lines = [header]
-    for conflict_id, year in rows:
-        lines.append(
-            f"{conflict_id},SyntheticLand,Government of SyntheticLand,"
-            f"Synthetic Opposition,{year},1,3,1948-12-31,3,3,{version}"
-        )
-    return "\n".join(lines) + "\n"
-
-
 @pytest.mark.integration
 def test_multi_year_release_ingests_every_year(
     session: Session, tmp_path: Path
@@ -674,7 +653,7 @@ def test_multi_year_release_ingests_every_year(
 
     fixture = tmp_path / "synthetic-multiyear.csv"
     fixture.write_text(
-        _synthetic_multiyear_csv(
+        synthetic_ucdp_multiyear_csv(
             [("900", "1971"), ("901", "1971"), ("900", "1972"), ("902", "1983")]
         ),
         encoding="utf-8",
@@ -711,22 +690,22 @@ def test_multi_year_ingestion_fails_closed_on_each_invariant(
     cases: list[tuple[str, str, str]] = [
         (
             "version-drift",
-            _synthetic_multiyear_csv([("900", "1971")], version="27.0"),
+            synthetic_ucdp_multiyear_csv([("900", "1971")], version="27.0"),
             "must be version 26.1",
         ),
         (
             "duplicate-pair",
-            _synthetic_multiyear_csv([("900", "1971"), ("900", "1971")]),
+            synthetic_ucdp_multiyear_csv([("900", "1971"), ("900", "1971")]),
             "unique per conflict-year",
         ),
         (
             "year-out-of-range",
-            _synthetic_multiyear_csv([("900", "1850")]),
+            synthetic_ucdp_multiyear_csv([("900", "1850")]),
             "1946-2025",
         ),
         (
             "non-numeric-year",
-            _synthetic_multiyear_csv([("900", "not-a-year")]),
+            synthetic_ucdp_multiyear_csv([("900", "not-a-year")]),
             "non-numeric year",
         ),
     ]
@@ -815,7 +794,7 @@ def test_ingestion_counts_describe_the_accepted_rows(
 
     fixture = tmp_path / "synthetic-counts.csv"
     fixture.write_text(
-        _synthetic_multiyear_csv(
+        synthetic_ucdp_multiyear_csv(
             [("900", "1971"), ("901", "1971"), ("900", "1972")]
         ),
         encoding="utf-8",

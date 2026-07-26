@@ -767,12 +767,23 @@ def review_ucdp_annual(
 
 
 def build_ucdp_annual_profile_content(
-    session: Session, *, year: int = 1964
+    session: Session,
+    *,
+    year: int = 1964,
+    require_editorial_selection: bool = True,
+    statement_index: int = 3,
 ) -> UCDPAnnualProfileContent:
     """Assemble one year's annual conflict context.
 
     Selects that year's claims rather than the whole release, so a release
     covering many years serves each of them.
+
+    Callers that record editorial selections from the returned evidence must
+    pass require_editorial_selection=False and assert eligibility themselves
+    afterwards, mirroring build_un_wpp_profile_content: the selection cannot
+    exist before the content that names the root to select. Such a caller
+    also owns the statement's position in the assembled section, so
+    statement_index says where it will land rather than assuming it.
     """
     source = session.scalar(select(Source).where(Source.slug == UCDP_SOURCE_SLUG))
     if source is None:
@@ -787,13 +798,18 @@ def build_ucdp_annual_profile_content(
     )
     if release is None:
         raise ValueError("UCDP annual release has not been ingested.")
-    current_claims = [
-        claim
-        for claim in session.scalars(
-            select(Claim).where(Claim.source_release_id == release.id)
+    # Filtered in the database rather than in Python. A release covering
+    # 1946-2025 holds thousands of records, and this now runs once per
+    # published date: loading them all to keep one year's worth cost ~50x
+    # what the indexed comparison does.
+    current_claims = list(
+        session.scalars(
+            select(Claim).where(
+                Claim.source_release_id == release.id,
+                Claim.assertion_json["year"].astext == str(year),
+            )
         )
-        if str((claim.assertion_json or {}).get("year")) == str(year)
-    ]
+    )
     if not current_claims:
         # Named rather than counted as zero: an absent year is not a year
         # without conflicts.
@@ -894,17 +910,20 @@ def build_ucdp_annual_profile_content(
             .order_by(Claim.source_record_locator)
         )
     )
-    assert_release_publication_eligible(
-        session,
-        source_release_id=release.id,
-        # Validated against a date in the requested year, matching the
-        # selection recorded at review time.
-        profile_date=(
-            GOLDEN_DATE if year == GOLDEN_DATE.year else date(year, 1, 1)
-        ),
-        resolved_root_ids_by_section={},
-        derived_root_ids_by_section={"wider_historical_context": {derived.id}},
-    )
+    if require_editorial_selection:
+        assert_release_publication_eligible(
+            session,
+            source_release_id=release.id,
+            # Validated against a date in the requested year, matching the
+            # selection recorded at review time.
+            profile_date=(
+                GOLDEN_DATE if year == GOLDEN_DATE.year else date(year, 1, 1)
+            ),
+            resolved_root_ids_by_section={},
+            derived_root_ids_by_section={
+                "wider_historical_context": {derived.id}
+            },
+        )
     statement: dict[str, object] = {
         "statement_id": f"ucdp-{year}-active-conflicts",
         "statement": (
@@ -972,13 +991,64 @@ def build_ucdp_annual_profile_content(
         statements=[statement],
         evidence=[
             PublicationStatementEvidenceInput(
-                statement_path="/sections/wider_historical_context/3",
+                statement_path=(
+                    f"/sections/wider_historical_context/{statement_index}"
+                ),
                 derived_value_id=derived.id,
             )
         ],
         source_release_id=release.id,
         methodology=methodology,
         resolved_claims=tuple(inputs),
+    )
+
+
+def optional_annual_context(
+    session: Session, *, year: int, statement_index: int
+) -> UCDPAnnualProfileContent | None:
+    """This year's conflict context, or None where the archive has none.
+
+    Absence and failure are different answers and must not be collapsed. A
+    deployment that has not ingested UCDP, and a year the release does not
+    cover, both mean the same honest thing: this profile says nothing about
+    armed conflict. Neither is a reason to refuse to publish the date, and
+    neither may be published as a year of no conflicts.
+
+    Everything else still fails closed. Claims that exist but are unaccepted,
+    unreviewed, or underived mean reviewed evidence exists and is being
+    dropped — publishing a quieter profile over it would hide the very thing
+    the archive is for.
+    """
+    source = session.scalar(select(Source).where(Source.slug == UCDP_SOURCE_SLUG))
+    if source is None:
+        return None
+    release = session.scalar(
+        select(SourceRelease)
+        .where(
+            SourceRelease.source_id == source.id,
+            SourceRelease.source_url == UCDP_ANNUAL_URL,
+        )
+        .order_by(SourceRelease.ingested_at.desc())
+    )
+    if release is None:
+        return None
+    # Mirrors the builder's own year filter, so "covered" here and "usable"
+    # there cannot drift apart into a silent skip.
+    covered = session.scalar(
+        select(Claim.id)
+        .where(
+            Claim.source_release_id == release.id,
+            Claim.assertion_json["year"].astext == str(year),
+        )
+        .limit(1)
+    )
+    if covered is None:
+        return None
+    return build_ucdp_annual_profile_content(
+        session,
+        year=year,
+        require_editorial_selection=False,
+        statement_index=statement_index,
     )
 
 

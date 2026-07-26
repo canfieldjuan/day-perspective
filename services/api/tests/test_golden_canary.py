@@ -15,6 +15,7 @@ import json
 from datetime import date
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 import pytest
 from sqlalchemy.orm import Session
@@ -23,6 +24,7 @@ from app.batch_publication import outstanding_dates, run_context_batch
 from app.golden_canary import (
     GOLDEN_CANARY_KIND,
     CanaryValidation,
+    canary_run_is_resumable,
     plan_golden_canary,
     record_canary_publication,
     start_golden_canary_run,
@@ -114,6 +116,7 @@ def _payload(
     *,
     profile_date: str = "1952-02-29",
     typical: list[dict[str, object]] | None = None,
+    context: list[dict[str, object]] | None = None,
     section_states: dict[str, object] | None = None,
 ) -> dict[str, object]:
     sections: dict[str, list[dict[str, object]]] = {
@@ -121,13 +124,15 @@ def _payload(
         "typical_day_in_this_year": (
             [_daily_statement()] if typical is None else typical
         ),
-        "wider_historical_context": [],
+        "wider_historical_context": list(context or []),
         "curated_claims": [],
         "derived_comparisons": [],
         "wonder_and_progress": [],
         "evidence_notes": [],
     }
     supported = {"recorded_on_this_date", "typical_day_in_this_year"}
+    if context:
+        supported.add("wider_historical_context")
     states: dict[str, object] = section_states or {
         key: (
             {"status": "available"}
@@ -670,3 +675,222 @@ def test_a_stale_canary_run_does_not_block_recovery(
     )
     assert selected is not None
     assert selected.id == current.id, "a stale run blocked a resumable one"
+
+
+def _conflict_statement(
+    *,
+    count: int = 17,
+    year: int = 1952,
+    text: str | None = None,
+    assignment: str | None = "period_context",
+    value: object = None,
+) -> dict[str, object]:
+    details: dict[str, object] = {
+        "title": f"State-based armed conflicts active in {year}",
+        "value": count if value is None else value,
+        "unit": "conflict-year records",
+        "data_status": "final",
+    }
+    if assignment is not None:
+        details["temporal_assignment"] = assignment
+    return {
+        "statement_id": f"ucdp-{year}-active-conflicts",
+        "statement": text
+        if text is not None
+        else (
+            f"UCDP/PRIO records {count} state-based armed conflicts as active "
+            f"at some point in {year}. This is annual context, not a count "
+            "for any single date in it."
+        ),
+        "details": details,
+    }
+
+
+class TestConflictContextValidation:
+    """The conflict statement appears on every date of its year (UC2), so
+    the failures that matter are it describing a different year, reading as
+    an event on the date, or claiming mortality it does not measure."""
+
+    def test_a_correct_conflict_statement_passes(self) -> None:
+        assert validate_context_payload(
+            _payload(context=[_conflict_statement()])
+        ) == []
+
+    def test_a_neighbouring_years_count_is_caught(self) -> None:
+        # The whole risk of year-general content: 1951's count published on
+        # a 1952 page reads as true and is not.
+        issues = validate_context_payload(
+            _payload(context=[_conflict_statement(year=1951)])
+        )
+        assert any("reports 1951" in issue for issue in issues), issues
+
+    def test_an_unmarked_conflict_statement_is_caught(self) -> None:
+        issues = validate_context_payload(
+            _payload(context=[_conflict_statement(assignment=None)])
+        )
+        assert any("period_context marker" in issue for issue in issues), issues
+
+    def test_prose_and_displayed_count_must_agree(self) -> None:
+        issues = validate_context_payload(
+            _payload(context=[_conflict_statement(count=17, value=8)])
+        )
+        assert any("prose says 17" in issue for issue in issues), issues
+
+    def test_a_prefix_count_does_not_pass_as_agreement(self) -> None:
+        # "5" is a substring of "53". A containment check would call this
+        # agreement; it is a profile understating a conflict count by 48.
+        issues = validate_context_payload(
+            _payload(context=[_conflict_statement(count=53, value=5)])
+        )
+        assert any("prose says 53" in issue for issue in issues), issues
+
+    def test_conflict_presence_may_not_be_stated_as_deaths(self) -> None:
+        # UCDP/PRIO annual records establish that a conflict was active, not
+        # how many it killed; battle-related deaths are a separate dataset
+        # covering a shorter span.
+        issues = validate_context_payload(
+            _payload(
+                context=[
+                    _conflict_statement(
+                        text=(
+                            "UCDP/PRIO records 17 state-based armed conflicts "
+                            "as active at some point in 1952, with 4,300 "
+                            "deaths. This is annual context, not a count for "
+                            "any single date in it."
+                        )
+                    )
+                ]
+            )
+        )
+        assert any("mortality terms" in issue for issue in issues), issues
+
+    def test_a_statement_that_omits_the_year_caveat_is_caught(self) -> None:
+        issues = validate_context_payload(
+            _payload(
+                context=[
+                    _conflict_statement(
+                        text=(
+                            "UCDP/PRIO records 17 state-based armed conflicts "
+                            "as active at some point in 1952."
+                        )
+                    )
+                ]
+            )
+        )
+        assert any(
+            "describes the year rather than this date" in issue for issue in issues
+        ), issues
+
+
+class TestCanaryReleasePinning:
+    """A canary verdict must cover one set of inputs completely.
+
+    Since UC2 a context profile rests on two releases, so pinning only the
+    demographic one leaves the conflict release free to move mid-run: the
+    dates already published would carry release A's counts and the resumed
+    ones release B's, and the run would still report a clean verdict.
+    """
+
+    DATES = [date(1952, 2, 29), date(1953, 6, 15)]
+
+    def _recorded(self, **overrides: object) -> dict[str, Any]:
+        recorded: dict[str, Any] = {
+            "dates": [value.isoformat() for value in self.DATES],
+            "source_release_id": "11111111-1111-1111-1111-111111111111",
+            "ucdp_source_release_id": "22222222-2222-2222-2222-222222222222",
+        }
+        recorded.update(overrides)
+        return recorded
+
+    def _current(self, **overrides: object) -> dict[str, Any]:
+        current: dict[str, Any] = {
+            "source_release_id": UUID("11111111-1111-1111-1111-111111111111"),
+            "ucdp_source_release_id": UUID(
+                "22222222-2222-2222-2222-222222222222"
+            ),
+        }
+        current.update(overrides)
+        return current
+
+    def test_unchanged_inputs_resume(self) -> None:
+        assert canary_run_is_resumable(
+            self._recorded(), dates=self.DATES, current_releases=self._current()
+        )
+
+    def test_a_moved_conflict_release_blocks_the_resume(self) -> None:
+        # The case this pinning exists for: only the UCDP release moved.
+        assert not canary_run_is_resumable(
+            self._recorded(),
+            dates=self.DATES,
+            current_releases=self._current(
+                ucdp_source_release_id=UUID(
+                    "33333333-3333-3333-3333-333333333333"
+                )
+            ),
+        )
+
+    def test_a_moved_demographic_release_still_blocks_the_resume(self) -> None:
+        # The pre-existing guard must survive the generalization.
+        assert not canary_run_is_resumable(
+            self._recorded(),
+            dates=self.DATES,
+            current_releases=self._current(
+                source_release_id=UUID("33333333-3333-3333-3333-333333333333")
+            ),
+        )
+
+    def test_a_different_golden_set_blocks_the_resume(self) -> None:
+        assert not canary_run_is_resumable(
+            self._recorded(dates=["1960-01-01"]),
+            dates=self.DATES,
+            current_releases=self._current(),
+        )
+
+    def test_a_ledger_predating_conflict_context_is_not_blocked(self) -> None:
+        # Runs recorded before UC2 carry no UCDP key. That is an absent
+        # constraint, not a mismatch — treating it as a mismatch would strand
+        # every pre-existing interrupted run.
+        recorded = self._recorded()
+        del recorded["ucdp_source_release_id"]
+        assert canary_run_is_resumable(
+            recorded, dates=self.DATES, current_releases=self._current()
+        )
+
+    def test_an_uningested_conflict_source_is_not_a_mismatch(self) -> None:
+        # Nothing to compare against is not evidence that something moved.
+        assert canary_run_is_resumable(
+            self._recorded(),
+            dates=self.DATES,
+            current_releases=self._current(ucdp_source_release_id=None),
+        )
+
+
+@pytest.mark.integration
+def test_the_canary_run_pins_both_releases_it_rests_on(
+    session: Session, tmp_path: Path, reviewed_un_wpp: None
+) -> None:
+    """The recording side of the same guard: a predicate that compares a key
+    the run never wrote would silently always pass."""
+    from app.adapters.base import LocalFilesystemRawSourceStore
+    from app.ucdp import ingest_ucdp_annual
+
+    from .helpers import synthetic_ucdp_multiyear_csv
+
+    fixture = tmp_path / "conflicts.csv"
+    fixture.write_text(
+        synthetic_ucdp_multiyear_csv([("900", "1952")]), encoding="utf-8"
+    )
+    ingested = ingest_ucdp_annual(
+        session,
+        fixture_path=fixture,
+        raw_store=LocalFilesystemRawSourceStore(tmp_path / "raw"),
+    )
+    session.commit()
+
+    run = start_golden_canary_run(session, dates=[date(1952, 2, 29)])
+
+    recorded = run.requested or {}
+    assert recorded.get("source_release_id") is not None
+    assert recorded.get("ucdp_source_release_id") == str(
+        ingested.source_release_id
+    )

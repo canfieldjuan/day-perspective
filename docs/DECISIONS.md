@@ -983,3 +983,74 @@ produce an issue.
 
 **Revisit trigger:** A new evidence class ships whose honesty depends on
 properties these checks do not cover.
+
+## D037: Missing conflict context is an absence; unreviewed conflict context is a failure
+
+**Status:** Accepted (2026-07-26, epic #51 / UC2)
+
+**Context:** Carrying UCDP annual conflict context into every context
+profile means asking, for each of 27,825 published dates, what to do when
+the year's conflict content is not available. Two very different situations
+produce that same surface appearance: the archive genuinely has nothing for
+the year, and the archive has records that have not been reviewed yet.
+
+**Decision:** They get opposite answers. A year the release does not cover —
+and a deployment that has not ingested UCDP at all — publishes with no
+conflict statement, and the profile says nothing whatsoever about armed
+conflict. A year whose records exist but are unaccepted, unreviewed or
+underived fails the date closed
+(`services/api/app/ucdp.py:optional_annual_context`).
+
+**Alternatives considered:** Treating every unavailable case as an absence
+(the publisher would silently drop reviewed evidence, and a republication
+pass would quietly strip conflict context from dates that had it);
+treating every unavailable case as a failure (a deployment without UCDP
+could publish nothing at all, and the archive's demographic context would
+be hostage to a second source).
+
+**Reason:** Absence and failure look identical in the output and are
+opposite in meaning. Publishing a quieter profile over reviewed evidence
+hides the thing the archive exists to show; refusing to publish a date
+because a source it never had is missing withholds evidence we do have.
+
+**Consequences:** `optional_annual_context` returns `None` only for the two
+genuine-absence cases and raises for everything else. Both sides are pinned
+by tests: a covered year carries the statement, an uncovered year publishes
+without it, and an ingested-but-unreviewed year raises rather than
+publishing quietly.
+
+**Revisit trigger:** A third source joins the context profile, at which
+point this rule should be lifted out of the UN WPP publisher into a
+composer that owns it for every source.
+
+## D038: A standing rule fills gaps; it never overrules a human
+
+**Status:** Accepted (2026-07-26, epic #51 / UC2)
+
+**Context:** `standing-rule:annual-context-v1` selects a year's reviewed
+context for every date in that year, because no human was ever going to
+visit 27,825 dates individually (D032). Once conflict context travels the
+same path, the rule can encounter a date where a reviewer already recorded
+a decision about that exact content.
+
+**Decision:** Where the latest editorial decision on a root is anything
+other than a selection, the content is omitted and the date publishes
+without it (`services/api/app/un_wpp.py:_root_declined_for_date`). The
+standing rule does not record a competing decision, and publication does
+not fail.
+
+**Alternatives considered:** Failing the date closed, as a rejected
+demographic root does — but the demographic content is the profile's reason
+to exist, while conflict context is an addition, and blocking a date over
+an optional section punishes the reader for a reviewer's judgement.
+Overwriting the rejection was never a candidate.
+
+**Consequences:** A reviewer can decline conflict context for one date
+without breaking it and without their decision being reverted by the next
+publication pass. The rejection stays the latest decision in
+`editorial_selections`, which is the audit trail — no separate record is
+needed.
+
+**Revisit trigger:** A section becomes load-bearing enough that silently
+omitting it would mislead, at which point that section needs the
+fail-closed treatment instead.
