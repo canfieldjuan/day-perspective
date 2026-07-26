@@ -23,6 +23,21 @@ REQUIRED_TAGS = {
     "era_boundary",
 }
 REVIEWED_STATUS = "reviewed"
+PENDING_REVIEW_STATUS = "pending_human_review"
+REVIEW_STATUSES = {PENDING_REVIEW_STATUS, REVIEWED_STATUS}
+
+NOT_GENERATED_STATUS = "not_generated"
+CONTEXT_PUBLISHED_STATUS = "context_published"
+PUBLISHED_AND_VALIDATED_STATUS = "published_and_validated"
+#: A generated context profile is evidence that the machinery works, not that
+#: a human read the page. Only PUBLISHED_AND_VALIDATED_STATUS counts toward
+#: release readiness; CONTEXT_PUBLISHED_STATUS is deliberately weaker so the
+#: AA5 mass run cannot tick the release gate on its way past.
+PUBLICATION_STATUSES = {
+    NOT_GENERATED_STATUS,
+    CONTEXT_PUBLISHED_STATUS,
+    PUBLISHED_AND_VALIDATED_STATUS,
+}
 
 
 @dataclass(frozen=True)
@@ -32,6 +47,7 @@ class GoldenSetReport:
     tag_counts: dict[str, int]
     reviewed_count: int
     published_count: int
+    context_published_count: int
     release_ready: bool
 
 
@@ -47,6 +63,7 @@ def validate_golden_set(path: Path) -> GoldenSetReport:
     tag_counts = {tag: 0 for tag in REQUIRED_TAGS}
     reviewed_count = 0
     published_count = 0
+    context_published_count = 0
     for item in records:
         if not isinstance(item, dict):
             raise ValueError("Golden-set records must be objects.")
@@ -73,10 +90,22 @@ def validate_golden_set(path: Path) -> GoldenSetReport:
         rationale = item.get("selection_rationale")
         if not isinstance(rationale, str) or len(rationale.strip()) < 40:
             raise ValueError("Golden-set records require a substantive rationale.")
-        if item.get("manual_review_status") == REVIEWED_STATUS:
+        review_status = item.get("manual_review_status")
+        if review_status not in REVIEW_STATUSES:
+            # An unrecognised value used to read as "not reviewed", so a typo
+            # silently understated the set instead of failing it.
+            raise ValueError("Golden-set records require a known review status.")
+        if review_status == REVIEWED_STATUS:
             reviewed_count += 1
-        if item.get("publication_status") == "published_and_validated":
+        publication_status = item.get("publication_status")
+        if publication_status not in PUBLICATION_STATUSES:
+            raise ValueError(
+                "Golden-set records require a known publication status."
+            )
+        if publication_status == PUBLISHED_AND_VALIDATED_STATUS:
             published_count += 1
+        elif publication_status == CONTEXT_PUBLISHED_STATUS:
+            context_published_count += 1
     if any(count == 0 for count in profile_counts.values()):
         raise ValueError("Golden set must contain dates from every profile era.")
     if any(count == 0 for count in tag_counts.values()):
@@ -87,5 +116,6 @@ def validate_golden_set(path: Path) -> GoldenSetReport:
         tag_counts=tag_counts,
         reviewed_count=reviewed_count,
         published_count=published_count,
+        context_published_count=context_published_count,
         release_ready=reviewed_count == 100 and published_count == 100,
     )

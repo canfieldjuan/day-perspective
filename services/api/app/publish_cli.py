@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import date
+from pathlib import Path
 
 from app.batch_publication import (
     CONTEXT_BATCH_KIND,
@@ -15,8 +16,25 @@ from app.batch_publication import (
 from app.config import get_settings
 from app.coverage import rebuild_coverage_index
 from app.database import SessionLocal
+from app.golden_canary import (
+    GOLDEN_CANARY_KIND,
+    CanaryValidation,
+    current_un_wpp_release_id,
+    plan_golden_canary,
+    record_canary_publication,
+    start_golden_canary_run,
+)
 from app.models import BatchRunStatus
 from app.services import LocalFilesystemPublishedProfileStore, reconcile_publications
+
+#: Repo-root-relative, resolved from this module: the CLI runs with its
+#: working directory inside services/api.
+GOLDEN_SET_PATH = (
+    Path(__file__).resolve().parents[3]
+    / "data"
+    / "golden-set"
+    / "golden-dates-v1.json"
+)
 
 
 def main() -> None:
@@ -62,6 +80,36 @@ def main() -> None:
         help="Re-attempt only the most recent run's failed dates.",
     )
     context.add_argument(
+        "--force-new-version",
+        action="store_true",
+        help="Publish a superseding version even when content is unchanged.",
+    )
+    canary = subparsers.add_parser(
+        "golden-canary",
+        help="Publish and validate the golden-100 dates a pipeline supports.",
+    )
+    canary.add_argument(
+        "--golden-set",
+        type=Path,
+        default=GOLDEN_SET_PATH,
+        help="Path to the golden-set file.",
+    )
+    canary.add_argument(
+        "--resume",
+        action="store_true",
+        help="Continue the most recent canary run's unfinished and failed dates.",
+    )
+    canary.add_argument(
+        "--validate-only",
+        action="store_true",
+        help="Re-check already-published canary dates without publishing.",
+    )
+    canary.add_argument(
+        "--update-golden-set",
+        action="store_true",
+        help="Record validated dates as context_published in the golden set.",
+    )
+    canary.add_argument(
         "--force-new-version",
         action="store_true",
         help="Publish a superseding version even when content is unchanged.",
@@ -158,6 +206,117 @@ def main() -> None:
             for failed_date, reason in batch_report.failures:
                 print(f"failure date={failed_date.isoformat()} reason={reason}")
             if batch_report.failed:
+                raise SystemExit(1)
+        elif args.command == "golden-canary":
+            store = LocalFilesystemPublishedProfileStore(
+                settings.published_profile_root
+            )
+            try:
+                plan = plan_golden_canary(args.golden_set)
+            except (OSError, ValueError) as error:
+                raise SystemExit(str(error)) from error
+            print(
+                f"golden_dates={plan.total} publishable={len(plan.publishable)} "
+                f"unsupported_era={len(plan.unsupported)}"
+            )
+            canary_report = None
+            # What this invocation is responsible for. A resume finishes the
+            # run it recorded, so it must also validate that run's dates:
+            # validating a freshly-loaded golden set could pass on unrelated
+            # pre-existing profiles while the resumed dates go unchecked.
+            subject = plan.publishable
+            if not args.validate_only:
+                if args.resume:
+                    run = latest_batch_run(session, kind=GOLDEN_CANARY_KIND)
+                    if run is None:
+                        raise SystemExit("No golden canary run exists to resume.")
+                    recorded_dates = [
+                        date.fromisoformat(str(value))
+                        for value in (run.requested or {}).get("dates", [])
+                    ]
+                    if recorded_dates and recorded_dates != plan.publishable:
+                        raise SystemExit(
+                            "The golden set no longer matches the run being "
+                            "resumed; finish or discard that run first."
+                        )
+                    recorded_release = (run.requested or {}).get("source_release_id")
+                    current_release = current_un_wpp_release_id(session)
+                    if (
+                        recorded_release is not None
+                        and current_release is not None
+                        and str(current_release) != str(recorded_release)
+                    ):
+                        # Resuming would publish the remaining dates from a
+                        # different release than the completed ones, and
+                        # validate a mixture that tests neither fully.
+                        raise SystemExit(
+                            "A newer UN WPP release was ingested since this "
+                            "run started; start a fresh canary run instead."
+                        )
+                    subject = recorded_dates or plan.publishable
+                    dates = outstanding_dates(session, batch_run=run)
+                    # Finish the run as it was requested: resuming a forced
+                    # republication without the flag would leave half the
+                    # canary on a new version and half on the old one.
+                    force_new_version = bool(
+                        (run.requested or {}).get(
+                            "force_new_version", args.force_new_version
+                        )
+                    )
+                    run.status = BatchRunStatus.RUNNING
+                    run.completed_at = None
+                    session.commit()
+                else:
+                    dates = plan.publishable
+                    force_new_version = args.force_new_version
+                    run = start_golden_canary_run(
+                        session, dates=dates, force_new_version=force_new_version
+                    )
+                canary_report = run_context_batch(
+                    session,
+                    store=store,
+                    dates=dates,
+                    batch_run=run,
+                    force_new_version=force_new_version,
+                )
+                print(
+                    f"batch_run_id={canary_report.batch_run_id} "
+                    f"requested={canary_report.requested} "
+                    f"published={canary_report.published} "
+                    f"unchanged={canary_report.unchanged} "
+                    f"skipped={canary_report.skipped} "
+                    f"failed={canary_report.failed}"
+                )
+                for failed_date, reason in canary_report.failures:
+                    print(f"failure date={failed_date.isoformat()} reason={reason}")
+            validation = CanaryValidation.of(session, store=store, dates=subject)
+            print(
+                f"validated={validation.checked} "
+                f"missing={len(validation.missing)} "
+                f"dates_with_issues={len(validation.issues)}"
+            )
+            for profile_date in validation.missing:
+                print(f"missing date={profile_date.isoformat()}")
+            for _, issues in sorted(validation.issues.items()):
+                for issue in issues:
+                    print(f"issue {issue}")
+            if args.update_golden_set:
+                # A failed batch can still validate clean, because validation
+                # reads whatever manifest is current — including an older one
+                # the failed republish did not replace. Recording then claims
+                # a canary that did not happen.
+                if not validation.clean or (
+                    canary_report is not None and canary_report.failed
+                ):
+                    raise SystemExit(
+                        "Refusing to record canary publication: the run did "
+                        "not complete cleanly."
+                    )
+                changed = record_canary_publication(args.golden_set, dates=subject)
+                print(f"golden_set_updated={changed}")
+            if not validation.clean or (
+                canary_report is not None and canary_report.failed
+            ):
                 raise SystemExit(1)
         elif args.command == "rebuild-coverage":
             rebuild = rebuild_coverage_index(
