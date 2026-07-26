@@ -469,3 +469,19 @@ def coverage_summary(session: Session) -> CoverageSummary:
     ):
         summary.by_tier[tier.value] = count
     return summary
+
+
+def random_enriched_date(session: Session) -> date | None:
+    """A uniformly random date offering more than annual context.
+
+    Chosen in the database rather than by listing every enriched date,
+    because the enriched set is expected to grow with source coverage.
+    Returns None when the archive holds none, which the interface must
+    treat as "hide the control" rather than "try anyway".
+    """
+    return session.scalar(
+        select(CoverageEntry.profile_date)
+        .where(CoverageEntry.publication_tier != PublicationTier.CONTEXT_ONLY)
+        .order_by(func.random())
+        .limit(1)
+    )

@@ -13,7 +13,11 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
-from app.coverage import coverage_for_date, coverage_summary
+from app.coverage import (
+    coverage_for_date,
+    coverage_summary,
+    random_enriched_date,
+)
 from app.database import get_session
 from app.governance import ReviewDecisionValue, record_claim_review
 from app.models import (
@@ -125,6 +129,16 @@ class CoverageSummaryResponse(APIModel):
     earliest: dtmod.date | None
     latest: dtmod.date | None
     supported_range: dict[str, str]
+
+
+class RandomEnrichedResponse(APIModel):
+    status: Literal["enriched_date"]
+    date: dtmod.date
+
+
+class NoEnrichedDatesResponse(APIModel):
+    status: Literal["no_enriched_dates"]
+    detail: str
 
 
 class ProfileNotPublishedResponse(APIModel):
@@ -244,6 +258,33 @@ def read_coverage_summary(
             "maximum": PUBLIC_DATE_MAX.isoformat(),
         },
     )
+
+
+@app.get(
+    "/api/v1/coverage/enriched/random",
+    response_model=RandomEnrichedResponse,
+    responses={404: {"model": NoEnrichedDatesResponse}},
+)
+def read_random_enriched_date(
+    session: Annotated[Session, Depends(get_session)],
+) -> RandomEnrichedResponse | JSONResponse:
+    """A random date holding more than annual context.
+
+    Declared before the single-segment date route so the literal path is
+    matched rather than parsed as a date. 404 when the archive holds none,
+    so the interface can hide the control instead of offering a journey to
+    nowhere.
+    """
+    chosen = random_enriched_date(session)
+    if chosen is None:
+        return JSONResponse(
+            status_code=404,
+            content=NoEnrichedDatesResponse(
+                status="no_enriched_dates",
+                detail="No enriched dates are published.",
+            ).model_dump(mode="json"),
+        )
+    return RandomEnrichedResponse(status="enriched_date", date=chosen)
 
 
 @app.get(

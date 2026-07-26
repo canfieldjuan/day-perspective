@@ -44,10 +44,16 @@ async function parseJson(response: Response): Promise<unknown> {
 
 export function DayProfileClient({
   date,
-  arrival
+  arrival,
+  discovery,
+  enrichedNavigation
 }: {
   date: string;
   arrival?: ReactNode;
+  /** Evidence-discovery panel, rendered only where the page is sparse. */
+  discovery?: ReactNode;
+  /** Discovery navigation, kept separate from the chronological bar. */
+  enrichedNavigation?: ReactNode;
 }) {
   const [state, setState] = useState<{
     date: string;
@@ -310,6 +316,8 @@ export function DayProfileClient({
           publicationManifestId={viewState.manifestId}
           publicationContentHash={viewState.contentHash}
         />
+        {discovery}
+        {enrichedNavigation}
       </div>
     );
   }
