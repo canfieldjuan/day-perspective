@@ -777,3 +777,73 @@ def test_annual_dataset_is_never_presented_as_battle_deaths() -> None:
         assert banned not in builder.lower(), (
             f"annual context must not claim mortality: {banned}"
         )
+
+
+def test_the_row_parser_accepts_the_official_wider_schema() -> None:
+    """The committed excerpt carries exactly the columns used; the official
+    release carries many more. Demanding an exact header matched the excerpt
+    and would have rejected the real dataset on the first live run."""
+    from app.ucdp import _rows
+
+    required = ("conflict_id", "year", "version")
+    official_shape = (
+        b"conflict_id,location,side_a,side_a_id,side_b,side_b_2nd,year,"
+        b"intensity_level,cumulative_intensity,type_of_conflict,start_date,"
+        b"start_prec,start_date2,region,version\n"
+        b"900,SyntheticLand,Gov,1,Opp,,1971,1,0,3,1948-12-31,3,1949-01-01,3,26.1\n"
+    )
+
+    rows = _rows(official_shape, required)
+
+    assert len(rows) == 1
+    assert rows[0]["year"] == "1971"
+    # Only the needed columns are carried forward.
+    assert set(rows[0]) == set(required)
+
+    # A genuinely missing column is schema drift and fails closed.
+    with pytest.raises(ValueError, match="missing required columns"):
+        _rows(b"conflict_id,year\n900,1971\n", required)
+
+
+@pytest.mark.integration
+def test_ingestion_counts_describe_the_accepted_rows(
+    session: Session, tmp_path: Path
+) -> None:
+    """Reporting a fixed 25 would have told the operator their first live
+    run ingested 25 records regardless of what it actually accepted."""
+    from app.ucdp import ingest_ucdp_annual
+
+    fixture = tmp_path / "synthetic-counts.csv"
+    fixture.write_text(
+        _synthetic_multiyear_csv(
+            [("900", "1971"), ("901", "1971"), ("900", "1972")]
+        ),
+        encoding="utf-8",
+    )
+    result = ingest_ucdp_annual(
+        session,
+        fixture_path=fixture,
+        raw_store=LocalFilesystemRawSourceStore(tmp_path / "raw"),
+    )
+
+    assert result.record_count == 3
+
+
+@pytest.mark.integration
+def test_a_fixture_ingestion_is_not_recorded_as_a_live_acquisition(
+    session: Session, tmp_path: Path
+) -> None:
+    """The audit trail must not claim an operator downloaded what was in
+    fact a committed excerpt, nor the reverse."""
+    from app.models import PipelineRun
+    from app.ucdp import ingest_ucdp_annual
+
+    result = ingest_ucdp_annual(
+        session,
+        fixture_path=ANNUAL_FIXTURE,
+        raw_store=LocalFilesystemRawSourceStore(tmp_path / "raw"),
+    )
+    run = session.get(PipelineRun, result.pipeline_run_id)
+    assert run is not None
+    assert run.details["mode"] == "fixture"
+    assert run.details["official_source_excerpt"] is True

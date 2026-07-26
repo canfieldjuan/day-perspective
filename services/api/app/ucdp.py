@@ -76,6 +76,13 @@ UCDP_ANNUAL_URL = (
 )
 UCDP_GED_URL = "https://ucdp.uu.se/downloads/ged/ged261-csv.zip"
 UCDP_ANNUAL_VERSION = "26.1"
+#: SHA-256 of the reviewed v26.1 archive. A live download is checked
+#: against this: matching bytes are the release we reviewed, different
+#: bytes are a different release and require an explicit version bump
+#: rather than silently becoming this one.
+UCDP_ANNUAL_REVIEWED_ARCHIVE_SHA256 = (
+    "5f951743222964674a446e32a5a871077b29bd13349588d85fc59953d89c878a"
+)
 #: The annual armed-conflict dataset's own coverage. Ingested in full; the
 #: coverage matrix and publication rules decide what becomes visible.
 UCDP_ANNUAL_FIRST_YEAR = 1946
@@ -196,24 +203,46 @@ def _license(session: Session, release_id: UUID) -> None:
 
 
 def _rows(payload: bytes, required: tuple[str, ...]) -> tuple[dict[str, str], ...]:
-    reader = csv.DictReader(io.StringIO(payload.decode("utf-8")))
-    if reader.fieldnames != list(required):
-        raise ValueError("The UCDP fixture schema does not match the pinned excerpt.")
-    rows = tuple(dict(row) for row in reader)
+    """Parse a UCDP CSV, keeping the columns this pipeline depends on.
+
+    The committed excerpt carries exactly the columns we use; the official
+    release carries many more. Demanding an exact header matched the
+    excerpt and would reject the real dataset outright, so the requirement
+    is that every needed column is present — extra columns are the source's
+    business, missing ones are schema drift and fail closed.
+    """
+    reader = csv.DictReader(io.StringIO(payload.decode("utf-8-sig")))
+    present = set(reader.fieldnames or ())
+    missing = [column for column in required if column not in present]
+    if missing:
+        raise ValueError(
+            "The UCDP CSV is missing required columns: " + ", ".join(missing)
+        )
+    rows = tuple({column: row[column] for column in required} for row in reader)
     if not rows:
-        raise ValueError("The UCDP fixture is empty.")
+        raise ValueError("The UCDP CSV is empty.")
     return rows
 
 
-def _start_run(session: Session, name: str, dataset: str) -> PipelineRun:
+def _start_run(
+    session: Session, name: str, dataset: str, *, live: bool = False
+) -> PipelineRun:
+    """Open a pipeline run recording how the payload was acquired.
+
+    Recording a live acquisition as a fixture run would make the audit
+    trail claim the operator's download was a committed excerpt.
+    """
     row = PipelineRun(
         pipeline_name=name,
         code_version="0.3.0",
         configuration_hash=content_hash(
-            {"dataset": dataset, "fixture": True, "version": "26.1"}
+            {"dataset": dataset, "fixture": not live, "version": "26.1"}
         ),
         status="running",
-        details={"mode": "fixture", "official_source_excerpt": True},
+        details={
+            "mode": "live" if live else "fixture",
+            "official_source_excerpt": not live,
+        },
     )
     session.add(row)
     session.flush()
@@ -258,7 +287,7 @@ def _existing_result(
     return UCDPIngestionResult(run.id, release.id, records, claims, checksum, True)
 
 
-def _fetch_annual_release() -> bytes:
+def _fetch_annual_release() -> tuple[bytes, str]:
     """Download the pinned UCDP/PRIO release.
 
     The URL names version 26.1 explicitly. An unpinned "latest" would let
@@ -271,6 +300,16 @@ def _fetch_annual_release() -> bytes:
     )
     with urllib.request.urlopen(request, timeout=180) as response:
         payload: bytes = response.read()
+    archive_checksum = hashlib.sha256(payload).hexdigest()
+    if archive_checksum != UCDP_ANNUAL_REVIEWED_ARCHIVE_SHA256:
+        # Fail closed. The pinned URL served bytes we have not reviewed, so
+        # this is a different release, not an update to this one.
+        raise ValueError(
+            "The UCDP archive at the pinned URL does not match the reviewed "
+            f"checksum. Expected {UCDP_ANNUAL_REVIEWED_ARCHIVE_SHA256}, got "
+            f"{archive_checksum}. A new release requires an explicit version "
+            "bump."
+        )
     if payload[:2] == b"PK":
         with zipfile.ZipFile(io.BytesIO(payload)) as archive:
             members = [
@@ -281,8 +320,8 @@ def _fetch_annual_release() -> bytes:
                     "The UCDP annual archive must contain exactly one CSV; "
                     f"found {len(members)}."
                 )
-            return archive.read(members[0])
-    return payload
+            return archive.read(members[0]), archive_checksum
+    return payload, archive_checksum
 
 
 def ingest_ucdp_annual(
@@ -294,9 +333,20 @@ def ingest_ucdp_annual(
     provenance canary. Without one, downloads the pinned official release —
     an operator-invoked outbound fetch, never run in CI.
     """
-    payload = fixture_path.read_bytes() if fixture_path is not None else _fetch_annual_release()
+    if fixture_path is not None:
+        payload = fixture_path.read_bytes()
+        # The committed excerpt is a CSV, not the archive; the reviewed
+        # archive checksum is recorded as the excerpt's provenance.
+        archive_checksum = UCDP_ANNUAL_REVIEWED_ARCHIVE_SHA256
+    else:
+        payload, archive_checksum = _fetch_annual_release()
     checksum = hashlib.sha256(payload).hexdigest()
-    run = _start_run(session, "ucdp-prio-annual-adapter", "UCDP/PRIO 26.1")
+    run = _start_run(
+        session,
+        "ucdp-prio-annual-adapter",
+        "UCDP/PRIO 26.1",
+        live=fixture_path is None,
+    )
     try:
         with session.begin_nested():
             required = (
@@ -398,9 +448,7 @@ def ingest_ucdp_annual(
                     # presence for mortality: battle-related deaths are a
                     # separate dataset covering 1989-2025.
                     "excludes": UCDP_ANNUAL_EXCLUDES,
-                    "upstream_archive_sha256": (
-                        "5f951743222964674a446e32a5a871077b29bd13349588d85fc59953d89c878a"
-                    ),
+                    "upstream_archive_sha256": archive_checksum,
                     "license": "CC-BY-4.0",
                 },
                 legal_review_status=LegalReviewStatus.NOT_REQUIRED,
@@ -465,13 +513,19 @@ def ingest_ucdp_annual(
                     status="passed",
                     subject_type="source_release",
                     subject_id=release.id,
-                    details={"records": 25, "unique_conflict_ids": 25},
+                    details={
+                        "records": len(rows),
+                        "unique_conflict_years": len(set(pairs)),
+                        "year_range": [min(years), max(years)],
+                    },
                 )
             )
             run.status = "succeeded"
             run.completed_at = datetime.now(UTC)
             run.details = {**run.details, "idempotent": False, "checksum": checksum}
-            return UCDPIngestionResult(run.id, release.id, 25, 25, checksum, False)
+            return UCDPIngestionResult(
+                run.id, release.id, len(rows), len(rows), checksum, False
+            )
     except Exception as error:
         run.status = "failed"
         run.completed_at = datetime.now(UTC)
