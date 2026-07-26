@@ -94,9 +94,13 @@ def batch_run_is_resumable(
     ledger holds rather than a freshly-computed range, and comparing that
     run's dates against themselves would be a check that cannot fail.
 
-    Every release is checked separately, because they move independently. A
-    key absent from an older ledger carries no constraint; a key present and
-    moved does.
+    Every release is checked separately, because they move independently,
+    and an *absent* key is distinguished from a key recorded as null. Only
+    the absent one is unconstrained, meaning a ledger written before
+    pinning existed. A recorded null is a fact about the run: the source was
+    not ingested, so those dates published without its content. Ingesting it
+    afterwards and resuming would give the remaining dates content the
+    earlier ones lack — the same mixed archive by a quieter route.
     """
     recorded = recorded or {}
     # A ledger is JSON, so its shape is not guaranteed by the type checker.
@@ -106,10 +110,13 @@ def batch_run_is_resumable(
     dates_match = dates is None or [
         date.fromisoformat(str(value)) for value in recorded_dates
     ] in ([], list(dates))
+    def unchanged(recorded_value: object, current: UUID | None) -> bool:
+        if recorded_value is None or current is None:
+            return recorded_value is None and current is None
+        return str(recorded_value) == str(current)
+
     releases_match = all(
-        recorded.get(key) is None
-        or current is None
-        or str(current) == str(recorded.get(key))
+        key not in recorded or unchanged(recorded[key], current)
         for key, current in current_releases.items()
     )
     return dates_match and releases_match
@@ -257,13 +264,18 @@ def recoverable_batch_run(
     )
     newest: PublicationBatchRun | None = None
     for run in candidates:
-        newest = run
-        if not outstanding_dates(session, batch_run=run, only_failed=only_failed):
-            continue
         # A run this caller cannot resume — because its recorded inputs no
         # longer match — must be stepped over, not returned. Returning it
         # would block every later resume behind a ledger nothing can clear.
+        #
+        # The test is applied before `newest` is recorded, not only before
+        # the return. Recording it first and skipping afterwards let the
+        # fallback hand back the very run the caller rejected, which in the
+        # ordinary single-interrupted-run case defeated the guard entirely.
         if is_resumable is not None and not is_resumable(run):
+            continue
+        newest = run
+        if not outstanding_dates(session, batch_run=run, only_failed=only_failed):
             continue
         return run
     return newest

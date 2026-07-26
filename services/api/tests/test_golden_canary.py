@@ -855,9 +855,10 @@ class TestCanaryReleasePinning:
             recorded, dates=self.DATES, current_releases=self._current()
         )
 
-    def test_an_uningested_conflict_source_is_not_a_mismatch(self) -> None:
-        # Nothing to compare against is not evidence that something moved.
-        assert batch_run_is_resumable(
+    def test_a_conflict_source_that_disappeared_blocks_the_resume(self) -> None:
+        # The run rested on a conflict release and there is none now, so the
+        # resumed dates would lack content the finished ones carry.
+        assert not batch_run_is_resumable(
             self._recorded(),
             dates=self.DATES,
             current_releases=self._current(ucdp_source_release_id=None),

@@ -355,12 +355,16 @@ def main() -> None:
                         is_resumable=resumable,
                     )
                     if run is None:
-                        raise SystemExit("No golden canary run exists to resume.")
-                    if not resumable(run):
+                        # recoverable_batch_run now applies the predicate
+                        # before its newest-run fallback, so a run it returns
+                        # has already passed. The separate post-check this
+                        # replaces was unreachable, and named only the UN WPP
+                        # release when two are now pinned.
                         raise SystemExit(
-                            "No resumable canary run: the golden set or UN WPP "
-                            "release has changed since every unfinished run "
-                            "started. Start a fresh canary run instead."
+                            "No canary run to resume: either none is unfinished, "
+                            "or the golden set or a source release has changed "
+                            "since every unfinished run started. Start a fresh "
+                            "canary run instead."
                         )
                     subject = [
                         date.fromisoformat(str(value))

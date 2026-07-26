@@ -186,11 +186,37 @@ class TestBatchReleasePinning:
             recorded, dates=self.DATES, current_releases=self._current()
         )
 
-    def test_an_uningested_source_is_not_a_mismatch(self) -> None:
-        assert batch_run_is_resumable(
+    def test_a_source_that_has_since_disappeared_blocks_the_resume(self) -> None:
+        """The run rested on a conflict release; there is none now. Resuming
+        would publish the remaining dates without content the earlier ones
+        carry."""
+        assert not batch_run_is_resumable(
             self._recorded(),
             dates=self.DATES,
             current_releases=self._current(ucdp_source_release_id=None),
+        )
+
+    def test_a_recorded_null_matches_a_still_uningested_source(self) -> None:
+        assert batch_run_is_resumable(
+            self._recorded(ucdp_source_release_id=None),
+            dates=self.DATES,
+            current_releases=self._current(ucdp_source_release_id=None),
+        )
+
+    def test_a_source_ingested_mid_run_blocks_the_resume(self) -> None:
+        """The quiet route to a mixed archive.
+
+        The run started before UCDP was ingested, so its ledger records null
+        and its published dates carry no conflict context — legitimately,
+        since absence is not failure (D037). Ingesting UCDP and resuming
+        would give the remaining dates conflict context the earlier ones
+        lack. A recorded null is a fact about the run, not an absent
+        constraint.
+        """
+        assert not batch_run_is_resumable(
+            self._recorded(ucdp_source_release_id=None),
+            dates=self.DATES,
+            current_releases=self._current(),
         )
 
     def test_a_different_date_plan_blocks_the_resume(self) -> None:
@@ -242,3 +268,50 @@ def test_a_resume_with_no_date_plan_still_checks_the_releases() -> None:
         dates=None,
         current_releases={**current, "ucdp_source_release_id": uuid4()},
     )
+
+
+@pytest.mark.integration
+def test_a_lone_unresumable_run_is_not_returned_by_the_fallback(
+    session: Session, tmp_path: Path
+) -> None:
+    """The guard's own escape hatch.
+
+    recoverable_batch_run returns the newest run when none is outstanding,
+    so a caller that only checks for None still receives a run. Recording
+    `newest` before applying the resumability test meant the ordinary case —
+    one interrupted run, release since moved — handed that run straight
+    back, and the guard above did nothing at all.
+    """
+    from app.batch_publication import (
+        CONTEXT_BATCH_KIND,
+        recoverable_batch_run,
+        start_batch_run,
+    )
+
+    run = start_batch_run(
+        session,
+        kind=CONTEXT_BATCH_KIND,
+        requested=context_batch_request(
+            session,
+            dates=[date(1971, 6, 15)],
+            dry_run=False,
+            force_new_version=False,
+        ),
+    )
+    session.commit()
+    assert run is not None
+
+    # It is the only run, and it is outstanding.
+    assert (
+        recoverable_batch_run(
+            session, kind=CONTEXT_BATCH_KIND, is_resumable=lambda _: True
+        )
+        is not None
+    )
+
+    assert (
+        recoverable_batch_run(
+            session, kind=CONTEXT_BATCH_KIND, is_resumable=lambda _: False
+        )
+        is None
+    ), "the fallback returned a run the caller declared unresumable"
