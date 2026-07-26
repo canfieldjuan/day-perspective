@@ -3,6 +3,8 @@ from __future__ import annotations
 import csv
 import hashlib
 import io
+import urllib.request
+import zipfile
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
@@ -73,6 +75,23 @@ UCDP_ANNUAL_URL = (
     "https://ucdp.uu.se/downloads/ucdpprio/ucdp-prio-acd-261-csv.zip"
 )
 UCDP_GED_URL = "https://ucdp.uu.se/downloads/ged/ged261-csv.zip"
+UCDP_ANNUAL_VERSION = "26.1"
+#: The annual armed-conflict dataset's own coverage. Ingested in full; the
+#: coverage matrix and publication rules decide what becomes visible.
+UCDP_ANNUAL_FIRST_YEAR = 1946
+UCDP_ANNUAL_LAST_YEAR = 2025
+UCDP_ANNUAL_CITATION = (
+    "Davies, S., Engström, G., Pettersson, T. & Öberg, M. (2025). Organized "
+    "violence 1989-2024, and the launch of conflict alert. Journal of Peace "
+    "Research 62(4). UCDP/PRIO Armed Conflict Dataset version 26.1."
+)
+#: This dataset carries conflict presence, type and intensity. It does NOT
+#: carry battle-related mortality, which is a separate UCDP dataset with a
+#: 1989-2025 coverage window. The two must never be conflated: presenting
+#: annual conflict presence as mortality would extend a mortality claim
+#: nearly forty years past its evidence.
+UCDP_ANNUAL_EXCLUDES = "battle-related deaths"
+
 GOLDEN_DATE = date(1964, 3, 27)
 GED_FIXTURE_DATE = date(1989, 1, 26)
 
@@ -239,10 +258,43 @@ def _existing_result(
     return UCDPIngestionResult(run.id, release.id, records, claims, checksum, True)
 
 
+def _fetch_annual_release() -> bytes:
+    """Download the pinned UCDP/PRIO release.
+
+    The URL names version 26.1 explicitly. An unpinned "latest" would let
+    the dataset change underneath a published archive without any record
+    that it had.
+    """
+    request = urllib.request.Request(
+        UCDP_ANNUAL_URL,
+        headers={"User-Agent": "day-perspective-offline-ingestion/0.4"},
+    )
+    with urllib.request.urlopen(request, timeout=180) as response:
+        payload: bytes = response.read()
+    if payload[:2] == b"PK":
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            members = [
+                name for name in archive.namelist() if name.lower().endswith(".csv")
+            ]
+            if len(members) != 1:
+                raise ValueError(
+                    "The UCDP annual archive must contain exactly one CSV; "
+                    f"found {len(members)}."
+                )
+            return archive.read(members[0])
+    return payload
+
+
 def ingest_ucdp_annual(
-    session: Session, *, fixture_path: Path, raw_store: RawSourceStore
+    session: Session, *, fixture_path: Path | None = None, raw_store: RawSourceStore
 ) -> UCDPIngestionResult:
-    payload = fixture_path.read_bytes()
+    """Ingest the UCDP/PRIO annual armed-conflict dataset.
+
+    With a fixture path, reads the committed 1964 excerpt kept as a
+    provenance canary. Without one, downloads the pinned official release —
+    an operator-invoked outbound fetch, never run in CI.
+    """
+    payload = fixture_path.read_bytes() if fixture_path is not None else _fetch_annual_release()
     checksum = hashlib.sha256(payload).hexdigest()
     run = _start_run(session, "ucdp-prio-annual-adapter", "UCDP/PRIO 26.1")
     try:
@@ -261,12 +313,53 @@ def ingest_ucdp_annual(
                 "version",
             )
             rows = _rows(payload, required)
-            if (
-                len(rows) != 25
-                or any(row["year"] != "1964" or row["version"] != "26.1" for row in rows)
-                or len({row["conflict_id"] for row in rows}) != len(rows)
-            ):
-                raise ValueError("The annual fixture must be the 25 unique 1964 rows.")
+            # Real invariants, not the shape of one excerpt. Each failure
+            # is fail-closed: an ingestion that half-succeeds would put
+            # unverified conflict records behind published statements.
+            wrong_version = sorted(
+                {row["version"] for row in rows if row["version"] != UCDP_ANNUAL_VERSION}
+            )
+            if wrong_version:
+                raise ValueError(
+                    "The UCDP annual release must be version "
+                    f"{UCDP_ANNUAL_VERSION}; found {', '.join(wrong_version)}."
+                )
+            years: list[int] = []
+            for row in rows:
+                try:
+                    years.append(int(row["year"]))
+                except ValueError as error:
+                    raise ValueError(
+                        f"UCDP annual row has a non-numeric year: {row['year']!r}."
+                    ) from error
+            out_of_range = sorted(
+                {
+                    year
+                    for year in years
+                    if not UCDP_ANNUAL_FIRST_YEAR <= year <= UCDP_ANNUAL_LAST_YEAR
+                }
+            )
+            if out_of_range:
+                raise ValueError(
+                    "UCDP annual years must fall within "
+                    f"{UCDP_ANNUAL_FIRST_YEAR}-{UCDP_ANNUAL_LAST_YEAR}; found "
+                    + ", ".join(str(year) for year in out_of_range)
+                )
+            # The record's identity is the conflict-year pair, not the
+            # conflict: one conflict legitimately appears once per active
+            # year, and a repeated pair would double-count it.
+            pairs = [(row["conflict_id"], row["year"]) for row in rows]
+            if len(set(pairs)) != len(pairs):
+                duplicates = sorted(
+                    {pair for pair in pairs if pairs.count(pair) > 1}
+                )[:5]
+                raise ValueError(
+                    "UCDP annual rows must be unique per conflict-year; "
+                    "duplicates include "
+                    + ", ".join(f"{cid}:{year}" for cid, year in duplicates)
+                )
+            if not rows:
+                raise ValueError("The UCDP annual release contains no rows.")
             source = _source(session)
             existing = _existing_result(
                 session, run=run, source_id=source.id, checksum=checksum
@@ -277,7 +370,10 @@ def ingest_ucdp_annual(
             release = create_source_release(
                 session,
                 source_id=source.id,
-                release_label=f"ucdp-prio-26.1-1964-{checksum[:12]}",
+                release_label=(
+                    f"ucdp-prio-{UCDP_ANNUAL_VERSION}-"
+                    f"{min(years)}-{max(years)}-{checksum[:12]}"
+                ),
                 source_url=UCDP_ANNUAL_URL,
                 raw_storage_uri=storage_uri,
                 raw_bytes=payload,
@@ -287,10 +383,21 @@ def ingest_ucdp_annual(
                     "dataset": "UCDP/PRIO Armed Conflict Dataset",
                     "quality_contract_version": "1",
                     "required_quality_checks": [
-                        "ucdp_prio_1964_unique_conflict_years"
+                        "ucdp_prio_unique_conflict_years"
                     ],
-                    "version": "26.1",
-                    "fixture": "official minimal 1964 excerpt",
+                    "version": UCDP_ANNUAL_VERSION,
+                    "acquisition": "fixture" if fixture_path is not None else "live",
+                    "source_url": UCDP_ANNUAL_URL,
+                    "retrieved_at": datetime.now(UTC).isoformat(),
+                    "raw_checksum_sha256": checksum,
+                    "row_count": len(rows),
+                    "year_range": [min(years), max(years)],
+                    "citation": UCDP_ANNUAL_CITATION,
+                    "license_url": UCDP_LICENSE_URL,
+                    # Recorded so no downstream reader mistakes conflict
+                    # presence for mortality: battle-related deaths are a
+                    # separate dataset covering 1989-2025.
+                    "excludes": UCDP_ANNUAL_EXCLUDES,
                     "upstream_archive_sha256": (
                         "5f951743222964674a446e32a5a871077b29bd13349588d85fc59953d89c878a"
                     ),
@@ -300,7 +407,10 @@ def ingest_ucdp_annual(
             )
             _license(session, release.id)
             for row in rows:
-                record_id = f"conflict:{row['conflict_id']}:1964"
+                # The record's identity is the conflict-year pair. Fixing
+                # the year here collapsed every year of one conflict onto a
+                # single record id.
+                record_id = f"conflict:{row['conflict_id']}:{row['year']}"
                 record_hash = hashlib.sha256(canonical_json_bytes(row)).hexdigest()
                 locator = f"{UCDP_ANNUAL_URL}#{record_id}"
                 session.add(
@@ -322,13 +432,16 @@ def ingest_ucdp_annual(
                     claim_type="active_state_based_conflict_year",
                     assertion_text=(
                         f"{row['side_a']} and {row['side_b']} were coded as an "
-                        "active state-based conflict in 1964."
+                        f"active state-based conflict in {row['year']}."
                     ),
                     assertion_json=row,
                     assertion_status=ClaimAssertionStatus.CANDIDATE,
                 )
-                claim.temporal_start = date(1964, 1, 1)
-                claim.temporal_end = date(1964, 12, 31)
+                # The claim's own year: marking a 1971 record as spanning
+                # 1964 would be a false temporal fact, not a label.
+                row_year = int(row["year"])
+                claim.temporal_start = date(row_year, 1, 1)
+                claim.temporal_end = date(row_year, 12, 31)
                 claim.temporal_precision = TemporalPrecision.YEAR
                 claim.temporal_assignment = TemporalAssignment.DIRECT_RECORD
                 claim.date_role = DateRole.REPORTED
@@ -339,13 +452,16 @@ def ingest_ucdp_annual(
                         claim_id=claim.id,
                         status="open",
                         priority="normal",
-                        rationale="Review one UCDP/PRIO 1964 conflict-year record.",
+                        rationale=(
+                            "Review one UCDP/PRIO "
+                            f"{row['year']} conflict-year record."
+                        ),
                     )
                 )
             session.add(
                 QualityCheck(
                     pipeline_run_id=run.id,
-                    check_name="ucdp_prio_1964_unique_conflict_years",
+                    check_name="ucdp_prio_unique_conflict_years",
                     status="passed",
                     subject_type="source_release",
                     subject_id=release.id,
@@ -363,7 +479,7 @@ def ingest_ucdp_annual(
         session.add(
             QualityCheck(
                 pipeline_run_id=run.id,
-                check_name="ucdp_prio_1964_unique_conflict_years",
+                check_name="ucdp_prio_unique_conflict_years",
                 status="failed",
                 subject_type="pipeline_run",
                 subject_id=run.id,

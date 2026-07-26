@@ -598,3 +598,182 @@ def test_annual_statement_text_names_no_single_date() -> None:
     builder = text[text.index("def build_ucdp_annual_profile_content") :]
     for banned in ["March 27", "March 27, 1964", "Twenty-five"]:
         assert banned not in builder, f"date-specific copy survives: {banned}"
+
+
+@pytest.mark.integration
+def test_a_new_ucdp_payload_never_overwrites_the_prior_release(
+    session: Session, tmp_path: Path
+) -> None:
+    """No silent replacement: a revised dataset becomes its own release with
+    its own checksum, and the release the published archive already rests on
+    is left exactly as it was."""
+    from app.models import SourceRelease
+    from app.ucdp import UCDP_ANNUAL_URL, ingest_ucdp_annual
+
+    store = LocalFilesystemRawSourceStore(tmp_path / "raw")
+    first = ingest_ucdp_annual(session, fixture_path=ANNUAL_FIXTURE, raw_store=store)
+    assert first.source_release_id is not None
+    original = session.get(SourceRelease, first.source_release_id)
+    assert original is not None
+    original_checksum = original.raw_checksum_sha256
+    original_label = original.release_label
+
+    revised = tmp_path / "revised.csv"
+    revised.write_text(
+        ANNUAL_FIXTURE.read_text(encoding="utf-8").replace(
+            '"India, Pakistan"', '"India and Pakistan"'
+        ),
+        encoding="utf-8",
+    )
+    second = ingest_ucdp_annual(session, fixture_path=revised, raw_store=store)
+
+    assert second.source_release_id != first.source_release_id
+    unchanged = session.get(SourceRelease, first.source_release_id)
+    assert unchanged is not None
+    assert unchanged.raw_checksum_sha256 == original_checksum
+    assert unchanged.release_label == original_label
+
+    # Both releases exist under the pinned URL, each identified by its own
+    # checksum, so which one a statement rests on is always recoverable.
+    releases = list(
+        session.scalars(
+            select(SourceRelease).where(SourceRelease.source_url == UCDP_ANNUAL_URL)
+        )
+    )
+    assert len({release.raw_checksum_sha256 for release in releases}) == 2
+
+
+def _synthetic_multiyear_csv(
+    rows: list[tuple[str, str]], version: str = "26.1"
+) -> str:
+    """A deliberately synthetic multi-year release.
+
+    SYNTHETIC — not UCDP data. It exercises the generalized invariants,
+    which the committed 1964 excerpt cannot because it covers one year. The
+    excerpt stays the provenance canary; this never leaves the test suite
+    and must never be published.
+    """
+    header = (
+        "conflict_id,location,side_a,side_b,year,intensity_level,"
+        "type_of_conflict,start_date,start_prec,region,version"
+    )
+    lines = [header]
+    for conflict_id, year in rows:
+        lines.append(
+            f"{conflict_id},SyntheticLand,Government of SyntheticLand,"
+            f"Synthetic Opposition,{year},1,3,1948-12-31,3,3,{version}"
+        )
+    return "\n".join(lines) + "\n"
+
+
+@pytest.mark.integration
+def test_multi_year_release_ingests_every_year(
+    session: Session, tmp_path: Path
+) -> None:
+    from app.ucdp import ingest_ucdp_annual, review_ucdp_annual
+
+    fixture = tmp_path / "synthetic-multiyear.csv"
+    fixture.write_text(
+        _synthetic_multiyear_csv(
+            [("900", "1971"), ("901", "1971"), ("900", "1972"), ("902", "1983")]
+        ),
+        encoding="utf-8",
+    )
+    result = ingest_ucdp_annual(
+        session,
+        fixture_path=fixture,
+        raw_store=LocalFilesystemRawSourceStore(tmp_path / "raw"),
+    )
+    assert result.source_release_id is not None
+
+    # The same conflict active in two years is two records, not a duplicate.
+    first = review_ucdp_annual(session, result.source_release_id, year=1971)
+    second = review_ucdp_annual(session, result.source_release_id, year=1972)
+    third = review_ucdp_annual(session, result.source_release_id, year=1983)
+    assert int(first.value_numeric or 0) == 2
+    assert int(second.value_numeric or 0) == 1
+    assert int(third.value_numeric or 0) == 1
+
+    # A year the release does not cover is named, never counted as zero.
+    with pytest.raises(ValueError, match="1990"):
+        review_ucdp_annual(session, result.source_release_id, year=1990)
+
+
+@pytest.mark.integration
+def test_multi_year_ingestion_fails_closed_on_each_invariant(
+    session: Session, tmp_path: Path
+) -> None:
+    """Each failure is fail-closed: a half-accepted release would put
+    unverified records behind published statements."""
+    from app.ucdp import ingest_ucdp_annual
+
+    store = LocalFilesystemRawSourceStore(tmp_path / "raw")
+    cases: list[tuple[str, str, str]] = [
+        (
+            "version-drift",
+            _synthetic_multiyear_csv([("900", "1971")], version="27.0"),
+            "must be version 26.1",
+        ),
+        (
+            "duplicate-pair",
+            _synthetic_multiyear_csv([("900", "1971"), ("900", "1971")]),
+            "unique per conflict-year",
+        ),
+        (
+            "year-out-of-range",
+            _synthetic_multiyear_csv([("900", "1850")]),
+            "1946-2025",
+        ),
+        (
+            "non-numeric-year",
+            _synthetic_multiyear_csv([("900", "not-a-year")]),
+            "non-numeric year",
+        ),
+    ]
+    for label, body, expected in cases:
+        fixture = tmp_path / f"{label}.csv"
+        fixture.write_text(body, encoding="utf-8")
+        with pytest.raises(ValueError, match=expected):
+            ingest_ucdp_annual(session, fixture_path=fixture, raw_store=store)
+        session.rollback()
+
+
+@pytest.mark.integration
+def test_re_ingesting_the_same_release_is_idempotent(
+    session: Session, tmp_path: Path
+) -> None:
+    from app.ucdp import ingest_ucdp_annual
+
+    store = LocalFilesystemRawSourceStore(tmp_path / "raw")
+    first = ingest_ucdp_annual(session, fixture_path=ANNUAL_FIXTURE, raw_store=store)
+    second = ingest_ucdp_annual(session, fixture_path=ANNUAL_FIXTURE, raw_store=store)
+
+    assert second.source_release_id == first.source_release_id
+
+
+def test_annual_dataset_is_never_presented_as_battle_deaths() -> None:
+    """UCDP/PRIO annual carries conflict presence, type and intensity across
+    1946-2025. Battle-related deaths are a separate dataset covering
+    1989-2025, and conflating them would extend a mortality claim nearly
+    forty years past its evidence."""
+    from pathlib import Path as _Path
+
+    from app.ucdp import UCDP_ANNUAL_EXCLUDES
+
+    assert "battle-related deaths" in UCDP_ANNUAL_EXCLUDES
+
+    import re
+
+    source = _Path(__file__).resolve().parents[1] / "app" / "ucdp.py"
+    text = source.read_text(encoding="utf-8")
+    start = text.index("def build_ucdp_annual_profile_content")
+    # Only this function. Slicing to end-of-file swept in the GED code,
+    # which is the battle-related-deaths dataset and legitimately counts
+    # fatalities — the point is that the annual builder must not.
+    following = re.search(r"\n(?:def |@)", text[start + 1 :])
+    builder = text[start : start + 1 + following.start()] if following else text[start:]
+
+    for banned in ["battle_deaths", "battle-related death", "fatalit", "death"]:
+        assert banned not in builder.lower(), (
+            f"annual context must not claim mortality: {banned}"
+        )

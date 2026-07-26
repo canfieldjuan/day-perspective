@@ -35,7 +35,17 @@ def main() -> None:
     ingest.add_argument("--dry-run", action="store_true")
     commands.add_parser("review-un-wpp")
     ingest_ucdp_annual_parser = commands.add_parser("ingest-ucdp-annual")
-    ingest_ucdp_annual_parser.add_argument("--fixture", type=Path, required=True)
+    # Mutually exclusive and required, matching the UN WPP shape: an
+    # outbound fetch is never implicit.
+    ucdp_annual_mode = ingest_ucdp_annual_parser.add_mutually_exclusive_group(
+        required=True
+    )
+    ucdp_annual_mode.add_argument("--fixture", type=Path)
+    ucdp_annual_mode.add_argument(
+        "--live",
+        action="store_true",
+        help="Download the pinned official release. Operator-invoked; never CI.",
+    )
     commands.add_parser("review-ucdp-annual")
     ingest_ucdp_ged_parser = commands.add_parser("ingest-ucdp-ged")
     ingest_ucdp_ged_parser.add_argument("--fixture", type=Path, required=True)
@@ -67,7 +77,11 @@ def main() -> None:
                 ucdp_result = (
                     ingest_ucdp_annual(
                         session,
-                        fixture_path=args.fixture,
+                        fixture_path=(
+                            None
+                            if getattr(args, "live", False)
+                            else args.fixture
+                        ),
                         raw_store=raw_store,
                     )
                     if args.command == "ingest-ucdp-annual"

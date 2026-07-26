@@ -598,3 +598,30 @@ the migration.
 Coverage carries no quality floor or review status: both were deferred to
 issue #45 after repeatedly disagreeing between their six writers. Anything
 reading coverage for evidence quality or review state will find neither.
+
+## UCDP annual: live acquisition (slice UC1, 2026-07-26)
+
+**Operator step.** `make ingest-ucdp-annual-live` downloads the pinned
+UCDP/PRIO Armed Conflict Dataset **v26.1** from the official host. It is
+operator-invoked and never runs in CI; CI stays offline on the committed
+1964 excerpt, which remains in the repository as the provenance canary.
+
+The complete dataset is **not committed**. The raw file lands in the local
+raw-source store outside Git; what is committed is the release metadata and
+its reviewed checksum. Each release records the exact URL, dataset version,
+retrieval timestamp, SHA-256, licence, required citation, row count and
+year range.
+
+**Fails closed** on version drift, schema drift, a duplicate conflict-year
+pair, a non-numeric or out-of-range year, or a checksum that does not match
+an existing release's. A revised payload becomes its own source release
+with its own checksum — the prior release is never overwritten, so which
+release a published statement rests on stays recoverable.
+
+**Coverage boundary that must not be blurred.** The annual dataset carries
+conflict presence, type and intensity for 1946-2025. It does **not** carry
+battle-related mortality: that is a separate UCDP dataset covering
+1989-2025, ingested by the GED pipeline. Presenting annual conflict
+presence as mortality would extend a mortality claim nearly forty years
+past its evidence. `UCDP_ANNUAL_EXCLUDES` records this on every release and
+a test asserts the annual builder never mentions deaths or fatalities.
