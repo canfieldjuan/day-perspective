@@ -27,7 +27,11 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.batch_publication import CONTEXT_BATCH_KIND, start_batch_run
+from app.batch_publication import (
+    CONTEXT_BATCH_KIND,
+    context_batch_request,
+    start_batch_run,
+)
 from app.coverage import SECTION_KEYS
 from app.golden_set import (
     CONTEXT_PUBLISHED_STATUS,
@@ -151,59 +155,19 @@ def start_golden_canary_run(
     The run records how it was requested, so a resume finishes the run the
     operator started rather than a differently-flagged one.
     """
+    # Each publication independently picks the newest release, so a release
+    # ingested mid-run would leave the finished dates on the old one and the
+    # resumed dates on the new one — a canary whose verdict covers neither
+    # release completely. context_batch_request records every release a
+    # context profile rests on, which is the same set the canary publishes.
+    requested = context_batch_request(
+        session, dates=dates, dry_run=False, force_new_version=force_new_version
+    )
+    requested["selection"] = "golden-set"
+    del requested["dry_run"]
     return start_batch_run(
-        session,
-        kind=GOLDEN_CANARY_KIND,
-        requested={
-            "selection": "golden-set",
-            "dates": [value.isoformat() for value in dates],
-            "force_new_version": force_new_version,
-            # Each publication independently picks the newest release, so a
-            # release ingested mid-run would leave the finished dates on the
-            # old one and the resumed dates on the new one — a canary whose
-            # verdict covers neither release completely.
-            "source_release_id": str(release)
-            if (release := current_un_wpp_release_id(session)) is not None
-            else None,
-            # Pinned for the same reason, and separately: the two releases
-            # move independently.
-            "ucdp_source_release_id": str(conflict_release)
-            if (conflict_release := current_ucdp_release_id(session)) is not None
-            else None,
-        },
+        session, kind=GOLDEN_CANARY_KIND, requested=requested
     )
-
-
-def canary_run_is_resumable(
-    recorded: dict[str, Any] | None,
-    *,
-    dates: Sequence[date],
-    current_releases: dict[str, UUID | None],
-) -> bool:
-    """Whether an interrupted canary run's recorded inputs still hold.
-
-    A run recorded against a different golden set, or against a release that
-    has since been superseded, cannot be finished without producing a mixed
-    verdict: the dates already published rest on the old inputs and the
-    resumed ones would rest on the new. Such a run is skipped rather than
-    resumed, so it cannot block newer interrupted runs behind a ledger there
-    is no command to clear.
-
-    Every release the profile rests on is checked separately, because they
-    move independently. A key absent from an older ledger carries no
-    constraint; a key present and moved does.
-    """
-    recorded = recorded or {}
-    dates_match = [
-        date.fromisoformat(str(value)) for value in recorded.get("dates", [])
-    ] in ([], list(dates))
-    releases_match = all(
-        recorded.get(key) is None
-        or current is None
-        or str(current) == str(recorded.get(key))
-        for key, current in current_releases.items()
-    )
-    return dates_match and releases_match
 
 
 def _issue(profile_date: str, message: str) -> str:

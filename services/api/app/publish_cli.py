@@ -7,6 +7,9 @@ from pathlib import Path
 from app.batch_publication import (
     CONTEXT_BATCH_KIND,
     BatchPlanError,
+    batch_run_is_resumable,
+    context_batch_request,
+    current_context_releases,
     outstanding_dates,
     plan_context_dates,
     recoverable_batch_run,
@@ -19,9 +22,6 @@ from app.database import SessionLocal
 from app.golden_canary import (
     GOLDEN_CANARY_KIND,
     CanaryValidation,
-    canary_run_is_resumable,
-    current_ucdp_release_id,
-    current_un_wpp_release_id,
     plan_golden_canary,
     record_canary_publication,
     start_golden_canary_run,
@@ -169,13 +169,32 @@ def main() -> None:
                 settings.published_profile_root
             )
             if args.resume or args.retry_failed:
+                # An archive run resumed after a source release moves would
+                # leave the dates published before the interruption on one
+                # release and the resumed dates on another, across the whole
+                # archive, and report success. The run's own recorded date
+                # plan is the comparison, since a context run is resumed on
+                # its own terms rather than against a freshly-computed range.
+                current_releases = current_context_releases(session)
+
+                def context_resumable(candidate: PublicationBatchRun) -> bool:
+                    return batch_run_is_resumable(
+                        candidate.requested,
+                        dates=None,
+                        current_releases=current_releases,
+                    )
+
                 run = recoverable_batch_run(
                     session,
                     kind=CONTEXT_BATCH_KIND,
                     only_failed=args.retry_failed,
+                    is_resumable=context_resumable,
                 )
                 if run is None:
-                    raise SystemExit("No context batch run exists to resume.")
+                    raise SystemExit(
+                        "No context batch run exists to resume whose recorded "
+                        "source releases still match the current ones."
+                    )
                 dates = outstanding_dates(
                     session, batch_run=run, only_failed=args.retry_failed
                 )
@@ -205,11 +224,12 @@ def main() -> None:
                 run = start_batch_run(
                     session,
                     kind=CONTEXT_BATCH_KIND,
-                    requested={
-                        "dates": [value.isoformat() for value in dates],
-                        "dry_run": dry_run,
-                        "force_new_version": force_new_version,
-                    },
+                    requested=context_batch_request(
+                        session,
+                        dates=dates,
+                        dry_run=dry_run,
+                        force_new_version=force_new_version,
+                    ),
                 )
             batch_report = run_context_batch(
                 session,
@@ -254,11 +274,12 @@ def main() -> None:
                 run = start_batch_run(
                     session,
                     kind=CONTEXT_BATCH_KIND,
-                    requested={
-                        "dates": [value.isoformat() for value in dates],
-                        "dry_run": args.dry_run,
-                        "force_new_version": args.force_new_version,
-                    },
+                    requested=context_batch_request(
+                        session,
+                        dates=dates,
+                        dry_run=args.dry_run,
+                        force_new_version=args.force_new_version,
+                    ),
                 )
                 year_report = run_context_batch(
                     session,
@@ -319,13 +340,10 @@ def main() -> None:
                     # Every release a context profile rests on, checked
                     # separately: since UC2 there are two, and they move
                     # independently.
-                    current_releases = {
-                        "source_release_id": current_un_wpp_release_id(session),
-                        "ucdp_source_release_id": current_ucdp_release_id(session),
-                    }
+                    current_releases = current_context_releases(session)
 
                     def resumable(candidate: PublicationBatchRun) -> bool:
-                        return canary_run_is_resumable(
+                        return batch_run_is_resumable(
                             candidate.requested,
                             dates=plan.publishable,
                             current_releases=current_releases,

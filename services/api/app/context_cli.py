@@ -15,6 +15,7 @@ from app.ucdp import (
     ingest_ucdp_annual,
     ingest_ucdp_ged,
     review_ucdp_annual,
+    review_ucdp_annual_release,
     review_ucdp_ged,
 )
 from app.un_wpp import (
@@ -46,7 +47,16 @@ def main() -> None:
         action="store_true",
         help="Download the pinned official release. Operator-invoked; never CI.",
     )
-    commands.add_parser("review-ucdp-annual")
+    review_ucdp_annual_parser = commands.add_parser("review-ucdp-annual")
+    review_ucdp_annual_parser.add_argument(
+        "--all-years",
+        action="store_true",
+        help=(
+            "Review every year the release covers. Required before the "
+            "archive is republished: an unreviewed year fails its dates "
+            "closed."
+        ),
+    )
     ingest_ucdp_ged_parser = commands.add_parser("ingest-ucdp-ged")
     ingest_ucdp_ged_parser.add_argument("--fixture", type=Path, required=True)
     commands.add_parser("review-ucdp-ged")
@@ -135,8 +145,24 @@ def main() -> None:
             count = review_un_wpp(session, release.id)
             label = f"reviewed_resolved_claims={count}"
         elif args.command == "review-ucdp-annual":
-            derived = review_ucdp_annual(session, release.id)
-            label = f"derived_value_id={derived.id}"
+            if args.all_years:
+                sweep = review_ucdp_annual_release(session, release.id)
+                label = (
+                    f"years={len(sweep.years_covered)} "
+                    f"reviewed={sweep.reviewed} "
+                    f"already_current={sweep.already_current} "
+                    f"failed={sweep.failed}"
+                )
+                for failed_year, reason in sweep.failures:
+                    print(f"year={failed_year} error={reason}")
+                if sweep.failed:
+                    # Named and non-zero: a silent partial sweep would show
+                    # up later as a wall of publication failures instead.
+                    print(label)
+                    raise SystemExit(1)
+            else:
+                derived = review_ucdp_annual(session, release.id)
+                label = f"derived_value_id={derived.id}"
         else:
             event = review_ucdp_ged(session, release.id)
             label = f"event_id={event.id}"

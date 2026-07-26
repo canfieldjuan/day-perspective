@@ -20,11 +20,10 @@ from uuid import UUID
 import pytest
 from sqlalchemy.orm import Session
 
-from app.batch_publication import outstanding_dates, run_context_batch
+from app.batch_publication import batch_run_is_resumable, outstanding_dates, run_context_batch
 from app.golden_canary import (
     GOLDEN_CANARY_KIND,
     CanaryValidation,
-    canary_run_is_resumable,
     plan_golden_canary,
     record_canary_publication,
     start_golden_canary_run,
@@ -813,13 +812,13 @@ class TestCanaryReleasePinning:
         return current
 
     def test_unchanged_inputs_resume(self) -> None:
-        assert canary_run_is_resumable(
+        assert batch_run_is_resumable(
             self._recorded(), dates=self.DATES, current_releases=self._current()
         )
 
     def test_a_moved_conflict_release_blocks_the_resume(self) -> None:
         # The case this pinning exists for: only the UCDP release moved.
-        assert not canary_run_is_resumable(
+        assert not batch_run_is_resumable(
             self._recorded(),
             dates=self.DATES,
             current_releases=self._current(
@@ -831,7 +830,7 @@ class TestCanaryReleasePinning:
 
     def test_a_moved_demographic_release_still_blocks_the_resume(self) -> None:
         # The pre-existing guard must survive the generalization.
-        assert not canary_run_is_resumable(
+        assert not batch_run_is_resumable(
             self._recorded(),
             dates=self.DATES,
             current_releases=self._current(
@@ -840,7 +839,7 @@ class TestCanaryReleasePinning:
         )
 
     def test_a_different_golden_set_blocks_the_resume(self) -> None:
-        assert not canary_run_is_resumable(
+        assert not batch_run_is_resumable(
             self._recorded(dates=["1960-01-01"]),
             dates=self.DATES,
             current_releases=self._current(),
@@ -852,13 +851,13 @@ class TestCanaryReleasePinning:
         # every pre-existing interrupted run.
         recorded = self._recorded()
         del recorded["ucdp_source_release_id"]
-        assert canary_run_is_resumable(
+        assert batch_run_is_resumable(
             recorded, dates=self.DATES, current_releases=self._current()
         )
 
     def test_an_uningested_conflict_source_is_not_a_mismatch(self) -> None:
         # Nothing to compare against is not evidence that something moved.
-        assert canary_run_is_resumable(
+        assert batch_run_is_resumable(
             self._recorded(),
             dates=self.DATES,
             current_releases=self._current(ucdp_source_release_id=None),
