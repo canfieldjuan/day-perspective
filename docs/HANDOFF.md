@@ -625,3 +625,45 @@ battle-related mortality: that is a separate UCDP dataset covering
 presence as mortality would extend a mortality claim nearly forty years
 past its evidence. `UCDP_ANNUAL_EXCLUDES` records this on every release and
 a test asserts the annual builder never mentions deaths or fatalities.
+
+### First live UCDP acquisition — release qualification (2026-07-26)
+
+Run as qualification rather than routine ingestion, to test the assumptions
+offline tests cannot reach.
+
+| | |
+|---|---|
+| Command | `make ingest-ucdp-annual-live` |
+| Source URL | `https://ucdp.uu.se/downloads/ucdpprio/ucdp-prio-acd-261-csv.zip` |
+| Version | 26.1 (pinned; no `latest`) |
+| Retrieved | 2026-07-26T21:55:32Z |
+| Archive SHA-256 | `5f951743…c878a` — **matched** the reviewed value |
+| Archive members | 1: `UcdpPrioConflict_v26_1.csv` |
+| CSV SHA-256 | `2aea044f…5447` |
+| CSV columns | **28** (the committed excerpt has 11) |
+| Rows in / accepted / rejected | 2,816 / 2,816 / 0 |
+| Years | 1946–2025, 80 distinct |
+| Unique conflict-year pairs | 2,816; **0 duplicates** |
+| Source release | `383d339c-40de-44a6-aec2-2870262d258a`, label `ucdp-prio-26.1-1946-2025-2aea044f1bca` |
+| Pipeline run | succeeded, `mode=live`, `official_source_excerpt=false` |
+| Quality check | `ucdp_prio_unique_conflict_years` **passed** |
+| Rerun | `idempotent=True`, same release, no duplication |
+| Partial state | none: zero non-succeeded runs |
+
+**Schema tolerance was load-bearing.** The official CSV has 28 columns
+against the excerpt's 11. Before UC1's review fixed `_rows`, this run would
+have been rejected outright. Extra columns are ignored; a missing required
+column still fails closed.
+
+**The provenance canary validated itself.** The real dataset independently
+yields 25 active conflicts for 1964 — exactly the committed excerpt's
+count. Spot checks: 1946→17, 1991→53, 2011→37, 2025→65. A year outside the
+dataset (1900) fails closed by name rather than counting zero.
+
+**Two releases now exist under the pinned URL** — the 1964 excerpt and this
+full release — each with its own checksum, neither overwriting the other,
+so which release a published statement rests on stays recoverable. Content
+building selects the most recently ingested.
+
+**Frozen as UC2's input:** source release
+`383d339c-40de-44a6-aec2-2870262d258a`.
