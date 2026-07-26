@@ -7,7 +7,6 @@ from pathlib import Path
 from app.batch_publication import (
     CONTEXT_BATCH_KIND,
     BatchPlanError,
-    latest_batch_run,
     outstanding_dates,
     plan_context_dates,
     recoverable_batch_run,
@@ -73,12 +72,12 @@ def main() -> None:
     context.add_argument(
         "--resume",
         action="store_true",
-        help="Continue the most recent run's unfinished and failed dates.",
+        help="Continue the oldest run that still owes dates; repeat until none remain.",
     )
     context.add_argument(
         "--retry-failed",
         action="store_true",
-        help="Re-attempt only the most recent run's failed dates.",
+        help="Re-attempt failed dates, oldest run with failures first.",
     )
     context.add_argument(
         "--force-new-version",
@@ -116,7 +115,7 @@ def main() -> None:
     canary.add_argument(
         "--resume",
         action="store_true",
-        help="Continue the most recent canary run's unfinished and failed dates.",
+        help="Continue the oldest canary run that still owes dates.",
     )
     canary.add_argument(
         "--validate-only",
@@ -315,7 +314,9 @@ def main() -> None:
             subject = plan.publishable
             if not args.validate_only:
                 if args.resume:
-                    run = latest_batch_run(session, kind=GOLDEN_CANARY_KIND)
+                    run = recoverable_batch_run(
+                        session, kind=GOLDEN_CANARY_KIND
+                    )
                     if run is None:
                         raise SystemExit("No golden canary run exists to resume.")
                     recorded_dates = [
