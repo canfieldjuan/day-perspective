@@ -861,3 +861,18 @@ matching the publisher, so identical archive state cannot describe itself
 differently depending on whether it was backfilled or rebuilt. The summary
 endpoint emits `supported_range` as `{minimum, maximum}`, matching both the
 shared contract and the sibling out-of-range response.
+
+**Split (PR #43 review round 3, 2026-07-26):** at ~950 net non-test lines
+the change exceeded the repository's ~800-line split threshold, so it lands
+as two slices: the index and its maintenance (schema, derivation,
+publication integration, `make rebuild-coverage`), then the coverage API
+(the reader-facing record with nearest-richer neighbours, the archive
+summary, both routes, the shared contract types, the web proxies). The seam
+is maintenance versus reads, and `coverage_entry()` — a single indexed row —
+is the boundary the API slice builds on.
+
+This trades §4's preference for vertical slices against §5's size law. The
+first slice ships an operator-visible improvement, a maintained and
+regenerable index plus a migration that backfills an existing archive,
+rather than a user-visible one. Three review rounds and twenty-four
+findings on a single PR is the evidence the size law exists for.
