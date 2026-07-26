@@ -1,8 +1,6 @@
 node_modules/
 .next/
-# Anchored: an unanchored "coverage/" also matched
-# app/api/coverage/, silently untracking real route files.
-/coverage/
+coverage/
 playwright-report/
 test-results/
 .env.local

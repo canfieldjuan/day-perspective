@@ -1,11 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import {
-  COVERAGE_REVIEW_STATUSES,
-  PUBLICATION_TIERS,
-  isCoverageReviewStatus,
-  profileTypeForDate
-} from "./index";
+import { PUBLICATION_TIERS, profileTypeForDate } from "./index";
 
 describe("profileTypeForDate", () => {
   it("keeps the public date shell and profile bands explicit", () => {
@@ -25,18 +20,5 @@ describe("publication tiers", () => {
       "partially_enriched",
       "reviewed_enriched"
     ]);
-  });
-});
-
-describe("coverage review statuses", () => {
-  it("keeps a status that implies review distinct from one that does not", () => {
-    expect(COVERAGE_REVIEW_STATUSES).toEqual([
-      "reviewed",
-      "rule_selected",
-      "unreviewed"
-    ]);
-    expect(isCoverageReviewStatus("rule_selected")).toBe(true);
-    expect(isCoverageReviewStatus("reviewed_enriched")).toBe(false);
-    expect(isCoverageReviewStatus(undefined)).toBe(false);
   });
 });

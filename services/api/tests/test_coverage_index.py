@@ -13,17 +13,12 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.adapters.base import LocalFilesystemRawSourceStore
 from app.batch_publication import CONTEXT_BATCH_KIND, run_context_batch, start_batch_run
-from app.coverage import (
-    CoverageRecord,
-    coverage_for_date,
-    coverage_summary,
-    rebuild_coverage_index,
-)
+from app.coverage import coverage_entry, rebuild_coverage_index
 from app.models import CoverageEntry, PublicationManifest, PublicationTier
 from app.services import (
     LocalFilesystemPublishedProfileStore,
@@ -163,7 +158,7 @@ def test_the_index_records_richness_not_merely_publication(
     rebuild_coverage_index(session)
     session.commit()
 
-    context = coverage_for_date(session, context_date)
+    context = coverage_entry(session, context_date)
     assert context is not None
     assert context.publication_tier is PublicationTier.CONTEXT_ONLY
     assert context.sections["recorded_on_this_date"] == 0
@@ -171,7 +166,7 @@ def test_the_index_records_richness_not_merely_publication(
     assert context.sections["wider_historical_context"] == 3
     assert context.has_recorded_event is False
 
-    enriched = coverage_for_date(session, enriched_date)
+    enriched = coverage_entry(session, enriched_date)
     assert enriched is not None
     assert enriched.publication_tier is PublicationTier.REVIEWED_ENRICHED
     assert enriched.sections["recorded_on_this_date"] == 1
@@ -186,61 +181,7 @@ def test_unpublished_dates_are_absent_rather_than_reported_empty(
     """The index must never imply a profile exists for a date that has none."""
     rebuild_coverage_index(session)
     session.commit()
-    assert coverage_for_date(session, date(1955, 1, 1)) is None
-
-
-@pytest.mark.integration
-def test_nearest_enriched_skips_the_sea_of_context_profiles(
-    session: Session, tmp_path: Path, reviewed_un_wpp: None
-) -> None:
-    """Stepping day by day through near-identical context pages is exactly
-    what the index exists to prevent."""
-    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
-    context_dates = [date(1981, 3, day) for day in range(1, 11)]
-    run = start_batch_run(
-        session,
-        kind=CONTEXT_BATCH_KIND,
-        requested={"dates": [value.isoformat() for value in context_dates]},
-    )
-    run_context_batch(session, store=store, dates=context_dates, batch_run=run)
-    publish_enriched(session, store, date(1981, 3, 20), label="nearest-after")
-    publish_enriched(session, store, date(1981, 2, 10), label="nearest-before")
-    session.commit()
-    rebuild_coverage_index(session)
-    session.commit()
-
-    record = coverage_for_date(session, date(1981, 3, 5))
-    assert record is not None
-    assert record.nearest_enriched_after == date(1981, 3, 20)
-    assert record.nearest_enriched_before == date(1981, 2, 10)
-    assert record.nearest_recorded_event_after == date(1981, 3, 20)
-
-
-@pytest.mark.integration
-def test_the_summary_reports_the_shape_of_the_archive(
-    session: Session, tmp_path: Path, reviewed_un_wpp: None
-) -> None:
-    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
-    dates = [date(1982, 6, day) for day in range(1, 5)]
-    run = start_batch_run(
-        session,
-        kind=CONTEXT_BATCH_KIND,
-        requested={"dates": [value.isoformat() for value in dates]},
-    )
-    run_context_batch(session, store=store, dates=dates, batch_run=run)
-    publish_enriched(session, store, date(1982, 7, 1), label="summary-enriched")
-    session.commit()
-    rebuild_coverage_index(session)
-    session.commit()
-
-    summary = coverage_summary(session)
-    assert summary.total_published == 5
-    assert summary.by_tier["context_only"] == 4
-    assert summary.by_tier["reviewed_enriched"] == 1
-    assert summary.with_recorded_event == 1
-    assert summary.earliest == date(1982, 6, 1)
-    assert summary.latest == date(1982, 7, 1)
-    assert summary.index_version >= 1
+    assert coverage_entry(session, date(1955, 1, 1)) is None
 
 
 @pytest.mark.integration
@@ -261,7 +202,7 @@ def test_rebuilding_is_idempotent_and_follows_supersession(
 
     rebuild_coverage_index(session)
     session.commit()
-    first = coverage_for_date(session, profile_date)
+    first = coverage_entry(session, profile_date)
     assert first is not None and first.publication_tier is PublicationTier.CONTEXT_ONLY
 
     rebuild_coverage_index(session)
@@ -283,7 +224,7 @@ def test_rebuilding_is_idempotent_and_follows_supersession(
     session.commit()
     rebuild_coverage_index(session)
     session.commit()
-    corrected = coverage_for_date(session, profile_date)
+    corrected = coverage_entry(session, profile_date)
     assert corrected is not None
     assert corrected.publication_tier is PublicationTier.REVIEWED_ENRICHED
 
@@ -304,69 +245,9 @@ def test_publication_updates_coverage_without_a_full_rebuild(
     run_context_batch(session, store=store, dates=[profile_date], batch_run=run)
     session.commit()
 
-    record = coverage_for_date(session, profile_date)
-    assert isinstance(record, CoverageRecord)
+    record = coverage_entry(session, profile_date)
+    assert record is not None
     assert record.publication_tier is PublicationTier.CONTEXT_ONLY
-
-
-@pytest.mark.integration
-def test_the_coverage_api_serves_richness_and_neighbours(
-    session: Session, tmp_path: Path, reviewed_un_wpp: None, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from fastapi.testclient import TestClient
-
-    from app import main
-    from app.database import get_session
-
-    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
-    context_dates = [date(1985, 1, day) for day in range(1, 4)]
-    run = start_batch_run(
-        session,
-        kind=CONTEXT_BATCH_KIND,
-        requested={"dates": [value.isoformat() for value in context_dates]},
-    )
-    run_context_batch(session, store=store, dates=context_dates, batch_run=run)
-    publish_enriched(session, store, date(1985, 2, 14), label="api-enriched")
-    session.commit()
-    rebuild_coverage_index(session, store=store)
-    session.commit()
-
-    def override_session() -> object:
-        yield session
-
-    main.app.dependency_overrides[get_session] = override_session
-    try:
-        client = TestClient(main.app)
-        summary = client.get("/api/v1/coverage")
-        detail = client.get("/api/v1/coverage/1985-01-02")
-        unindexed = client.get("/api/v1/coverage/1999-01-01")
-        out_of_range = client.get("/api/v1/coverage/1899-01-01")
-    finally:
-        main.app.dependency_overrides.clear()
-
-    assert summary.status_code == 200
-    body = summary.json()
-    assert body["total_published"] == 4
-    assert body["by_tier"]["context_only"] == 3
-    assert body["by_tier"]["reviewed_enriched"] == 1
-    assert body["with_recorded_event"] == 1
-    assert body["supported_range"] == {
-        "minimum": "1900-01-01",
-        "maximum": "2025-12-31",
-    }
-
-    assert detail.status_code == 200
-    record = detail.json()
-    assert record["publication_tier"] == "context_only"
-    assert record["has_recorded_event"] is False
-    assert record["sections"]["typical_day_in_this_year"] == 2
-    assert record["nearest_enriched_after"] == "1985-02-14"
-    assert record["nearest_recorded_event_after"] == "1985-02-14"
-
-    assert unindexed.status_code == 404
-    assert unindexed.json()["status"] == "coverage_not_indexed"
-    assert out_of_range.status_code == 404
-    assert out_of_range.json()["status"] == "date_out_of_supported_range"
 
 
 # --- Round 1 review findings (PR #43) ------------------------------------
@@ -436,7 +317,7 @@ def test_reconcile_repair_indexes_the_profile_it_completes(
 
     assert report.completed_pending + report.abandoned_pending >= 1
     if report.completed_pending:
-        record = coverage_for_date(session, profile_date)
+        record = coverage_entry(session, profile_date)
         assert record is not None, "repaired publication is absent from coverage"
         assert record.has_recorded_event is True
 
@@ -456,12 +337,12 @@ def test_republishing_identical_content_still_heals_a_missing_entry(
     session.commit()
     session.execute(delete_coverage_entries())
     session.commit()
-    assert coverage_for_date(session, profile_date) is None
+    assert coverage_entry(session, profile_date) is None
 
     publish_context_profile(session, store=store, profile_date=profile_date)
     session.commit()
 
-    assert coverage_for_date(session, profile_date) is not None
+    assert coverage_entry(session, profile_date) is not None
 
 
 @pytest.mark.integration
@@ -481,7 +362,7 @@ def test_rebuild_refuses_to_advertise_an_unreadable_artifact(
     session.commit()
     rebuild_coverage_index(session, store=store)
     session.commit()
-    assert coverage_for_date(session, profile_date) is not None
+    assert coverage_entry(session, profile_date) is not None
 
     for artifact in (tmp_path / "published").rglob("*.json"):
         artifact.unlink()
@@ -489,7 +370,7 @@ def test_rebuild_refuses_to_advertise_an_unreadable_artifact(
     result = rebuild_coverage_index(session, store=store)
     session.commit()
 
-    assert coverage_for_date(session, profile_date) is None
+    assert coverage_entry(session, profile_date) is None
     assert result.unreadable == [profile_date]
     assert result.indexed == 0
 
@@ -510,16 +391,15 @@ def test_publication_after_a_rebuild_keeps_the_index_generation(
     rebuild_coverage_index(session, store=store)
     rebuild_coverage_index(session, store=store)
     session.commit()
-    generation = coverage_summary(session).index_version
-    assert generation >= 2
+    generation = session.scalar(select(func.max(CoverageEntry.index_version)))
+    assert generation is not None and generation >= 2
 
     publish_context_profile(session, store=store, profile_date=second)
     session.commit()
 
-    record = coverage_for_date(session, second)
+    record = coverage_entry(session, second)
     assert record is not None
     assert record.index_version == generation
-    assert coverage_summary(session).index_version == generation
 
 
 @pytest.mark.integration
@@ -542,11 +422,11 @@ def test_review_status_reflects_recorded_review_not_evidence_presence(
     rebuild_coverage_index(session, store=store)
     session.commit()
 
-    context = coverage_for_date(session, context_date)
+    context = coverage_entry(session, context_date)
     assert context is not None
     assert context.review_status == "rule_selected"
 
-    unreviewed = coverage_for_date(session, unreviewed_date)
+    unreviewed = coverage_entry(session, unreviewed_date)
     assert unreviewed is not None
     assert unreviewed.has_recorded_event is True
     assert unreviewed.review_status == "unreviewed"
@@ -584,7 +464,7 @@ def test_a_human_editorial_decision_reads_as_reviewed(
     rebuild_coverage_index(session, store=store)
     session.commit()
 
-    record = coverage_for_date(session, profile_date)
+    record = coverage_entry(session, profile_date)
     assert record is not None
     assert record.review_status == "reviewed"
 
@@ -634,45 +514,6 @@ def test_rebuild_does_not_overwrite_a_newer_publication(
         )
     )
     assert indexed_version == 2, "rebuild indexed a superseded manifest"
-
-
-@pytest.mark.integration
-def test_the_summary_does_not_scale_with_the_archive(
-    session: Session, tmp_path: Path, reviewed_un_wpp: None
-) -> None:
-    """A constant-size public response must not load 27,759 JSONB blobs."""
-    from sqlalchemy import event
-
-    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
-    dates = [date(1989, 4, day) for day in range(1, 9)]
-    run = start_batch_run(
-        session,
-        kind=CONTEXT_BATCH_KIND,
-        requested={"dates": [value.isoformat() for value in dates]},
-    )
-    run_context_batch(session, store=store, dates=dates, batch_run=run)
-    session.commit()
-    rebuild_coverage_index(session, store=store)
-    session.commit()
-
-    statements: list[str] = []
-
-    def record(conn, cursor, statement, parameters, context, executemany):  # type: ignore[no-untyped-def]
-        statements.append(statement)
-
-    event.listen(session.get_bind(), "before_cursor_execute", record)
-    try:
-        summary = coverage_summary(session)
-    finally:
-        event.remove(session.get_bind(), "before_cursor_execute", record)
-
-    assert summary.total_published == len(dates)
-    assert summary.earliest == dates[0]
-    assert summary.latest == dates[-1]
-    assert len(statements) <= 3, statements
-    assert not any("coverage_entries.sections" in text for text in statements), (
-        "the summary loaded per-date section blobs"
-    )
 
 
 @pytest.mark.integration
@@ -726,33 +567,9 @@ def test_a_long_quality_grade_does_not_fail_publication(
     )
     session.commit()
 
-    record = coverage_for_date(session, profile_date)
+    record = coverage_entry(session, profile_date)
     assert record is not None
     assert record.quality_floor == grade
-
-
-def test_the_python_review_vocabulary_matches_the_shared_contract() -> None:
-    """The contract binds the API and the UI; a status the UI cannot name is
-    a status the API must not send."""
-    import re
-
-    from app.coverage import REVIEW_STATUSES
-
-    contract = (
-        Path(__file__).resolve().parents[3]
-        / "packages"
-        / "contracts"
-        / "src"
-        / "index.ts"
-    ).read_text(encoding="utf-8")
-    block = re.search(
-        r"export const COVERAGE_REVIEW_STATUSES = \[(.*?)\] as const;",
-        contract,
-        re.DOTALL,
-    )
-    assert block is not None, "contract does not declare coverage review statuses"
-    declared = tuple(re.findall(r'"([a-z_]+)"', block.group(1)))
-    assert declared == REVIEW_STATUSES
 
 
 @pytest.mark.integration
@@ -789,7 +606,7 @@ def test_a_blank_reviewer_is_not_a_human_review(
     rebuild_coverage_index(session, store=store)
     session.commit()
 
-    record = coverage_for_date(session, profile_date)
+    record = coverage_entry(session, profile_date)
     assert record is not None
     assert record.review_status == "unreviewed"
 
@@ -843,7 +660,7 @@ def test_a_rebuild_keeps_a_date_published_while_it_was_running(
 
     publish_context_profile(session, store=store, profile_date=published_mid_rebuild)
     session.commit()
-    assert coverage_for_date(session, published_mid_rebuild) is not None
+    assert coverage_entry(session, published_mid_rebuild) is not None
 
     monkeypatch.setattr(
         coverage_module, "latest_published_manifests", lambda _session: snapshot
@@ -851,7 +668,7 @@ def test_a_rebuild_keeps_a_date_published_while_it_was_running(
     report = rebuild_coverage_index(session, store=store)
     session.commit()
 
-    assert coverage_for_date(session, published_mid_rebuild) is not None, (
+    assert coverage_entry(session, published_mid_rebuild) is not None, (
         "the rebuild deleted a date published while it ran"
     )
     assert report.dropped == 0
@@ -945,7 +762,7 @@ def test_reconcile_repair_indexes_the_recovered_quality_floor(
         statement_evidence=evidence("first"),
     )
     session.commit()
-    before = coverage_for_date(session, profile_date)
+    before = coverage_entry(session, profile_date)
     assert before is not None
     assert before.quality_floor == "B"
 
@@ -973,7 +790,7 @@ def test_reconcile_repair_indexes_the_recovered_quality_floor(
     session.commit()
 
     if report.completed_pending:
-        record = coverage_for_date(session, profile_date)
+        record = coverage_entry(session, profile_date)
         assert record is not None
         assert record.quality_floor == "D", (
             "coverage kept the predecessor's grade after repair"
@@ -1028,7 +845,7 @@ def test_a_rebuild_does_not_hold_row_locks_for_the_whole_run(
         engine.dispose()
     session.commit()
 
-    assert coverage_for_date(session, dates[0]) is not None
+    assert coverage_entry(session, dates[0]) is not None
 
 
 @pytest.mark.integration
@@ -1065,7 +882,7 @@ def test_a_skipped_snapshot_date_is_rechecked_before_deletion(
     report = rebuild_coverage_index(session, store=store)
     session.commit()
 
-    assert coverage_for_date(session, profile_date) is not None, (
+    assert coverage_entry(session, profile_date) is not None, (
         "the rebuild deleted a date that was healthy by the time it was dropped"
     )
     assert report.dropped == 0
@@ -1121,7 +938,7 @@ def test_review_status_ignores_selections_for_unpublished_content(
     rebuild_coverage_index(session, store=store)
     session.commit()
 
-    record = coverage_for_date(session, profile_date)
+    record = coverage_entry(session, profile_date)
     assert record is not None
     assert record.review_status == "rule_selected", (
         "a selection for unpublished content upgraded the served profile"
@@ -1169,7 +986,7 @@ def test_coverage_follows_the_version_the_day_endpoint_serves(
     rebuild_coverage_index(session, store=store)
     session.commit()
 
-    record = coverage_for_date(session, profile_date)
+    record = coverage_entry(session, profile_date)
     assert record is not None, (
         "coverage dropped a date the day endpoint still serves"
     )

@@ -13,7 +13,7 @@ from app.batch_publication import (
     start_batch_run,
 )
 from app.config import get_settings
-from app.coverage import coverage_summary, rebuild_coverage_index
+from app.coverage import rebuild_coverage_index
 from app.database import SessionLocal
 from app.models import BatchRunStatus
 from app.services import LocalFilesystemPublishedProfileStore, reconcile_publications
@@ -167,16 +167,10 @@ def main() -> None:
                 ),
             )
             session.commit()
-            summary = coverage_summary(session)
-            tiers = " ".join(
-                f"{tier}={count}" for tier, count in sorted(summary.by_tier.items())
-            )
             print(
                 f"indexed={rebuild.indexed} dropped={rebuild.dropped} "
                 f"unreadable={len(rebuild.unreadable)} "
-                f"index_version={summary.index_version} "
-                f"total_published={summary.total_published} "
-                f"with_recorded_event={summary.with_recorded_event} {tiers}"
+                f"index_version={rebuild.index_version}"
             )
             for profile_date in rebuild.unreadable:
                 print(f"unreadable date={profile_date.isoformat()}")

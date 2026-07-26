@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import datetime as dtmod
 from datetime import date
 from typing import Annotated, Any, Literal
 from uuid import UUID
@@ -13,7 +12,6 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
-from app.coverage import CoverageReviewStatus, coverage_for_date, coverage_summary
 from app.database import get_session
 from app.governance import ReviewDecisionValue, record_claim_review
 from app.models import (
@@ -25,7 +23,6 @@ from app.models import (
     ProfileType,
     PublicationManifest,
     PublicationStatus,
-    PublicationTier,
     ResolvedClaimEvidence,
     ReviewTask,
     Source,
@@ -96,39 +93,6 @@ class SourceResponse(APIModel):
 
 class SourcesResponse(APIModel):
     sources: list[SourceResponse]
-
-
-class CoverageDateResponse(APIModel):
-    status: Literal["coverage"]
-    date: dtmod.date
-    profile_type: ProfileType
-    publication_tier: PublicationTier
-    has_recorded_event: bool
-    sections: dict[str, int]
-    quality_floor: str | None
-    review_status: CoverageReviewStatus
-    index_version: int
-    nearest_enriched_before: dtmod.date | None
-    nearest_enriched_after: dtmod.date | None
-    nearest_recorded_event_before: dtmod.date | None
-    nearest_recorded_event_after: dtmod.date | None
-
-
-class CoverageNotIndexedResponse(APIModel):
-    status: Literal["coverage_not_indexed"]
-    date: dtmod.date
-    detail: str
-
-
-class CoverageSummaryResponse(APIModel):
-    status: Literal["coverage_summary"]
-    total_published: int
-    by_tier: dict[str, int]
-    with_recorded_event: int
-    earliest: dtmod.date | None
-    latest: dtmod.date | None
-    index_version: int
-    supported_range: dict[str, str]
 
 
 class ProfileNotPublishedResponse(APIModel):
@@ -227,69 +191,6 @@ def sources(session: Annotated[Session, Depends(get_session)]) -> SourcesRespons
             )
             for row in rows
         ]
-    )
-
-
-@app.get("/api/v1/coverage", response_model=CoverageSummaryResponse)
-def coverage_overview(
-    session: Annotated[Session, Depends(get_session)],
-) -> CoverageSummaryResponse:
-    """How much of the archive is published, and how rich it is."""
-    summary = coverage_summary(session)
-    return CoverageSummaryResponse(
-        status="coverage_summary",
-        total_published=summary.total_published,
-        by_tier=summary.by_tier,
-        with_recorded_event=summary.with_recorded_event,
-        earliest=summary.earliest,
-        latest=summary.latest,
-        index_version=summary.index_version,
-        supported_range={
-            "minimum": PUBLIC_DATE_MIN.isoformat(),
-            "maximum": PUBLIC_DATE_MAX.isoformat(),
-        },
-    )
-
-
-@app.get("/api/v1/coverage/{profile_date}", response_model=None)
-def coverage_for_profile_date(
-    profile_date: dtmod.date,
-    session: Annotated[Session, Depends(get_session)],
-) -> JSONResponse | CoverageDateResponse:
-    """This date's richness, and the nearest dates worth travelling to."""
-    if profile_type_for_date(profile_date) is None:
-        out_of_range = DateOutOfSupportedRangeResponse(
-            status="date_out_of_supported_range",
-            minimum=PUBLIC_DATE_MIN,
-            maximum=PUBLIC_DATE_MAX,
-        )
-        return JSONResponse(
-            status_code=404, content=out_of_range.model_dump(mode="json")
-        )
-    record = coverage_for_date(session, profile_date)
-    if record is None:
-        not_indexed = CoverageNotIndexedResponse(
-            status="coverage_not_indexed",
-            date=profile_date,
-            detail="No published profile is indexed for this date.",
-        )
-        return JSONResponse(
-            status_code=404, content=not_indexed.model_dump(mode="json")
-        )
-    return CoverageDateResponse(
-        status="coverage",
-        date=record.profile_date,
-        profile_type=record.profile_type,
-        publication_tier=record.publication_tier,
-        has_recorded_event=record.has_recorded_event,
-        sections=record.sections,
-        quality_floor=record.quality_floor,
-        review_status=record.review_status,
-        index_version=record.index_version,
-        nearest_enriched_before=record.nearest_enriched_before,
-        nearest_enriched_after=record.nearest_enriched_after,
-        nearest_recorded_event_before=record.nearest_recorded_event_before,
-        nearest_recorded_event_after=record.nearest_recorded_event_after,
     )
 
 
