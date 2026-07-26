@@ -70,6 +70,7 @@ from app.services import (
     publish_day_profile,
     resolve_claim,
 )
+from app.ucdp import optional_annual_context
 
 __all__ = ["LocalFilesystemRawSourceStore"]
 
@@ -1496,6 +1497,41 @@ def ensure_annual_context_selections(
     return len(list(evidence))
 
 
+def _root_declined_for_date(
+    session: Session,
+    *,
+    profile_date: date,
+    evidence: Sequence[PublicationStatementEvidenceInput],
+) -> bool:
+    """Whether a reviewer has already declined this content for this date.
+
+    The standing rule exists to fill gaps a human was never going to visit
+    one date at a time. It must not undo the decisions of a human who did.
+    Where the latest decision on a root is anything other than a selection,
+    the content is omitted and the date publishes without it — respecting
+    the decision rather than failing the whole profile over an optional
+    section.
+    """
+    for item in evidence:
+        condition = (
+            EditorialSelection.resolved_claim_id == item.resolved_claim_id
+            if item.resolved_claim_id is not None
+            else EditorialSelection.derived_value_id == item.derived_value_id
+        )
+        latest = session.scalars(
+            select(EditorialSelection)
+            .where(
+                EditorialSelection.profile_date == profile_date,
+                EditorialSelection.section_key == _section_of(item.statement_path),
+                condition,
+            )
+            .order_by(EditorialSelection.decision_version.desc())
+        ).first()
+        if latest is not None and latest.status != EditorialSelectionStatus.SELECTED.value:
+            return True
+    return False
+
+
 def richer_published_profile(
     session: Session, *, profile_date: date
 ) -> DayProfile | None:
@@ -1541,25 +1577,60 @@ def publish_context_profile(
     content = build_un_wpp_profile_content(
         session, profile_date=profile_date, require_editorial_selection=False
     )
+
+    context_statements = list(content.context_statements)
+    # The conflict statement's index is where it will actually land, not a
+    # constant: it follows the demographic context statements, and a fixed
+    # index would mislabel provenance the moment that count changed.
+    conflict = optional_annual_context(
+        session,
+        year=profile_date.year,
+        statement_index=len(context_statements),
+    )
+    if conflict is not None and _root_declined_for_date(
+        session, profile_date=profile_date, evidence=conflict.evidence
+    ):
+        conflict = None
+    if conflict is not None:
+        context_statements.extend(conflict.statements)
+
+    evidence = list(content.evidence)
+    if conflict is not None:
+        evidence.extend(conflict.evidence)
     ensure_annual_context_selections(
-        session, profile_date=profile_date, evidence=content.evidence
+        session, profile_date=profile_date, evidence=evidence
     )
 
-    resolved_by_section: dict[str, set[UUID]] = {}
-    derived_by_section: dict[str, set[UUID]] = {}
-    for item in content.evidence:
-        section = _section_of(item.statement_path)
-        if item.resolved_claim_id is not None:
-            resolved_by_section.setdefault(section, set()).add(item.resolved_claim_id)
-        if item.derived_value_id is not None:
-            derived_by_section.setdefault(section, set()).add(item.derived_value_id)
-    assert_release_publication_eligible(
-        session,
-        source_release_id=content.source_release_id,
-        profile_date=profile_date,
-        resolved_root_ids_by_section=resolved_by_section,
-        derived_root_ids_by_section=derived_by_section,
-    )
+    # Each release answers for its own roots. Licensing, pipeline health and
+    # quality checks are properties of a release, so a profile resting on two
+    # of them must clear the gate twice rather than once.
+    evidence_by_release: dict[UUID, list[PublicationStatementEvidenceInput]] = {
+        content.source_release_id: list(content.evidence)
+    }
+    if conflict is not None:
+        evidence_by_release.setdefault(conflict.source_release_id, []).extend(
+            conflict.evidence
+        )
+    for release_id, items in evidence_by_release.items():
+        resolved_by_section: dict[str, set[UUID]] = {}
+        derived_by_section: dict[str, set[UUID]] = {}
+        for item in items:
+            section = _section_of(item.statement_path)
+            if item.resolved_claim_id is not None:
+                resolved_by_section.setdefault(section, set()).add(
+                    item.resolved_claim_id
+                )
+            if item.derived_value_id is not None:
+                derived_by_section.setdefault(section, set()).add(
+                    item.derived_value_id
+                )
+        assert_release_publication_eligible(
+            session,
+            source_release_id=release_id,
+            profile_date=profile_date,
+            resolved_root_ids_by_section=resolved_by_section,
+            derived_root_ids_by_section=derived_by_section,
+        )
 
     supported = {"typical_day_in_this_year", "wider_historical_context"}
     unsupported_reason = (
@@ -1568,7 +1639,7 @@ def publish_context_profile(
     sections: dict[str, list[dict[str, object]]] = {
         "recorded_on_this_date": [],
         "typical_day_in_this_year": list(content.typical_statements),
-        "wider_historical_context": list(content.context_statements),
+        "wider_historical_context": context_statements,
         "curated_claims": [],
         "derived_comparisons": [],
         "wonder_and_progress": [],
@@ -1594,11 +1665,13 @@ def publish_context_profile(
         profile_date=profile_date,
         profile_type=profile_type,
         payload=payload,
-        statement_evidence=content.evidence,
+        statement_evidence=evidence,
         methodology_id=content.methodology.id,
         force_new_version=force_new_version,
         manifest_metadata={
-            "source_release_ids": [str(content.source_release_id)],
+            "source_release_ids": [
+                str(release_id) for release_id in evidence_by_release
+            ],
             "editorial_rule": STANDING_ANNUAL_CONTEXT_RULE,
         },
     )

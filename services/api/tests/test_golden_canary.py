@@ -114,6 +114,7 @@ def _payload(
     *,
     profile_date: str = "1952-02-29",
     typical: list[dict[str, object]] | None = None,
+    context: list[dict[str, object]] | None = None,
     section_states: dict[str, object] | None = None,
 ) -> dict[str, object]:
     sections: dict[str, list[dict[str, object]]] = {
@@ -121,13 +122,15 @@ def _payload(
         "typical_day_in_this_year": (
             [_daily_statement()] if typical is None else typical
         ),
-        "wider_historical_context": [],
+        "wider_historical_context": list(context or []),
         "curated_claims": [],
         "derived_comparisons": [],
         "wonder_and_progress": [],
         "evidence_notes": [],
     }
     supported = {"recorded_on_this_date", "typical_day_in_this_year"}
+    if context:
+        supported.add("wider_historical_context")
     states: dict[str, object] = section_states or {
         key: (
             {"status": "available"}
@@ -670,3 +673,108 @@ def test_a_stale_canary_run_does_not_block_recovery(
     )
     assert selected is not None
     assert selected.id == current.id, "a stale run blocked a resumable one"
+
+
+def _conflict_statement(
+    *,
+    count: int = 17,
+    year: int = 1952,
+    text: str | None = None,
+    assignment: str | None = "period_context",
+    value: object = None,
+) -> dict[str, object]:
+    details: dict[str, object] = {
+        "title": f"State-based armed conflicts active in {year}",
+        "value": count if value is None else value,
+        "unit": "conflict-year records",
+        "data_status": "final",
+    }
+    if assignment is not None:
+        details["temporal_assignment"] = assignment
+    return {
+        "statement_id": f"ucdp-{year}-active-conflicts",
+        "statement": text
+        if text is not None
+        else (
+            f"UCDP/PRIO records {count} state-based armed conflicts as active "
+            f"at some point in {year}. This is annual context, not a count "
+            "for any single date in it."
+        ),
+        "details": details,
+    }
+
+
+class TestConflictContextValidation:
+    """The conflict statement appears on every date of its year (UC2), so
+    the failures that matter are it describing a different year, reading as
+    an event on the date, or claiming mortality it does not measure."""
+
+    def test_a_correct_conflict_statement_passes(self) -> None:
+        assert validate_context_payload(
+            _payload(context=[_conflict_statement()])
+        ) == []
+
+    def test_a_neighbouring_years_count_is_caught(self) -> None:
+        # The whole risk of year-general content: 1951's count published on
+        # a 1952 page reads as true and is not.
+        issues = validate_context_payload(
+            _payload(context=[_conflict_statement(year=1951)])
+        )
+        assert any("reports 1951" in issue for issue in issues), issues
+
+    def test_an_unmarked_conflict_statement_is_caught(self) -> None:
+        issues = validate_context_payload(
+            _payload(context=[_conflict_statement(assignment=None)])
+        )
+        assert any("period_context marker" in issue for issue in issues), issues
+
+    def test_prose_and_displayed_count_must_agree(self) -> None:
+        issues = validate_context_payload(
+            _payload(context=[_conflict_statement(count=17, value=8)])
+        )
+        assert any("prose says 17" in issue for issue in issues), issues
+
+    def test_a_prefix_count_does_not_pass_as_agreement(self) -> None:
+        # "5" is a substring of "53". A containment check would call this
+        # agreement; it is a profile understating a conflict count by 48.
+        issues = validate_context_payload(
+            _payload(context=[_conflict_statement(count=53, value=5)])
+        )
+        assert any("prose says 53" in issue for issue in issues), issues
+
+    def test_conflict_presence_may_not_be_stated_as_deaths(self) -> None:
+        # UCDP/PRIO annual records establish that a conflict was active, not
+        # how many it killed; battle-related deaths are a separate dataset
+        # covering a shorter span.
+        issues = validate_context_payload(
+            _payload(
+                context=[
+                    _conflict_statement(
+                        text=(
+                            "UCDP/PRIO records 17 state-based armed conflicts "
+                            "as active at some point in 1952, with 4,300 "
+                            "deaths. This is annual context, not a count for "
+                            "any single date in it."
+                        )
+                    )
+                ]
+            )
+        )
+        assert any("mortality terms" in issue for issue in issues), issues
+
+    def test_a_statement_that_omits_the_year_caveat_is_caught(self) -> None:
+        issues = validate_context_payload(
+            _payload(
+                context=[
+                    _conflict_statement(
+                        text=(
+                            "UCDP/PRIO records 17 state-based armed conflicts "
+                            "as active at some point in 1952."
+                        )
+                    )
+                ]
+            )
+        )
+        assert any(
+            "describes the year rather than this date" in issue for issue in issues
+        ), issues

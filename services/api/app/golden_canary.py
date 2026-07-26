@@ -39,6 +39,7 @@ from app.models import (
     PublicationBatchRun,
     PublicationManifest,
     PublicationTier,
+    TemporalAssignment,
 )
 from app.services import PublishedProfileStore
 from app.un_wpp import SUPPORTED_YEARS
@@ -46,6 +47,7 @@ from app.un_wpp import SUPPORTED_YEARS
 GOLDEN_CANARY_KIND = f"{CONTEXT_BATCH_KIND}:golden-canary"
 
 DAILY_EQUIVALENT_ASSIGNMENT = "uniform_period_allocation"
+PERIOD_CONTEXT_ASSIGNMENT = TemporalAssignment.PERIOD_CONTEXT.value
 #: Sections a context profile always fills. Declared available and empty,
 #: they tell a reader there is nothing when the pipeline simply produced
 #: nothing.
@@ -256,6 +258,126 @@ def validate_context_payload(payload: dict[str, Any]) -> list[str]:
                 "equivalent but carries no temporal_assignment marker",
             )
         )
+
+    for statement in _conflict_statements(sections):
+        issues.extend(
+            _validate_conflict_context(
+                statement, profile_date=profile_date, year=year
+            )
+        )
+    return issues
+
+
+#: How the annual conflict statement reads. Detection keys on the text
+#: rather than on the period_context marker, because the demographic context
+#: statements carry that marker too — keying on it would validate them
+#: against conflict rules and let an unmarked conflict statement through.
+CONFLICT_TEXT = "state-based armed conflicts"
+
+#: The UCDP/PRIO annual dataset establishes that a conflict was active, not
+#: how many people it killed. Battle-related deaths are a separate dataset
+#: with a shorter span, so mortality language here would claim evidence the
+#: statement does not rest on.
+CONFLICT_MORTALITY_WORDS = (
+    "deaths",
+    "died",
+    "killed",
+    "fatalities",
+    "casualties",
+)
+
+
+def _conflict_statements(sections: dict[str, Any]) -> list[dict[str, Any]]:
+    found: list[dict[str, Any]] = []
+    for statements in sections.values():
+        if not isinstance(statements, list):
+            continue
+        for statement in statements:
+            if not isinstance(statement, dict):
+                continue
+            if CONFLICT_TEXT in str(statement.get("statement", "")).lower():
+                found.append(statement)
+    return found
+
+
+def _validate_conflict_context(
+    statement: dict[str, Any], *, profile_date: str, year: int
+) -> list[str]:
+    """The annual conflict statement's honesty properties.
+
+    It appears on every date of its year, so the failure that matters is it
+    quietly describing a different year, or reading as something that
+    happened on this date.
+    """
+    issues: list[str] = []
+    statement_id = str(statement.get("statement_id", "?"))
+    text = str(statement.get("statement", ""))
+    details = statement.get("details")
+    details = details if isinstance(details, dict) else {}
+
+    if details.get("temporal_assignment") != PERIOD_CONTEXT_ASSIGNMENT:
+        issues.append(
+            _issue(
+                profile_date,
+                f"{statement_id} states annual conflict context without the "
+                "period_context marker",
+            )
+        )
+    if "not a count for any single date" not in text:
+        issues.append(
+            _issue(
+                profile_date,
+                f"{statement_id} does not tell the reader the count describes "
+                "the year rather than this date",
+            )
+        )
+
+    # Anchored so the year cannot match some other four-digit run in the
+    # sentence, and so a profile cannot carry a neighbouring year's count.
+    stated_year = re.search(r"active at some point in (\d{4})", text)
+    if stated_year is None:
+        issues.append(
+            _issue(profile_date, f"{statement_id} names no year for its count")
+        )
+    elif int(stated_year.group(1)) != year:
+        issues.append(
+            _issue(
+                profile_date,
+                f"{statement_id} reports {stated_year.group(1)} on a "
+                f"{year} profile",
+            )
+        )
+
+    # Anchored for the same reason a substring check is not enough: "5"
+    # appears inside "53".
+    stated_count = re.search(r"records (\d+) state-based armed conflicts", text)
+    if stated_count is None:
+        issues.append(
+            _issue(profile_date, f"{statement_id} states no conflict count")
+        )
+    else:
+        displayed = details.get("value")
+        if not isinstance(displayed, int) or displayed != int(
+            stated_count.group(1)
+        ):
+            issues.append(
+                _issue(
+                    profile_date,
+                    f"{statement_id} prose says {stated_count.group(1)} but "
+                    f"its displayed value is {displayed!r}",
+                )
+            )
+
+    lowered = text.lower()
+    for word in CONFLICT_MORTALITY_WORDS:
+        if word in lowered:
+            issues.append(
+                _issue(
+                    profile_date,
+                    f"{statement_id} describes conflict presence in mortality "
+                    f"terms ({word!r}); this dataset does not carry deaths",
+                )
+            )
     return issues
 
 
