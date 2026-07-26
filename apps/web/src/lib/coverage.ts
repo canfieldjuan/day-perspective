@@ -205,13 +205,15 @@ export function discoveryStateFor(
     return {
       kind: "on-enriched-date",
       hasDemographicContext,
-    hasPeriodContext,
+      hasPeriodContext,
       tier,
       before,
       after,
       closer,
       missingDirection: null,
-      hasAnyEnrichedDestination: false
+      // An enriched page still has somewhere to go when other enriched
+      // dates exist; only the sole enriched date has nowhere.
+      hasAnyEnrichedDestination
     };
   }
 
@@ -219,7 +221,7 @@ export function discoveryStateFor(
     return {
       kind: "both-directions",
       hasDemographicContext,
-    hasPeriodContext,
+      hasPeriodContext,
       tier,
       before,
       after,
@@ -233,7 +235,7 @@ export function discoveryStateFor(
     return {
       kind: "one-direction",
       hasDemographicContext,
-    hasPeriodContext,
+      hasPeriodContext,
       tier,
       before,
       after,

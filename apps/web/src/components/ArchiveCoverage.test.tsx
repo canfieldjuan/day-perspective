@@ -21,14 +21,16 @@ describe("ArchiveCoverage", () => {
 
     expect(
       screen.getByText(
-        /27,759 dates are published, from January 1, 1950 to December 31, 2025/
+        "27,759 dates are published, from January 1, 1950 to December 31, 2025."
       )
     ).toBeInTheDocument();
     expect(
-      screen.getByText(/One of them also carries a recorded event\./)
+      screen.getByText(/One carries a recorded event\./)
     ).toBeInTheDocument();
+    // Only what the aggregates prove: the tier breakdown, not a claim
+    // about what those dates contain.
     expect(
-      screen.getByText(/hold period context rather than something that happened/)
+      screen.getByText(/27,758 carry the annual context of their year/)
     ).toBeInTheDocument();
   });
 
@@ -46,7 +48,7 @@ describe("ArchiveCoverage", () => {
       <ArchiveCoverage summary={{ ...summary, with_recorded_event: 1234 }} />
     );
     expect(
-      screen.getByText(/1,234 of them also carry recorded events\./)
+      screen.getByText(/1,234 carry recorded events\./)
     ).toBeInTheDocument();
   });
 

@@ -116,9 +116,20 @@ export function describeEmptyIndex(state: DiscoveryState): string {
 }
 
 
-/** The landing page's disclosure of what the archive actually holds. */
+/**
+ * The landing page's disclosure, built only from aggregates the summary
+ * actually carries: the published total, the range, the tier breakdown and
+ * the recorded-event count.
+ *
+ * It deliberately does not say what the remaining dates contain. A
+ * `partially_enriched` profile can hold curated or comparison content and
+ * no period context at all, and the summary exposes no aggregate that
+ * would prove otherwise — so claiming it would be inventing a fact from a
+ * count.
+ */
 export function describeArchiveShape(summary: {
   total_published: number;
+  by_tier: Record<string, number>;
   with_recorded_event: number;
   earliest: string | null;
   latest: string | null;
@@ -129,23 +140,24 @@ export function describeArchiveShape(summary: {
           formatPublicDate(summary.latest) ?? summary.latest
         }`
       : "";
-  const count = summary.with_recorded_event;
-  // "annual context", not "demographic": the summary carries no section
-  // breakdown, and the ordinary profile holds period context alongside the
-  // demographic kind.
   const scale = `${summary.total_published.toLocaleString(
     "en-US"
-  )} dates are published${span}. Each carries the annual context of its year.`;
-  const caveat =
-    count === 0
+  )} dates are published${span}.`;
+
+  const contextOnly = summary.by_tier.context_only ?? 0;
+  const events = summary.with_recorded_event;
+  const eventSentence =
+    events === 0
       ? "No date yet carries a recorded event."
-      : count === 1
-        ? "One of them also carries a recorded event."
-        : `${count.toLocaleString("en-US")} of them also carry recorded events.`;
-  return {
-    scale,
-    caveat: `${caveat} The rest hold period context rather than something that happened on that day.`
-  };
+      : events === 1
+        ? "One carries a recorded event."
+        : `${events.toLocaleString("en-US")} carry recorded events.`;
+  const contextSentence =
+    contextOnly === 0
+      ? ""
+      : ` ${contextOnly.toLocaleString("en-US")} carry the annual context of their year and no recorded event.`;
+
+  return { scale, caveat: `${eventSentence}${contextSentence}` };
 }
 
 /** Explains a direction with no enriched date, for the discovery nav. */

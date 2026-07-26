@@ -243,3 +243,32 @@ describe("section counts are validated, not assumed", () => {
     expect(isCoverageResponse({ ...base, sections: {} }, "1983-10-12")).toBe(true);
   });
 });
+
+describe("discovery from an enriched page", () => {
+  it("keeps its controls when other enriched dates exist", () => {
+    const state = discoveryStateFor(
+      {
+        ...base,
+        publication_tier: "reviewed_enriched",
+        has_recorded_event: true,
+        nearest_enriched_before: "1964-03-27"
+      },
+      "1983-10-12"
+    );
+    expect(state.kind).toBe("on-enriched-date");
+    expect(state.hasAnyEnrichedDestination).toBe(true);
+  });
+
+  it("has nowhere to go from the only enriched date", () => {
+    const state = discoveryStateFor(
+      {
+        ...base,
+        publication_tier: "reviewed_enriched",
+        has_recorded_event: true
+      },
+      "1964-03-27"
+    );
+    expect(state.kind).toBe("on-enriched-date");
+    expect(state.hasAnyEnrichedDestination).toBe(false);
+  });
+});
