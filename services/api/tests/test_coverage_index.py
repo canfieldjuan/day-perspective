@@ -822,3 +822,186 @@ def test_a_transiently_unreadable_new_date_is_still_indexed(
     )
     assert report.unreadable == []
     assert report.indexed == 1
+
+
+# --- Coverage read API (slice AA3b) --------------------------------------
+
+
+@pytest.mark.integration
+def test_nearest_enriched_skips_the_sea_of_context_profiles(
+    session: Session, tmp_path: Path, reviewed_un_wpp: None
+) -> None:
+    """Stepping day by day through near-identical context pages is exactly
+    what this index exists to prevent."""
+    from app.coverage import coverage_for_date
+
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+    context_dates = [date(1981, 3, day) for day in range(1, 11)]
+    run = start_batch_run(
+        session,
+        kind=CONTEXT_BATCH_KIND,
+        requested={"dates": [value.isoformat() for value in context_dates]},
+    )
+    run_context_batch(session, store=store, dates=context_dates, batch_run=run)
+    publish_enriched(session, store, date(1981, 3, 20), label="nearest-after")
+    publish_enriched(session, store, date(1981, 2, 10), label="nearest-before")
+    session.commit()
+    rebuild_coverage_index(session, store=store)
+    session.commit()
+
+    record = coverage_for_date(session, date(1981, 3, 5))
+
+    assert record is not None
+    assert record.nearest_enriched_after == date(1981, 3, 20)
+    assert record.nearest_enriched_before == date(1981, 2, 10)
+    assert record.nearest_recorded_event_after == date(1981, 3, 20)
+    assert record.nearest_recorded_event_before == date(1981, 2, 10)
+
+
+@pytest.mark.integration
+def test_the_summary_reports_the_shape_of_the_archive(
+    session: Session, tmp_path: Path, reviewed_un_wpp: None
+) -> None:
+    from app.coverage import coverage_summary
+
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+    context_dates = [date(1982, 5, day) for day in range(1, 4)]
+    run = start_batch_run(
+        session,
+        kind=CONTEXT_BATCH_KIND,
+        requested={"dates": [value.isoformat() for value in context_dates]},
+    )
+    run_context_batch(session, store=store, dates=context_dates, batch_run=run)
+    publish_enriched(session, store, date(1982, 6, 1), label="summary-enriched")
+    session.commit()
+    rebuild_coverage_index(session, store=store)
+    session.commit()
+
+    summary = coverage_summary(session)
+
+    assert summary.total_published == 4
+    assert summary.by_tier["context_only"] == 3
+    assert summary.by_tier["reviewed_enriched"] == 1
+    assert summary.with_recorded_event == 1
+    assert summary.earliest == date(1982, 5, 1)
+    assert summary.latest == date(1982, 6, 1)
+
+
+@pytest.mark.integration
+def test_the_summary_does_not_scale_with_the_archive(
+    session: Session, tmp_path: Path, reviewed_un_wpp: None
+) -> None:
+    """A constant-size public response must not load 27,759 JSONB blobs."""
+    from sqlalchemy import event
+
+    from app.coverage import coverage_summary
+
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+    dates = [date(1989, 4, day) for day in range(1, 9)]
+    run = start_batch_run(
+        session,
+        kind=CONTEXT_BATCH_KIND,
+        requested={"dates": [value.isoformat() for value in dates]},
+    )
+    run_context_batch(session, store=store, dates=dates, batch_run=run)
+    session.commit()
+    rebuild_coverage_index(session, store=store)
+    session.commit()
+
+    statements: list[str] = []
+
+    def record(conn, cursor, statement, parameters, context, executemany):  # type: ignore[no-untyped-def]
+        statements.append(statement)
+
+    event.listen(session.get_bind(), "before_cursor_execute", record)
+    try:
+        summary = coverage_summary(session)
+    finally:
+        event.remove(session.get_bind(), "before_cursor_execute", record)
+
+    assert summary.total_published == len(dates)
+    assert len(statements) <= 3, statements
+    assert not any("coverage_entries.sections" in text for text in statements), (
+        "the summary loaded per-date section blobs"
+    )
+
+
+@pytest.mark.integration
+def test_the_coverage_api_serves_richness_and_neighbours(
+    session: Session, tmp_path: Path, reviewed_un_wpp: None
+) -> None:
+    from fastapi.testclient import TestClient
+
+    from app.database import get_session
+    from app.main import app
+
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+    context_date = date(1983, 4, 4)
+    enriched_date = date(1983, 4, 9)
+    run = start_batch_run(
+        session,
+        kind=CONTEXT_BATCH_KIND,
+        requested={"dates": [context_date.isoformat()]},
+    )
+    run_context_batch(session, store=store, dates=[context_date], batch_run=run)
+    publish_enriched(session, store, enriched_date, label="api-enriched")
+    session.commit()
+    rebuild_coverage_index(session, store=store)
+    session.commit()
+
+    app.dependency_overrides[get_session] = lambda: session
+    try:
+        client = TestClient(app)
+        detail = client.get(f"/api/v1/coverage/{context_date.isoformat()}")
+        summary = client.get("/api/v1/coverage")
+        absent = client.get("/api/v1/coverage/1955-01-01")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert detail.status_code == 200
+    body = detail.json()
+    assert body["status"] == "coverage"
+    assert body["publication_tier"] == "context_only"
+    assert body["has_recorded_event"] is False
+    assert body["sections"]["typical_day_in_this_year"] == 2
+    # The point of the endpoint: where to go from a context-only date.
+    assert body["nearest_enriched_after"] == enriched_date.isoformat()
+    assert body["nearest_recorded_event_after"] == enriched_date.isoformat()
+
+    assert summary.status_code == 200
+    shape = summary.json()
+    assert shape["status"] == "coverage_summary"
+    assert shape["total_published"] == 2
+    assert shape["with_recorded_event"] == 1
+    assert shape["supported_range"] == {
+        "minimum": "1900-01-01",
+        "maximum": "2025-12-31",
+    }
+
+    # An unpublished date is absent from the index, never an empty profile.
+    assert absent.status_code == 404
+    assert absent.json()["status"] == "coverage_not_indexed"
+
+
+def test_the_coverage_endpoints_publish_their_schemas() -> None:
+    """response_model=None silently strips an endpoint from OpenAPI, so the
+    Python response model can drift from the shared contract without any
+    consumer noticing."""
+    from app.main import app
+
+    paths = app.openapi()["paths"]
+
+    def schema_ref(path: str, code: str) -> str:
+        response = paths[path]["get"]["responses"][code]
+        ref = response["content"]["application/json"]["schema"].get("$ref", "")
+        return str(ref)
+
+    assert schema_ref("/api/v1/coverage", "200").endswith("CoverageSummaryResponse")
+    assert schema_ref("/api/v1/coverage/{profile_date}", "200").endswith(
+        "CoverageDateResponse"
+    )
+    # The absent-date shape is part of the contract too: a client must be
+    # able to tell "not indexed" from "indexed and empty".
+    assert schema_ref("/api/v1/coverage/{profile_date}", "404").endswith(
+        "CoverageNotIndexedResponse"
+    )

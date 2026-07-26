@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime as dtmod
 from datetime import date
 from typing import Annotated, Any, Literal
 from uuid import UUID
@@ -12,6 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
+from app.coverage import coverage_for_date, coverage_summary
 from app.database import get_session
 from app.governance import ReviewDecisionValue, record_claim_review
 from app.models import (
@@ -23,6 +25,7 @@ from app.models import (
     ProfileType,
     PublicationManifest,
     PublicationStatus,
+    PublicationTier,
     ResolvedClaimEvidence,
     ReviewTask,
     Source,
@@ -93,6 +96,35 @@ class SourceResponse(APIModel):
 
 class SourcesResponse(APIModel):
     sources: list[SourceResponse]
+
+
+class CoverageDateResponse(APIModel):
+    status: Literal["coverage"]
+    date: dtmod.date
+    profile_type: ProfileType
+    publication_tier: PublicationTier
+    has_recorded_event: bool
+    sections: dict[str, int]
+    nearest_enriched_before: dtmod.date | None
+    nearest_enriched_after: dtmod.date | None
+    nearest_recorded_event_before: dtmod.date | None
+    nearest_recorded_event_after: dtmod.date | None
+
+
+class CoverageNotIndexedResponse(APIModel):
+    status: Literal["coverage_not_indexed"]
+    date: dtmod.date
+    detail: str
+
+
+class CoverageSummaryResponse(APIModel):
+    status: Literal["coverage_summary"]
+    total_published: int
+    by_tier: dict[str, int]
+    with_recorded_event: int
+    earliest: dtmod.date | None
+    latest: dtmod.date | None
+    supported_range: dict[str, str]
 
 
 class ProfileNotPublishedResponse(APIModel):
@@ -191,6 +223,64 @@ def sources(session: Annotated[Session, Depends(get_session)]) -> SourcesRespons
             )
             for row in rows
         ]
+    )
+
+
+@app.get("/api/v1/coverage", response_model=CoverageSummaryResponse)
+def read_coverage_summary(
+    session: Annotated[Session, Depends(get_session)],
+) -> CoverageSummaryResponse:
+    """The archive's shape, so the interface can disclose it honestly."""
+    summary = coverage_summary(session)
+    return CoverageSummaryResponse(
+        status="coverage_summary",
+        total_published=summary.total_published,
+        by_tier=summary.by_tier,
+        with_recorded_event=summary.with_recorded_event,
+        earliest=summary.earliest,
+        latest=summary.latest,
+        supported_range={
+            "minimum": PUBLIC_DATE_MIN.isoformat(),
+            "maximum": PUBLIC_DATE_MAX.isoformat(),
+        },
+    )
+
+
+@app.get(
+    "/api/v1/coverage/{profile_date}",
+    response_model=CoverageDateResponse,
+    responses={404: {"model": CoverageNotIndexedResponse}},
+)
+def read_coverage_for_date(
+    profile_date: date,
+    session: Annotated[Session, Depends(get_session)],
+) -> CoverageDateResponse | JSONResponse:
+    """One date's richness, and where the nearest richer dates are.
+
+    A date with no published profile is absent from the index and answered
+    404, never as a profile that exists and holds nothing.
+    """
+    record = coverage_for_date(session, profile_date)
+    if record is None:
+        return JSONResponse(
+            status_code=404,
+            content=CoverageNotIndexedResponse(
+                status="coverage_not_indexed",
+                date=profile_date,
+                detail="No published profile has been indexed for this date.",
+            ).model_dump(mode="json"),
+        )
+    return CoverageDateResponse(
+        status="coverage",
+        date=record.profile_date,
+        profile_type=record.profile_type,
+        publication_tier=record.publication_tier,
+        has_recorded_event=record.has_recorded_event,
+        sections=record.sections,
+        nearest_enriched_before=record.nearest_enriched_before,
+        nearest_enriched_after=record.nearest_enriched_after,
+        nearest_recorded_event_before=record.nearest_recorded_event_before,
+        nearest_recorded_event_after=record.nearest_recorded_event_after,
     )
 
 

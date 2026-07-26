@@ -25,6 +25,7 @@ from app.models import (
     PublicationManifest,
     PublicationStatementEvidence,
     PublicationStatus,
+    PublicationTier,
 )
 from app.services import PublishedProfileStore, _acquire_publication_lock
 
@@ -38,6 +39,32 @@ SECTION_KEYS = (
     "evidence_notes",
 )
 RECORDED_SECTION = "recorded_on_this_date"
+
+
+@dataclass(frozen=True)
+class CoverageRecord:
+    """One date's richness, plus where the nearest richer dates lie."""
+
+    profile_date: date
+    profile_type: ProfileType
+    publication_tier: PublicationTier
+    has_recorded_event: bool
+    sections: dict[str, int]
+    nearest_enriched_before: date | None = None
+    nearest_enriched_after: date | None = None
+    nearest_recorded_event_before: date | None = None
+    nearest_recorded_event_after: date | None = None
+
+
+@dataclass
+class CoverageSummary:
+    """The shape of the archive: a constant-size answer about a large thing."""
+
+    total_published: int = 0
+    by_tier: dict[str, int] = field(default_factory=dict)
+    with_recorded_event: int = 0
+    earliest: date | None = None
+    latest: date | None = None
 
 
 @dataclass
@@ -338,3 +365,107 @@ def coverage_entry(session: Session, profile_date: date) -> CoverageEntry | None
     return session.scalar(
         select(CoverageEntry).where(CoverageEntry.profile_date == profile_date)
     )
+
+
+def _neighbour(
+    session: Session,
+    *,
+    profile_date: date,
+    after: bool,
+    require_recorded_event: bool,
+) -> date | None:
+    """The nearest date in one direction that offers more than context.
+
+    This is the query the whole index exists for: without it, a reader on a
+    context-only date can only step day by day through near-identical pages
+    to find out whether anything else is there.
+    """
+    condition = (
+        CoverageEntry.profile_date > profile_date
+        if after
+        else CoverageEntry.profile_date < profile_date
+    )
+    statement = select(CoverageEntry.profile_date).where(condition)
+    if require_recorded_event:
+        statement = statement.where(CoverageEntry.has_recorded_event.is_(True))
+    else:
+        statement = statement.where(
+            CoverageEntry.publication_tier != PublicationTier.CONTEXT_ONLY
+        )
+    statement = statement.order_by(
+        CoverageEntry.profile_date.asc()
+        if after
+        else CoverageEntry.profile_date.desc()
+    ).limit(1)
+    return session.scalar(statement)
+
+
+def coverage_for_date(session: Session, profile_date: date) -> CoverageRecord | None:
+    """One date's record, or None when the date is not indexed.
+
+    None means no published profile, never an empty one: a date the archive
+    does not hold must not be described as a date holding nothing.
+    """
+    entry = coverage_entry(session, profile_date)
+    if entry is None:
+        return None
+    return CoverageRecord(
+        profile_date=entry.profile_date,
+        profile_type=entry.profile_type,
+        publication_tier=entry.publication_tier,
+        has_recorded_event=entry.has_recorded_event,
+        sections=dict(entry.sections or {}),
+        nearest_enriched_before=_neighbour(
+            session,
+            profile_date=profile_date,
+            after=False,
+            require_recorded_event=False,
+        ),
+        nearest_enriched_after=_neighbour(
+            session,
+            profile_date=profile_date,
+            after=True,
+            require_recorded_event=False,
+        ),
+        nearest_recorded_event_before=_neighbour(
+            session,
+            profile_date=profile_date,
+            after=False,
+            require_recorded_event=True,
+        ),
+        nearest_recorded_event_after=_neighbour(
+            session,
+            profile_date=profile_date,
+            after=True,
+            require_recorded_event=True,
+        ),
+    )
+
+
+def coverage_summary(session: Session) -> CoverageSummary:
+    """Aggregate in the database: this response is constant-size, and the
+    archive it describes is not."""
+    summary = CoverageSummary()
+    summary.by_tier = dict.fromkeys((tier.value for tier in PublicationTier), 0)
+    totals = session.execute(
+        select(
+            func.count(CoverageEntry.profile_date),
+            func.count(CoverageEntry.profile_date).filter(
+                CoverageEntry.has_recorded_event.is_(True)
+            ),
+            func.min(CoverageEntry.profile_date),
+            func.max(CoverageEntry.profile_date),
+        )
+    ).one()
+    summary.total_published = totals[0] or 0
+    summary.with_recorded_event = totals[1] or 0
+    summary.earliest = totals[2]
+    summary.latest = totals[3]
+    for tier, count in session.execute(
+        select(
+            CoverageEntry.publication_tier,
+            func.count(CoverageEntry.profile_date),
+        ).group_by(CoverageEntry.publication_tier)
+    ):
+        summary.by_tier[tier.value] = count
+    return summary
