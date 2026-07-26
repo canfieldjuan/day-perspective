@@ -114,3 +114,48 @@ export function describeEmptyIndex(state: DiscoveryState): string {
       : `You can continue chronologically, choose another date, or explore the available ${held}.`;
   return `No enriched dates are currently available from this archive index. ${alternatives}`;
 }
+
+
+/** The landing page's disclosure of what the archive actually holds. */
+export function describeArchiveShape(summary: {
+  total_published: number;
+  with_recorded_event: number;
+  earliest: string | null;
+  latest: string | null;
+}): { scale: string; caveat: string } {
+  const span =
+    summary.earliest && summary.latest
+      ? `, from ${formatPublicDate(summary.earliest) ?? summary.earliest} to ${
+          formatPublicDate(summary.latest) ?? summary.latest
+        }`
+      : "";
+  const count = summary.with_recorded_event;
+  // "annual context", not "demographic": the summary carries no section
+  // breakdown, and the ordinary profile holds period context alongside the
+  // demographic kind.
+  const scale = `${summary.total_published.toLocaleString(
+    "en-US"
+  )} dates are published${span}. Each carries the annual context of its year.`;
+  const caveat =
+    count === 0
+      ? "No date yet carries a recorded event."
+      : count === 1
+        ? "One of them also carries a recorded event."
+        : `${count.toLocaleString("en-US")} of them also carry recorded events.`;
+  return {
+    scale,
+    caveat: `${caveat} The rest hold period context rather than something that happened on that day.`
+  };
+}
+
+/** Explains a direction with no enriched date, for the discovery nav. */
+export function describeNavAbsence(
+  missingDirection: "before" | "after" | null,
+  monument: string
+): string {
+  if (missingDirection === null) {
+    return "";
+  }
+  const side = missingDirection === "after" ? "after" : "before";
+  return `No enriched date is currently published ${side} ${monument}.`;
+}

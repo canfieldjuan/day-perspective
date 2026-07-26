@@ -2,7 +2,8 @@ import {
   DAY_PROFILE_SECTION_KEYS,
   PUBLICATION_TIERS,
   type CoverageDateResponse,
-  type PublicationTier
+  type PublicationTier,
+  type RandomEnrichedResponse
 } from "@day-perspective/contracts";
 
 import { describeDistance, distanceBand, type DistanceBand } from "./coverage-distance";
@@ -116,6 +117,12 @@ export interface DiscoveryState {
   /** Named so the interface can explain an absence instead of disabling a
    * control with no reason given. */
   missingDirection: "before" | "after" | null;
+  /**
+   * Gates the Random enriched control. Removed from the previous slice as
+   * orphaned; it returns here with the control that reads it, because a
+   * button leading nowhere is not an affordance.
+   */
+  hasAnyEnrichedDestination: boolean;
 }
 
 function destination(
@@ -159,6 +166,7 @@ export function discoveryStateFor(
       kind: "unknown",
       hasDemographicContext: false,
       hasPeriodContext: false,
+      hasAnyEnrichedDestination: false,
       tier: null,
       before: null,
       after: null,
@@ -170,6 +178,10 @@ export function discoveryStateFor(
   const sections = coverage.sections ?? {};
   const hasDemographicContext = (sections.typical_day_in_this_year ?? 0) > 0;
   const hasPeriodContext = (sections.wider_historical_context ?? 0) > 0;
+
+  const hasAnyEnrichedDestination =
+    coverage.nearest_enriched_before !== null ||
+    coverage.nearest_enriched_after !== null;
 
   const before = destination(
     date,
@@ -198,7 +210,8 @@ export function discoveryStateFor(
       before,
       after,
       closer,
-      missingDirection: null
+      missingDirection: null,
+      hasAnyEnrichedDestination: false
     };
   }
 
@@ -211,7 +224,8 @@ export function discoveryStateFor(
       before,
       after,
       closer,
-      missingDirection: null
+      missingDirection: null,
+      hasAnyEnrichedDestination
     };
   }
 
@@ -224,7 +238,8 @@ export function discoveryStateFor(
       before,
       after,
       closer,
-      missingDirection: before === null ? "before" : "after"
+      missingDirection: before === null ? "before" : "after",
+      hasAnyEnrichedDestination
     };
   }
 
@@ -236,6 +251,40 @@ export function discoveryStateFor(
     before: null,
     after: null,
     closer: null,
-    missingDirection: null
+    missingDirection: null,
+    hasAnyEnrichedDestination: false
   };
+}
+
+
+/** Validated against the shared contract rather than a local status check. */
+function isRandomEnriched(payload: unknown): payload is RandomEnrichedResponse {
+  const record = asRecord(payload);
+  return (
+    record !== undefined &&
+    record.status === "enriched_date" &&
+    typeof record.date === "string" &&
+    isSupportedPublicDate(record.date)
+  );
+}
+
+/**
+ * Resolve a random enriched date through the same-origin proxy, or null
+ * when the archive holds none. Null means hide the control: offering a
+ * journey to nowhere is worse than offering nothing.
+ */
+export async function randomEnrichedDate(): Promise<string | null> {
+  try {
+    const response = await fetch("/api/coverage/enriched/random", {
+      cache: "no-store",
+      headers: { Accept: "application/json" }
+    });
+    if (!response.ok) {
+      return null;
+    }
+    const payload: unknown = await response.json();
+    return isRandomEnriched(payload) ? payload.date : null;
+  } catch {
+    return null;
+  }
 }
