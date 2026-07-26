@@ -1,8 +1,7 @@
 import {
   PUBLICATION_TIERS,
   type CoverageDateResponse,
-  type PublicationTier,
-  type RandomEnrichedResponse
+  type PublicationTier
 } from "@day-perspective/contracts";
 
 import { describeDistance, distanceBand, type DistanceBand } from "./coverage-distance";
@@ -196,37 +195,4 @@ export function discoveryStateFor(
     missingDirection: null,
     hasAnyEnrichedDestination: false
   };
-}
-
-
-/** Validated against the shared contract rather than a local status check. */
-function isRandomEnriched(payload: unknown): payload is RandomEnrichedResponse {
-  const record = asRecord(payload);
-  return (
-    record !== undefined &&
-    record.status === "enriched_date" &&
-    typeof record.date === "string" &&
-    isSupportedPublicDate(record.date)
-  );
-}
-
-/**
- * Resolve a random enriched date through the same-origin proxy, or null
- * when the archive holds none. Null means "hide the control": offering a
- * journey to nowhere is worse than offering nothing.
- */
-export async function randomEnrichedDate(): Promise<string | null> {
-  try {
-    const response = await fetch("/api/coverage/enriched/random", {
-      cache: "no-store",
-      headers: { Accept: "application/json" }
-    });
-    if (!response.ok) {
-      return null;
-    }
-    const payload: unknown = await response.json();
-    return isRandomEnriched(payload) ? payload.date : null;
-  } catch {
-    return null;
-  }
 }

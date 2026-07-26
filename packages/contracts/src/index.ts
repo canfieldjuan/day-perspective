@@ -150,22 +150,6 @@ export interface CoverageSummaryResponse {
   supported_range: { minimum: string; maximum: string };
 }
 
-/**
- * Random enriched-date discovery. Answered only when the archive actually
- * holds a date richer than annual context; the absence case is explicit so
- * the interface can hide the control rather than offer a journey to
- * nowhere.
- */
-export interface RandomEnrichedResponse {
-  status: "enriched_date";
-  date: string;
-}
-
-export interface NoEnrichedDatesResponse {
-  status: "no_enriched_dates";
-  detail: string;
-}
-
 export function profileTypeForDate(value: string): ProfileType | undefined {
   if (value < PUBLIC_DATE_MIN || value > PUBLIC_DATE_MAX) {
     return undefined;

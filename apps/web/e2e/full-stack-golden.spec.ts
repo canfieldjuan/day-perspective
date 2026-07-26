@@ -74,11 +74,8 @@ test("an ordinary context-only date is honest about what it holds", async ({
     "No reviewed enriched date is currently published after October 12, 1983."
   );
 
-  // Chronological navigation keeps its meaning alongside discovery.
+  // Chronological navigation is untouched by this slice.
   await expect(
     page.getByRole("navigation", { name: "Date navigation" })
-  ).toBeVisible();
-  await expect(
-    page.getByRole("navigation", { name: "Evidence discovery" })
   ).toBeVisible();
 });

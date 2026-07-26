@@ -10,7 +10,6 @@ import {
 } from "@/src/lib/coverage";
 import { formatPublicDate } from "@/src/lib/date";
 import { CoverageDiscovery } from "./CoverageDiscovery";
-import { EnrichedNavigation } from "./EnrichedNavigation";
 
 /**
  * Everything the coverage index has to say about this date.
@@ -72,7 +71,6 @@ export function CoverageSection({ date }: { date: string }) {
         </p>
       ) : null}
       <CoverageDiscovery date={date} state={state} />
-      <EnrichedNavigation date={date} state={state} />
     </>
   );
 }

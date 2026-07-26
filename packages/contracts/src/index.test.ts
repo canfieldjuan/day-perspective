@@ -1,9 +1,5 @@
 import { describe, expect, it } from "vitest";
 
-import type {
-  NoEnrichedDatesResponse,
-  RandomEnrichedResponse
-} from "./index";
 import { PUBLICATION_TIERS, profileTypeForDate } from "./index";
 
 describe("profileTypeForDate", () => {
@@ -24,20 +20,5 @@ describe("publication tiers", () => {
       "partially_enriched",
       "reviewed_enriched"
     ]);
-  });
-});
-
-describe("random enriched discovery", () => {
-  it("keeps the absence case explicit so the control can be hidden", () => {
-    const found: RandomEnrichedResponse = {
-      status: "enriched_date",
-      date: "1964-03-27"
-    };
-    const absent: NoEnrichedDatesResponse = {
-      status: "no_enriched_dates",
-      detail: "No enriched dates are published."
-    };
-    expect(found.status).toBe("enriched_date");
-    expect(absent.status).toBe("no_enriched_dates");
   });
 });

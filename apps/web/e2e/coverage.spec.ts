@@ -136,27 +136,6 @@ test("both directions are offered without preselecting either", async ({
   await expect(page.getByRole("link", { name: "Go later" })).toBeVisible();
 });
 
-test("chronological and discovery navigation stay separate families", async ({
-  page
-}) => {
-  await arrive(page, "1983-10-12", coverageBody("1983-10-12", "1964-03-27", null));
-
-  const chronological = page.getByRole("navigation", { name: "Date navigation" });
-  const discovery = page.getByRole("navigation", { name: "Evidence discovery" });
-  await expect(chronological).toBeVisible();
-  await expect(discovery).toBeVisible();
-
-  // The existing random control keeps its meaning and its label.
-  await expect(chronological.getByRole("button", { name: "Random day" })).toBeVisible();
-  await expect(
-    discovery.getByRole("button", { name: "Random enriched date" })
-  ).toBeVisible();
-  // Day steps remain day steps.
-  await expect(
-    chronological.getByRole("link", { name: /Previous day, October 11, 1983/ })
-  ).toBeVisible();
-});
-
 test("an archive with no enriched dates offers no journey to nowhere", async ({
   page
 }) => {
@@ -165,10 +144,6 @@ test("an archive with no enriched dates offers no journey to nowhere", async ({
   await expect(page.getByTestId("coverage-discovery")).toContainText(
     "No reviewed enriched dates are currently available from this archive index."
   );
-  await expect(page.getByTestId("enriched-nav")).toHaveCount(0);
-  await expect(
-    page.getByRole("button", { name: "Random enriched date" })
-  ).toHaveCount(0);
 });
 
 test("unreadable coverage claims nothing about the archive", async ({ page }) => {
