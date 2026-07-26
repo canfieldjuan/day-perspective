@@ -798,13 +798,18 @@ def build_ucdp_annual_profile_content(
     )
     if release is None:
         raise ValueError("UCDP annual release has not been ingested.")
-    current_claims = [
-        claim
-        for claim in session.scalars(
-            select(Claim).where(Claim.source_release_id == release.id)
+    # Filtered in the database rather than in Python. A release covering
+    # 1946-2025 holds thousands of records, and this now runs once per
+    # published date: loading them all to keep one year's worth cost ~50x
+    # what the indexed comparison does.
+    current_claims = list(
+        session.scalars(
+            select(Claim).where(
+                Claim.source_release_id == release.id,
+                Claim.assertion_json["year"].astext == str(year),
+            )
         )
-        if str((claim.assertion_json or {}).get("year")) == str(year)
-    ]
+    )
     if not current_claims:
         # Named rather than counted as zero: an absent year is not a year
         # without conflicts.
@@ -1029,13 +1034,15 @@ def optional_annual_context(
         return None
     # Mirrors the builder's own year filter, so "covered" here and "usable"
     # there cannot drift apart into a silent skip.
-    covered = any(
-        str((claim.assertion_json or {}).get("year")) == str(year)
-        for claim in session.scalars(
-            select(Claim).where(Claim.source_release_id == release.id)
+    covered = session.scalar(
+        select(Claim.id)
+        .where(
+            Claim.source_release_id == release.id,
+            Claim.assertion_json["year"].astext == str(year),
         )
+        .limit(1)
     )
-    if not covered:
+    if covered is None:
         return None
     return build_ucdp_annual_profile_content(
         session,
