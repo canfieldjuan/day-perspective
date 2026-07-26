@@ -62,8 +62,6 @@ describe("discoveryStateFor", () => {
     );
     expect(state.kind).toBe("on-enriched-date");
     // Standing on the only enriched date is not an empty index, and must
-    // not be described as one.
-    expect(state.hasAnyEnrichedDestination).toBe(false);
   });
 
   it("reports both directions without preferring either", () => {
@@ -97,7 +95,6 @@ describe("discoveryStateFor", () => {
   it("reports an empty enriched index distinctly from a sparse page", () => {
     const state = discoveryStateFor(base, "1983-10-12");
     expect(state.kind).toBe("none-available");
-    expect(state.hasAnyEnrichedDestination).toBe(false);
   });
 
   it("bands the single destination so copy can adapt", () => {
@@ -125,8 +122,6 @@ describe("discoveryStateFor", () => {
   it("treats an unavailable coverage answer as unknown, not as empty", () => {
     const state = discoveryStateFor(null, "1983-10-12");
     expect(state.kind).toBe("unknown");
-    // An unknown archive shape must never render as "nothing exists".
-    expect(state.hasAnyEnrichedDestination).toBe(false);
   });
 });
 

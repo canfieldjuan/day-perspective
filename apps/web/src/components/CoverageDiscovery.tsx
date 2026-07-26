@@ -6,12 +6,14 @@ import React from "react";
 import type { DiscoveryState, EnrichedDestination } from "@/src/lib/coverage";
 import { formatPublicDate } from "@/src/lib/date";
 import { markNavigation } from "@/src/lib/travel-store";
+import {
+  describeDestination,
+  describeDestinationLabel,
+  describeDestinationLead,
+  describeEmptyIndex,
+  describeMissingDirection
+} from "@/src/lib/coverage-copy";
 import styles from "./CoverageDiscovery.module.css";
-
-// Terms and the fields that license them live in one place; see
-// coverage-vocabulary for why "reviewed" and "evidence-backed" are not
-// among them.
-import "@/src/lib/coverage-vocabulary";
 
 /**
  * Evidence discovery, kept deliberately separate from chronological
@@ -49,16 +51,7 @@ export function CoverageDiscovery({
         Find enriched dates
       </h2>
       {state.kind === "none-available" ? (
-        <p className={styles.explanation}>
-          No enriched dates are currently available from this archive
-          index. You can continue chronologically, choose another date
-          {state.hasDemographicContext
-            ? ", or explore the available demographic context"
-            : state.hasPeriodContext
-              ? ", or explore the available period context"
-              : ""}
-          .
-        </p>
+        <p className={styles.explanation}>{describeEmptyIndex(state)}</p>
       ) : null}
       {state.kind === "both-directions" ? (
         <BothDirections state={state} />
@@ -70,13 +63,6 @@ export function CoverageDiscovery({
   );
 }
 
-function destinationLabel(destination: EnrichedDestination): string {
-  const monument = formatPublicDate(destination.date) ?? destination.date;
-  return destination.distance
-    ? `${monument} · ${destination.distance}`
-    : monument;
-}
-
 function BothDirections({ state }: { state: DiscoveryState }) {
   const { before, after, closer } = state;
   if (!before || !after) {
@@ -86,8 +72,8 @@ function BothDirections({ state }: { state: DiscoveryState }) {
     <>
       <p className={styles.explanation}>Closest enriched dates</p>
       <ul className={styles.destinations}>
-        <li>{destinationLabel(before)}</li>
-        <li>{destinationLabel(after)}</li>
+        <li>{describeDestinationLabel(before)}</li>
+        <li>{describeDestinationLabel(after)}</li>
       </ul>
       <p className={styles.controls}>
         {/* Rendered in proximity order, so keyboard order genuinely reaches
@@ -131,48 +117,25 @@ function OneDirection({
     return null;
   }
   const target = formatPublicDate(destination.date) ?? destination.date;
-  const band = destination.band;
-
-  // The copy is graded by real distance. Calling a nineteen-year jump
-  // "nearby" would be the interface lying on the archive's behalf.
-  // A 32-364 day gap can still cross December 31, so the year is compared
-  // rather than inferred from the band.
-  const lead =
-    band === "days"
-      ? "Continue to a richer date"
-      : band === "months"
-        ? destination.sameCalendarYear
-          ? `An enriched date is available ${destination.direction} in the year`
-          : "The closest enriched date is a few months away"
-        : "The closest enriched date is farther away";
 
   return (
     <>
-      <p className={styles.lead}>{lead}</p>
-      <p className={styles.explanation}>
-        {band === "days"
-          ? `${target} ${
-              destination.hasRecordedEvent
-                ? "has recorded events"
-                : "carries more than annual context"
-            }, ${destination.distance}.`
-          : `${target}, ${destination.distance}.`}
-      </p>
+      <p className={styles.lead}>{describeDestinationLead(destination)}</p>
+      <p className={styles.explanation}>{describeDestination(destination)}</p>
       <p className={styles.controls}>
         <Link
           className={styles.jump}
           href={"/day/" + destination.date}
           onClick={() => markNavigation()}
         >
-          {band === "days" ? `Explore ${target}` : `Jump to ${target}`}
+          {destination.band === "days" ? `Explore ${target}` : `Jump to ${target}`}
         </Link>
       </p>
-      {state.missingDirection ? (
-        // An absence is explained rather than rendered as a disabled arrow
-        // with no reason given.
+      {/* An absence is explained rather than rendered as a disabled arrow
+          with no reason given. */}
+      {describeMissingDirection(state, monument) ? (
         <p className={styles.absence}>
-          No enriched date is currently published{" "}
-          {state.missingDirection === "after" ? "after" : "before"} {monument}.
+          {describeMissingDirection(state, monument)}
         </p>
       ) : null}
     </>

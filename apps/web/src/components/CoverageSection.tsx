@@ -8,6 +8,7 @@ import {
   isCoverageResponse,
   type DiscoveryState
 } from "@/src/lib/coverage";
+import { describeSparsePage } from "@/src/lib/coverage-copy";
 import { formatPublicDate } from "@/src/lib/date";
 import { CoverageDiscovery } from "./CoverageDiscovery";
 
@@ -66,18 +67,7 @@ export function CoverageSection({ date }: { date: string }) {
     <>
       {coverage?.publication_tier === "context_only" ? (
         <p className="coverage-tier" data-testid="publication-tier">
-          {/* The tier also admits an evidence-notes-only profile, so the
-              demographic sentence is earned from the sections rather than
-              assumed from the tier. */}
-          {/* The ordinary indexed profile carries both kinds, so naming
-              only one would omit what the page holds. */}
-          {state.hasDemographicContext && state.hasPeriodContext
-            ? `This date currently has demographic and period context only. No recorded events are published for ${monument}.`
-            : state.hasDemographicContext
-              ? `This date currently has demographic context only. No recorded events are published for ${monument}.`
-              : state.hasPeriodContext
-                ? `This date currently has period context only. No recorded events are published for ${monument}.`
-                : `No recorded events are published for ${monument}.`}
+          {describeSparsePage(state, monument)}
         </p>
       ) : null}
       <CoverageDiscovery date={date} state={state} />

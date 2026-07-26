@@ -93,9 +93,6 @@ export interface DiscoveryState {
   /** Named so the interface can explain an absence instead of disabling a
    * control with no reason given. */
   missingDirection: "before" | "after" | null;
-  /** Gates the Random enriched control: a button leading nowhere is not an
-   * affordance. */
-  hasAnyEnrichedDestination: boolean;
 }
 
 function destination(
@@ -144,8 +141,7 @@ export function discoveryStateFor(
       after: null,
       closer: null,
       missingDirection: null,
-      hasAnyEnrichedDestination: false
-    };
+      };
   }
 
   const sections = coverage.sections ?? {};
@@ -162,7 +158,6 @@ export function discoveryStateFor(
     coverage.nearest_enriched_after,
     coverage.nearest_recorded_event_after
   );
-  const hasAnyEnrichedDestination = before !== null || after !== null;
   const closer =
     before !== null && after !== null
       ? daysBetween(date, before.date) <= daysBetween(date, after.date)
@@ -180,8 +175,7 @@ export function discoveryStateFor(
       before,
       after,
       closer,
-      missingDirection: null,
-      hasAnyEnrichedDestination
+      missingDirection: null
     };
   }
 
@@ -194,8 +188,7 @@ export function discoveryStateFor(
       before,
       after,
       closer,
-      missingDirection: null,
-      hasAnyEnrichedDestination
+      missingDirection: null
     };
   }
 
@@ -208,8 +201,7 @@ export function discoveryStateFor(
       before,
       after,
       closer,
-      missingDirection: before === null ? "before" : "after",
-      hasAnyEnrichedDestination
+      missingDirection: before === null ? "before" : "after"
     };
   }
 
@@ -221,7 +213,6 @@ export function discoveryStateFor(
     before: null,
     after: null,
     closer: null,
-    missingDirection: null,
-    hasAnyEnrichedDestination: false
+    missingDirection: null
   };
 }
