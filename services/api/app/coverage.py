@@ -16,7 +16,7 @@ from datetime import UTC, date, datetime
 from typing import Any, Literal, cast
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.governance import EditorialSelection, EditorialSelectionStatus
@@ -159,21 +159,37 @@ def quality_floor_from_payload(payload: dict[str, Any]) -> str | None:
     return max(grades, key=_weakness)
 
 
-def _review_status(session: Session, profile_date: date) -> CoverageReviewStatus:
-    """Derive review status from recorded editorial decisions.
+def _review_status(
+    session: Session, manifest: PublicationManifest
+) -> CoverageReviewStatus:
+    """Derive review status from decisions about *this manifest's* evidence.
 
-    ``reviewed`` means a reviewer other than the standing rule selected
-    content for this date. Everything else says so plainly rather than
-    borrowing the credibility of a review that never happened.
+    ``reviewed`` means a reviewer other than a standing rule selected content
+    that the reader is actually served. Scoping to the indexed manifest's
+    evidence roots matters: a human may have selected candidate content that
+    was never published, and that decision must not upgrade an unrelated
+    profile to "reviewed".
     """
     from app.un_wpp import STANDING_ANNUAL_CONTEXT_RULE
 
+    resolved_roots = select(PublicationStatementEvidence.resolved_claim_id).where(
+        PublicationStatementEvidence.publication_manifest_id == manifest.id,
+        PublicationStatementEvidence.resolved_claim_id.is_not(None),
+    )
+    derived_roots = select(PublicationStatementEvidence.derived_value_id).where(
+        PublicationStatementEvidence.publication_manifest_id == manifest.id,
+        PublicationStatementEvidence.derived_value_id.is_not(None),
+    )
     reviewers = {
         value.strip()
         for value in session.scalars(
             select(EditorialSelection.reviewed_by).where(
-                EditorialSelection.profile_date == profile_date,
+                EditorialSelection.profile_date == manifest.profile_date,
                 EditorialSelection.status == EditorialSelectionStatus.SELECTED,
+                or_(
+                    EditorialSelection.resolved_claim_id.in_(resolved_roots),
+                    EditorialSelection.derived_value_id.in_(derived_roots),
+                ),
             )
         )
         # reviewed_by is NOT NULL, but nothing forbids an empty string, and
@@ -234,7 +250,7 @@ def upsert_coverage_entry(
         "has_recorded_event": has_event,
         "sections": counts,
         "quality_floor": floor,
-        "review_status": _review_status(session, manifest.profile_date),
+        "review_status": _review_status(session, manifest),
         "index_version": index_version,
         "refreshed_at": datetime.now(UTC),
     }
@@ -254,6 +270,9 @@ def latest_published_manifests(session: Session) -> list[PublicationManifest]:
         select(
             PublicationManifest.profile_date.label("profile_date"),
             func.max(PublicationManifest.version).label("version"),
+        )
+        .join(
+            DayProfile, DayProfile.publication_manifest_id == PublicationManifest.id
         )
         .where(PublicationManifest.status == PublicationStatus.PUBLISHED)
         .group_by(PublicationManifest.profile_date)
@@ -300,6 +319,7 @@ def rebuild_coverage_index(
     *,
     store: PublishedProfileStore | None = None,
     index_version: int | None = None,
+    commit_each_date: bool = True,
 ) -> CoverageRebuildReport:
     """Regenerate the whole index from published state.
 
@@ -317,7 +337,6 @@ def rebuild_coverage_index(
         ) + 1
     report = CoverageRebuildReport(index_version=index_version)
     snapshot = latest_published_manifests(session)
-    seen_dates = {manifest.profile_date for manifest in snapshot}
     live_dates = set()
     for stale in snapshot:
         with _date_publication_lock(session, stale.profile_date, stale.profile_type):
@@ -334,8 +353,17 @@ def rebuild_coverage_index(
                 session, manifest=manifest, store=store, index_version=index_version
             )
             live_dates.add(manifest.profile_date)
+            if commit_each_date:
+                # Releasing the advisory lock is not enough: an uncommitted
+                # upsert keeps this row's write lock, so a correction to an
+                # already-processed date would block at its own final
+                # coverage write until the whole archive finished.
+                session.commit()
     report.dropped = _drop_stale_entries(
-        session, live_dates=live_dates, seen_dates=seen_dates, store=store
+        session,
+        live_dates=live_dates,
+        store=store,
+        commit=commit_each_date,
     )
     session.flush()
     report.indexed = len(live_dates)
@@ -367,43 +395,51 @@ def _drop_stale_entries(
     session: Session,
     *,
     live_dates: set[date],
-    seen_dates: set[date],
     store: PublishedProfileStore | None,
+    commit: bool,
 ) -> int:
     """Remove entries the archive no longer supports.
 
-    A date absent from the snapshot is not automatically stale: it may have
-    been published *during* the rebuild, in which case its row is newer than
-    anything this run knows about. Deleting it would leave the day endpoint
-    serving a profile that coverage reports as missing, so an unseen date is
-    re-checked under its lock and kept when it is genuinely live.
+    Every entry that did not survive this pass is re-checked under its own
+    lock before deletion — including dates that were in the snapshot but
+    were skipped, because a skipped date can be republished healthy while
+    the rebuild is still running. Deleting such a row would leave the day
+    endpoint serving a profile that coverage reports as missing.
     """
     dropped = 0
     for entry in list(session.scalars(select(CoverageEntry))):
         if entry.profile_date in live_dates:
             continue
-        if entry.profile_date not in seen_dates:
-            with _date_publication_lock(
-                session, entry.profile_date, entry.profile_type
+        with _date_publication_lock(session, entry.profile_date, entry.profile_type):
+            manifest = _latest_published_manifest(session, entry.profile_date)
+            if (
+                manifest is not None
+                and _has_day_profile(session, manifest)
+                and (store is None or _artifact_readable(store, manifest))
             ):
-                manifest = _latest_published_manifest(session, entry.profile_date)
-                if (
-                    manifest is not None
-                    and _has_day_profile(session, manifest)
-                    and (store is None or _artifact_readable(store, manifest))
-                ):
-                    live_dates.add(entry.profile_date)
-                    continue
-        session.delete(entry)
-        dropped += 1
+                live_dates.add(entry.profile_date)
+                continue
+            session.delete(entry)
+            dropped += 1
+            if commit:
+                session.commit()
     return dropped
 
 
 def _latest_published_manifest(
     session: Session, profile_date: date
 ) -> PublicationManifest | None:
+    """The manifest a reader is served, mirroring the day endpoint exactly.
+
+    The day endpoint joins the profile row before ordering by version, so an
+    incomplete newest manifest does not make the date unservable — it falls
+    back to the newest version that has a profile. Selecting the newest
+    manifest and skipping when its profile is missing would drop coverage
+    for a date the endpoint still serves.
+    """
     return session.scalar(
         select(PublicationManifest)
+        .join(DayProfile, DayProfile.publication_manifest_id == PublicationManifest.id)
         .where(
             PublicationManifest.profile_date == profile_date,
             PublicationManifest.status == PublicationStatus.PUBLISHED,

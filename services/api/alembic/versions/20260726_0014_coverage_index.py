@@ -157,9 +157,15 @@ def _backfill_existing_archive() -> None:
         ) AS counts ON TRUE
         LEFT JOIN LATERAL (
             SELECT
-                COUNT(*) AS total,
+                -- Same normalisation the runtime derivation applies: a
+                -- blank or whitespace-padded reviewer is not a human
+                -- review, and the backfill must not make a stronger claim
+                -- than a rebuild would.
+                COUNT(*) FILTER (WHERE btrim(s.reviewed_by) <> '') AS total,
                 COUNT(*) FILTER (
-                    WHERE s.reviewed_by <> 'standing-rule:annual-context-v1'
+                    WHERE btrim(s.reviewed_by) NOT IN (
+                        '', 'standing-rule:annual-context-v1'
+                    )
                 ) AS human
             FROM editorial_selections AS s
             WHERE s.profile_date = m.profile_date AND s.status = 'selected'

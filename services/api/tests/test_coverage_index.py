@@ -978,3 +978,206 @@ def test_reconcile_repair_indexes_the_recovered_quality_floor(
         assert record.quality_floor == "D", (
             "coverage kept the predecessor's grade after repair"
         )
+
+
+# --- Round 3 review findings (PR #43) ------------------------------------
+
+
+@pytest.mark.integration
+def test_a_rebuild_does_not_hold_row_locks_for_the_whole_run(
+    session: Session, tmp_path: Path, reviewed_un_wpp: None
+) -> None:
+    """Releasing the advisory lock is not enough: an uncommitted upsert keeps
+    the coverage row's write lock, blocking a correction to an
+    already-processed date until the entire archive finishes."""
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.engine import Engine
+    from sqlalchemy.orm import sessionmaker
+
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+    dates = [date(1994, 3, day) for day in range(1, 5)]
+    run = start_batch_run(
+        session,
+        kind=CONTEXT_BATCH_KIND,
+        requested={"dates": [value.isoformat() for value in dates]},
+    )
+    run_context_batch(session, store=store, dates=dates, batch_run=run)
+    session.commit()
+
+    rebuild_coverage_index(session, store=store)
+
+    # A separate connection must be able to touch an indexed row while the
+    # rebuilding session is still open.
+    # str() masks the password; the second connection needs the real URL.
+    bind = session.get_bind()
+    assert isinstance(bind, Engine)
+    engine = create_engine(bind.url.render_as_string(hide_password=False))
+    other = sessionmaker(bind=engine)()
+    try:
+        other.execute(text("SET lock_timeout = '2s'"))
+        other.execute(
+            text(
+                "UPDATE coverage_entries SET refreshed_at = now() "
+                "WHERE profile_date = :d"
+            ),
+            {"d": dates[0]},
+        )
+        other.commit()
+    finally:
+        other.close()
+        engine.dispose()
+    session.commit()
+
+    assert coverage_for_date(session, dates[0]) is not None
+
+
+@pytest.mark.integration
+def test_a_skipped_snapshot_date_is_rechecked_before_deletion(
+    session: Session, tmp_path: Path, reviewed_un_wpp: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A date skipped for an unreadable artifact can be republished healthy
+    while the rebuild runs; deleting its fresh row would leave the day
+    endpoint serving a profile coverage reports as missing."""
+    from app import coverage as coverage_module
+    from app.un_wpp import publish_context_profile
+
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+    profile_date = date(1995, 6, 6)
+    publish_context_profile(session, store=store, profile_date=profile_date)
+    session.commit()
+    snapshot = list(coverage_module.latest_published_manifests(session))
+
+    calls = {"n": 0}
+    real_readable = coverage_module._artifact_readable
+
+    def unreadable_once(store_arg: object, manifest: object) -> bool:
+        # Unreadable while the snapshot pass looks at it, healthy by the
+        # time the cleanup pass reconsiders it.
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return False
+        return real_readable(store_arg, manifest)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(coverage_module, "_artifact_readable", unreadable_once)
+    monkeypatch.setattr(
+        coverage_module, "latest_published_manifests", lambda _session: snapshot
+    )
+    report = rebuild_coverage_index(session, store=store)
+    session.commit()
+
+    assert coverage_for_date(session, profile_date) is not None, (
+        "the rebuild deleted a date that was healthy by the time it was dropped"
+    )
+    assert report.dropped == 0
+
+
+@pytest.mark.integration
+def test_review_status_ignores_selections_for_unpublished_content(
+    session: Session, tmp_path: Path, reviewed_un_wpp: None
+) -> None:
+    """A human may select candidate content that never ships; that decision
+    must not upgrade a profile the reader is served to "reviewed"."""
+    from app.governance import EditorialSelection, EditorialSelectionStatus
+
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+    profile_date = date(1996, 4, 4)
+    run = start_batch_run(
+        session,
+        kind=CONTEXT_BATCH_KIND,
+        requested={"dates": [profile_date.isoformat()]},
+    )
+    run_context_batch(session, store=store, dates=[profile_date], batch_run=run)
+    session.commit()
+
+    # A human decision about a claim that is not in the published manifest.
+    unpublished = resolve_claim(
+        session,
+        canonical_key="test:never-published",
+        resolved_value={"statement": "Considered but not published."},
+        rationale="Test-only candidate.",
+        supporting_claim_ids=[
+            create_claim(
+                session,
+                source_release_id=_synthetic_release(session, "candidate").id,
+                source_record_locator="record:candidate",
+                claim_type="synthetic_assertion",
+                assertion_text="Candidate content.",
+            ).id
+        ],
+    )
+    session.add(
+        EditorialSelection(
+            profile_date=profile_date,
+            section_key="curated_claims",
+            resolved_claim_id=unpublished.id,
+            status=EditorialSelectionStatus.SELECTED,
+            decision_version=1,
+            display_rank=1,
+            rationale="A human considered this candidate.",
+            reviewed_by="editor@example.invalid",
+        )
+    )
+    session.commit()
+    rebuild_coverage_index(session, store=store)
+    session.commit()
+
+    record = coverage_for_date(session, profile_date)
+    assert record is not None
+    assert record.review_status == "rule_selected", (
+        "a selection for unpublished content upgraded the served profile"
+    )
+
+
+@pytest.mark.integration
+def test_coverage_follows_the_version_the_day_endpoint_serves(
+    session: Session, tmp_path: Path, reviewed_un_wpp: None
+) -> None:
+    """The day endpoint joins the profile row before ordering versions, so a
+    newest manifest without a profile does not make the date unservable.
+    Coverage must index the version a reader is actually served.
+
+    reconcile's missing_profiles counter exists precisely because this state
+    occurs; publication is atomic enough that it cannot be reached through
+    the publish path, so the row is written directly.
+    """
+    from sqlalchemy import inspect as sql_inspect
+
+    from app.un_wpp import publish_context_profile
+
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+    profile_date = date(1997, 8, 8)
+    served = publish_context_profile(session, store=store, profile_date=profile_date)
+    session.commit()
+    served_manifest_id = served.publication_manifest_id
+
+    served_manifest = session.get(PublicationManifest, served_manifest_id)
+    assert served_manifest is not None
+    columns = sql_inspect(PublicationManifest).mapper.column_attrs
+    clone = PublicationManifest(
+        **{
+            attribute.key: getattr(served_manifest, attribute.key)
+            for attribute in columns
+            if attribute.key != "id"
+        }
+    )
+    clone.version = served_manifest.version + 1
+    clone.content_hash = "f" * 64
+    clone.storage_uri = served_manifest.storage_uri + ".v2"
+    session.add(clone)
+    session.commit()
+
+    rebuild_coverage_index(session, store=store)
+    session.commit()
+
+    record = coverage_for_date(session, profile_date)
+    assert record is not None, (
+        "coverage dropped a date the day endpoint still serves"
+    )
+    indexed = session.scalar(
+        select(CoverageEntry.publication_manifest_id).where(
+            CoverageEntry.profile_date == profile_date
+        )
+    )
+    assert indexed == served_manifest_id, (
+        "coverage indexed a manifest with no profile row"
+    )
