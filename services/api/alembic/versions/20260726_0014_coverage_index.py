@@ -113,7 +113,16 @@ def _backfill_existing_archive() -> None:
             m.id,
             m.publication_tier,
             COALESCE(counts.recorded, 0) > 0,
-            COALESCE(counts.sections, '{}'::jsonb),
+            -- Every supported key, zero-filled: _section_counts always
+            -- emits all seven, and a row's shape must not reveal whether
+            -- it was backfilled or rebuilt.
+            (
+                '{"recorded_on_this_date": 0, "typical_day_in_this_year": 0,
+                  "wider_historical_context": 0, "curated_claims": 0,
+                  "derived_comparisons": 0, "wonder_and_progress": 0,
+                  "evidence_notes": 0}'::jsonb
+                || COALESCE(counts.sections, '{}'::jsonb)
+            ),
             CASE
                 WHEN reviewers.human > 0 THEN 'reviewed'
                 WHEN reviewers.total > 0 THEN 'rule_selected'

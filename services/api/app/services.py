@@ -1081,8 +1081,14 @@ def reconcile_publications(
                 _ensure_day_profile(session, manifest)
                 # The payload was just read and hash-verified; without it the
                 # index would keep the predecessor's quality floor while
-                # pointing at the new manifest.
-                _index_coverage(session, manifest, verified_payload)
+                # pointing at the new manifest. Indexed by date so a repair
+                # of an older version cannot displace a newer served one.
+                _index_served_manifest(
+                    session,
+                    manifest.profile_date,
+                    store=store,
+                    payload_for=(manifest.id, verified_payload),
+                )
                 session.commit()
         else:
             report.abandoned_pending += 1
@@ -1137,7 +1143,10 @@ def reconcile_publications(
                     session, manifest.profile_date, manifest.profile_type
                 )
                 _ensure_day_profile(session, manifest)
-                _index_coverage(session, manifest, store=store)
+                # Index the date, not this manifest: repairing an older
+                # version must not rewrite coverage to it while the day
+                # endpoint still serves a newer healthy one.
+                _index_served_manifest(session, manifest.profile_date, store=store)
                 session.commit()
         else:
             report.healthy_published += 1
@@ -1290,6 +1299,33 @@ def _index_coverage(
 
     upsert_coverage_entry(
         session, manifest=manifest, payload=payload, store=store
+    )
+
+
+def _index_served_manifest(
+    session: Session,
+    profile_date: date,
+    *,
+    store: PublishedProfileStore | None = None,
+    payload_for: tuple[UUID, dict[str, Any] | None] | None = None,
+) -> None:
+    """Index whichever manifest a reader is served for this date.
+
+    Reconciliation repairs one manifest, but the date may already have a
+    newer healthy version that the day endpoint prefers. Indexing the
+    repaired manifest directly would describe the older version while
+    readers get the newer one.
+    """
+    from app.coverage import _latest_published_manifest, upsert_coverage_entry
+
+    served = _latest_published_manifest(session, profile_date)
+    if served is None:
+        return
+    payload = None
+    if payload_for is not None and payload_for[0] == served.id:
+        payload = payload_for[1]
+    upsert_coverage_entry(
+        session, manifest=served, payload=payload, store=store if payload is None else None
     )
 
 

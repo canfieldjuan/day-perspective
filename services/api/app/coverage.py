@@ -145,24 +145,37 @@ def _review_status(
     """
     from app.un_wpp import STANDING_ANNUAL_CONTEXT_RULE
 
-    resolved_roots = select(PublicationStatementEvidence.resolved_claim_id).where(
-        PublicationStatementEvidence.publication_manifest_id == manifest.id,
-        PublicationStatementEvidence.resolved_claim_id.is_not(None),
-    )
-    derived_roots = select(PublicationStatementEvidence.derived_value_id).where(
-        PublicationStatementEvidence.publication_manifest_id == manifest.id,
-        PublicationStatementEvidence.derived_value_id.is_not(None),
+    # Editorial selections are keyed by (profile_date, section_key, root),
+    # so matching the root alone is not enough: the same root can be
+    # standing-rule-selected in the published section and human-selected
+    # for a different, unpublished section on the same date.
+    section = func.split_part(PublicationStatementEvidence.statement_path, "/", 3)
+    published = (
+        select(
+            section.label("section_key"),
+            PublicationStatementEvidence.resolved_claim_id.label("resolved_claim_id"),
+            PublicationStatementEvidence.derived_value_id.label("derived_value_id"),
+        )
+        .where(PublicationStatementEvidence.publication_manifest_id == manifest.id)
+        .subquery()
     )
     reviewers = {
         value.strip()
         for value in session.scalars(
-            select(EditorialSelection.reviewed_by).where(
+            select(EditorialSelection.reviewed_by)
+            .join(
+                published,
+                (EditorialSelection.section_key == published.c.section_key)
+                & or_(
+                    EditorialSelection.resolved_claim_id
+                    == published.c.resolved_claim_id,
+                    EditorialSelection.derived_value_id
+                    == published.c.derived_value_id,
+                ),
+            )
+            .where(
                 EditorialSelection.profile_date == manifest.profile_date,
                 EditorialSelection.status == EditorialSelectionStatus.SELECTED,
-                or_(
-                    EditorialSelection.resolved_claim_id.in_(resolved_roots),
-                    EditorialSelection.derived_value_id.in_(derived_roots),
-                ),
             )
         )
         # reviewed_by is NOT NULL, but nothing forbids an empty string, and
@@ -325,13 +338,20 @@ def rebuild_coverage_index(
                 # generation would leave the index reporting two.
                 live_dates.add(stale.profile_date)
                 continue
-            if store is not None and not _artifact_readable(store, manifest):
-                # The day endpoint fails for this date. Indexing it anyway
-                # would send readers to a page that cannot be served.
-                report.unreadable.append(manifest.profile_date)
-                continue
+            payload = None
+            if store is not None:
+                payload = _read_artifact(store, manifest)
+                if payload is None:
+                    # The day endpoint fails for this date. Indexing it
+                    # anyway would send readers to a page that cannot be
+                    # served.
+                    report.unreadable.append(manifest.profile_date)
+                    continue
             upsert_coverage_entry(
-                session, manifest=manifest, store=store, index_version=index_version
+                session,
+                manifest=manifest,
+                payload=payload,
+                index_version=index_version,
             )
             live_dates.add(manifest.profile_date)
     report.dropped = _drop_stale_entries(
@@ -358,14 +378,19 @@ def _superseded_by_newer_rebuild(
     return existing is not None and existing > index_version
 
 
-def _artifact_readable(
+def _read_artifact(
     store: PublishedProfileStore, manifest: PublicationManifest
-) -> bool:
+) -> dict[str, Any] | None:
+    """The verified payload, or None when this date is not servable.
+
+    Returned rather than discarded: reading twice leaves a window in which
+    the second read fails, and upsert_coverage_entry tolerates that failure,
+    so the date would be indexed as live after its artifact went away.
+    """
     try:
-        store.read(manifest.storage_uri, manifest.content_hash)
+        return store.read(manifest.storage_uri, manifest.content_hash)
     except (OSError, RuntimeError, ValueError):
-        return False
-    return True
+        return None
 
 
 def _drop_stale_entries(
@@ -403,7 +428,7 @@ def _drop_stale_entries(
                 continue
             manifest = _latest_published_manifest(session, profile_date)
             if manifest is not None and (
-                store is None or _artifact_readable(store, manifest)
+                store is None or _read_artifact(store, manifest) is not None
             ):
                 live_dates.add(profile_date)
                 continue

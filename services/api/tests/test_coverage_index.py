@@ -891,17 +891,17 @@ def test_a_skipped_snapshot_date_is_rechecked_before_deletion(
     snapshot = list(coverage_module.latest_published_manifests(session))
 
     calls = {"n": 0}
-    real_readable = coverage_module._artifact_readable
+    real_read = coverage_module._read_artifact
 
-    def unreadable_once(store_arg: object, manifest: object) -> bool:
+    def unreadable_once(store_arg: Any, manifest: Any) -> dict[str, Any] | None:
         # Unreadable while the snapshot pass looks at it, healthy by the
         # time the cleanup pass reconsiders it.
         calls["n"] += 1
         if calls["n"] == 1:
-            return False
-        return real_readable(store_arg, manifest)  # type: ignore[arg-type]
+            return None
+        return real_read(store_arg, manifest)
 
-    monkeypatch.setattr(coverage_module, "_artifact_readable", unreadable_once)
+    monkeypatch.setattr(coverage_module, "_read_artifact", unreadable_once)
     monkeypatch.setattr(
         coverage_module, "latest_published_manifests", lambda _session: snapshot
     )
@@ -1024,3 +1024,105 @@ def test_coverage_follows_the_version_the_day_endpoint_serves(
     assert indexed == served_manifest_id, (
         "coverage indexed a manifest with no profile row"
     )
+
+
+# --- Round 5 review findings (PR #43) ------------------------------------
+
+
+@pytest.mark.integration
+def test_a_human_decision_in_another_section_is_not_review_of_this_one(
+    session: Session, tmp_path: Path, reviewed_un_wpp: None
+) -> None:
+    """Selections are keyed by (date, section_key, root). Matching the root
+    alone lets a decision about a different, unpublished section upgrade the
+    served profile."""
+    from app.governance import EditorialSelection, EditorialSelectionStatus
+    from app.models import DerivedValue, PublicationStatementEvidence
+
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+    profile_date = date(1999, 9, 9)
+    run = start_batch_run(
+        session,
+        kind=CONTEXT_BATCH_KIND,
+        requested={"dates": [profile_date.isoformat()]},
+    )
+    run_context_batch(session, store=store, dates=[profile_date], batch_run=run)
+    session.commit()
+
+    manifest_id = session.scalar(
+        select(CoverageEntry.publication_manifest_id).where(
+            CoverageEntry.profile_date == profile_date
+        )
+    )
+    published_root = session.scalar(
+        select(PublicationStatementEvidence.derived_value_id).where(
+            PublicationStatementEvidence.publication_manifest_id == manifest_id,
+            PublicationStatementEvidence.derived_value_id.is_not(None),
+        )
+    )
+    assert published_root is not None
+    assert session.get(DerivedValue, published_root) is not None
+
+    # Same root, but a human decision recorded against a section that this
+    # manifest does not publish.
+    session.add(
+        EditorialSelection(
+            profile_date=profile_date,
+            section_key="wonder_and_progress",
+            derived_value_id=published_root,
+            status=EditorialSelectionStatus.SELECTED,
+            decision_version=1,
+            display_rank=1,
+            rationale="Considered for a section that is not published.",
+            reviewed_by="editor@example.invalid",
+        )
+    )
+    session.commit()
+    rebuild_coverage_index(session, store=store)
+    session.commit()
+
+    record = coverage_entry(session, profile_date)
+    assert record is not None
+    assert record.review_status == "rule_selected", (
+        "a decision about an unpublished section upgraded the served profile"
+    )
+
+
+@pytest.mark.integration
+def test_a_rebuild_does_not_index_an_artifact_that_vanished_mid_pass(
+    session: Session, tmp_path: Path, reviewed_un_wpp: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reading twice leaves a window: the guard passes, the artifact goes
+    away, and the upsert tolerates the second failure."""
+    from app import coverage as coverage_module
+
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+    profile_date = date(2000, 10, 10)
+    run = start_batch_run(
+        session,
+        kind=CONTEXT_BATCH_KIND,
+        requested={"dates": [profile_date.isoformat()]},
+    )
+    run_context_batch(session, store=store, dates=[profile_date], batch_run=run)
+    session.commit()
+
+    reads = {"n": 0}
+    real_read = coverage_module._read_artifact
+
+    def read_then_vanish(store_arg: Any, manifest: Any) -> dict[str, Any] | None:
+        reads["n"] += 1
+        payload = real_read(store_arg, manifest)
+        for artifact in (tmp_path / "published").rglob("*.json"):
+            artifact.unlink()
+        return payload
+
+    monkeypatch.setattr(coverage_module, "_read_artifact", read_then_vanish)
+    rebuild_coverage_index(session, store=store)
+    session.commit()
+
+    assert reads["n"] >= 1
+    record = coverage_entry(session, profile_date)
+    assert record is not None
+    # The single verified read is what gets indexed, so the quality floor
+    # comes from the payload rather than being silently preserved.
+    assert record.publication_tier is PublicationTier.CONTEXT_ONLY
