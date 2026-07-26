@@ -155,3 +155,15 @@ test("unreadable coverage claims nothing about the archive", async ({ page }) =>
   // Silence, not a claim that the archive is empty.
   await expect(page.getByText(/No enriched dates/)).toHaveCount(0);
 });
+
+test("discovery controls meet the touch-target floor", async ({ page }) => {
+  await arrive(page, "1983-10-12", coverageBody("1983-10-12", "1964-03-27", null));
+
+  // UI_UX_CONTRACT a11y item 5: touch targets >= 44px. Measured rather
+  // than inferred from the stylesheet.
+  const jump = page.getByRole("link", { name: "Jump to March 27, 1964" });
+  await expect(jump).toBeVisible();
+  const box = await jump.boundingBox();
+  expect(box).not.toBeNull();
+  expect(box!.height).toBeGreaterThanOrEqual(44);
+});

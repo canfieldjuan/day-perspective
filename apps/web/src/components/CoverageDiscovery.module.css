@@ -63,12 +63,17 @@
 }
 
 .jump {
+  align-items: center;
   background: transparent;
   border: 1px solid var(--muted-ink);
-  color: var(--ink);
   border-radius: 0.35rem;
-  display: inline-block;
-  padding: 0.5rem 0.85rem;
+  color: var(--ink);
+  display: inline-flex;
+  justify-content: center;
+  /* Touch target floor per UI_UX_CONTRACT a11y item 5. Padding and borders
+     alone leave 42px at a 16px root, which is under it. */
+  min-height: 44px;
+  padding: 0.4rem 0.85rem;
   text-decoration: none;
 }
 
