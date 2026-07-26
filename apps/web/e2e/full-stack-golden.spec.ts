@@ -66,12 +66,12 @@ test("an ordinary context-only date is honest about what it holds", async ({
   );
 
   const discovery = page.getByTestId("coverage-discovery");
-  await expect(discovery).toContainText("Find evidence-backed dates");
+  await expect(discovery).toContainText("Find enriched dates");
   // The real archive holds exactly one enriched date, decades away.
   await expect(discovery).toContainText("March 27, 1964");
   await expect(discovery).toContainText("years earlier");
   await expect(discovery).toContainText(
-    "No evidence-backed date is currently published after October 12, 1983."
+    "No enriched date is currently published after October 12, 1983."
   );
 
   // Chronological navigation is untouched by this slice.

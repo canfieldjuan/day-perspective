@@ -93,20 +93,3 @@
     font-size: 0.62rem;
   }
 }
-
-/* Archive coverage disclosure: the landing page states what the archive
-   holds so a reader is not surprised one identical page at a time. */
-.archive-coverage {
-  border-top: 1px solid var(--line);
-  margin: 2rem auto 0;
-  max-width: 46rem;
-  padding-top: 1rem;
-}
-
-.archive-coverage p {
-  margin: 0 0 0.5rem;
-}
-
-.archive-coverage__caveat {
-  opacity: 0.85;
-}

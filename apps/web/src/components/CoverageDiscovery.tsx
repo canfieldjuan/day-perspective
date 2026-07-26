@@ -8,6 +8,11 @@ import { formatPublicDate } from "@/src/lib/date";
 import { markNavigation } from "@/src/lib/travel-store";
 import styles from "./CoverageDiscovery.module.css";
 
+// Terms and the fields that license them live in one place; see
+// coverage-vocabulary for why "reviewed" and "evidence-backed" are not
+// among them.
+import "@/src/lib/coverage-vocabulary";
+
 /**
  * Evidence discovery, kept deliberately separate from chronological
  * navigation (UI_UX_CONTRACT: two navigation families).
@@ -41,11 +46,11 @@ export function CoverageDiscovery({
       data-discovery-state={state.kind}
     >
       <h2 className={styles.heading} id="find-reviewed-evidence">
-        Find evidence-backed dates
+        Find enriched dates
       </h2>
       {state.kind === "none-available" ? (
         <p className={styles.explanation}>
-          No evidence-backed dates are currently available from this archive
+          No enriched dates are currently available from this archive
           index. You can continue chronologically, choose another date
           {state.hasDemographicContext
             ? ", or explore the available demographic context"
@@ -79,7 +84,7 @@ function BothDirections({ state }: { state: DiscoveryState }) {
   }
   return (
     <>
-      <p className={styles.explanation}>Closest evidence-backed dates</p>
+      <p className={styles.explanation}>Closest enriched dates</p>
       <ul className={styles.destinations}>
         <li>{destinationLabel(before)}</li>
         <li>{destinationLabel(after)}</li>
@@ -137,9 +142,9 @@ function OneDirection({
       ? "Continue to a richer date"
       : band === "months"
         ? destination.sameCalendarYear
-          ? `An evidence-backed date is available ${destination.direction} in the year`
-          : "The closest evidence-backed date is a few months away"
-        : "The closest evidence-backed date is farther away";
+          ? `An enriched date is available ${destination.direction} in the year`
+          : "The closest enriched date is a few months away"
+        : "The closest enriched date is farther away";
 
   return (
     <>
@@ -166,7 +171,7 @@ function OneDirection({
         // An absence is explained rather than rendered as a disabled arrow
         // with no reason given.
         <p className={styles.absence}>
-          No evidence-backed date is currently published{" "}
+          No enriched date is currently published{" "}
           {state.missingDirection === "after" ? "after" : "before"} {monument}.
         </p>
       ) : null}

@@ -45,17 +45,3 @@
     top: 2rem;
   }
 }
-
-/* Explains a missing discovery direction inline, so an absent control is
-   never just an unexplained gap. */
-.absenceNote {
-  flex-basis: 100%;
-  font-size: 0.85rem;
-  margin: 0;
-  opacity: 0.8;
-  text-align: center;
-}
-
-.absenceNote:empty {
-  display: none;
-}

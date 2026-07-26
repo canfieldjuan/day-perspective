@@ -32,7 +32,7 @@ describe("CoverageDiscovery", () => {
   it("labels the group so the two navigation families are distinguishable", () => {
     renderFor({ nearest_enriched_before: "1964-03-27" });
     expect(
-      screen.getByRole("heading", { name: "Find evidence-backed dates" })
+      screen.getByRole("heading", { name: "Find enriched dates" })
     ).toBeInTheDocument();
   });
 
@@ -40,7 +40,7 @@ describe("CoverageDiscovery", () => {
     renderFor({ nearest_enriched_before: "1964-03-27" });
 
     expect(
-      screen.getByText("The closest evidence-backed date is farther away")
+      screen.getByText("The closest enriched date is farther away")
     ).toBeInTheDocument();
     expect(
       screen.getByText("March 27, 1964, nineteen years earlier.")
@@ -59,7 +59,7 @@ describe("CoverageDiscovery", () => {
     renderFor({ nearest_enriched_before: "1964-03-27" });
     expect(
       screen.getByText(
-        "No evidence-backed date is currently published after October 12, 1983."
+        "No enriched date is currently published after October 12, 1983."
       )
     ).toBeInTheDocument();
   });
@@ -111,7 +111,7 @@ describe("CoverageDiscovery", () => {
       "1963-12-31"
     );
     expect(
-      screen.getByText("The closest evidence-backed date is a few months away")
+      screen.getByText("The closest enriched date is a few months away")
     ).toBeInTheDocument();
     expect(screen.queryByText(/in the year/)).toBeNull();
   });
@@ -119,7 +119,7 @@ describe("CoverageDiscovery", () => {
   it("names the direction when the destination is in the same year", () => {
     renderFor({ nearest_enriched_before: "1964-03-27" }, "1964-08-15");
     expect(
-      screen.getByText("An evidence-backed date is available earlier in the year")
+      screen.getByText("An enriched date is available earlier in the year")
     ).toBeInTheDocument();
   });
 
@@ -129,7 +129,7 @@ describe("CoverageDiscovery", () => {
       nearest_enriched_after: "1984-03-27"
     });
 
-    expect(screen.getByText("Closest evidence-backed dates")).toBeInTheDocument();
+    expect(screen.getByText("Closest enriched dates")).toBeInTheDocument();
     expect(
       screen.getByText("September 3, 1975 · eight years earlier")
     ).toBeInTheDocument();
@@ -164,7 +164,7 @@ describe("CoverageDiscovery", () => {
   it("says the index is empty only when it is", () => {
     renderFor({});
     expect(
-      screen.getByText(/No evidence-backed dates are currently available/)
+      screen.getByText(/No enriched dates are currently available/)
     ).toBeInTheDocument();
   });
 
@@ -178,7 +178,7 @@ describe("CoverageDiscovery", () => {
   it("does not suggest context an evidence-notes-only page cannot show", () => {
     renderFor({ sections: { evidence_notes: 1 } });
     expect(
-      screen.getByText(/No evidence-backed dates are currently available/)
+      screen.getByText(/No enriched dates are currently available/)
     ).toBeInTheDocument();
     expect(screen.queryByText(/demographic context/)).toBeNull();
   });
@@ -200,5 +200,18 @@ describe("CoverageDiscovery", () => {
     );
     // Unknown coverage must not be rendered as an empty archive.
     expect(screen.queryByTestId("coverage-discovery")).toBeNull();
+  });
+});
+
+describe("vocabulary the index can license", () => {
+  it("never denies that evidence-backed dates exist", () => {
+    // Every published date is evidence-backed, including the 27,758
+    // context-only ones. Only "enriched" is what the query establishes.
+    renderFor({ nearest_enriched_before: "1964-03-27" });
+    const panel = screen.getByTestId("coverage-discovery");
+    const text = panel.textContent ?? "";
+    expect(text).not.toContain("evidence-backed");
+    expect(text).not.toContain("reviewed");
+    expect(text).toContain("enriched");
   });
 });
