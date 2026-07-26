@@ -28,8 +28,11 @@ test("previous and next step blindly onto honest unpublished arrivals", async ({
 
   await page.goto("/day/1964-03-27");
   await expect(page).toHaveTitle("March 27, 1964 — Day Perspective");
+  // states.spec.ts already gates its click on this; these specs did not.
   // data-phase flips to "arrived" from client state, so it is a real
-  // hydration signal: clicking a Link before then can be swallowed.
+  // hydration signal rather than a sleep. This makes the specs consistent
+  // — it is NOT a diagnosis of the focus flake, which stalls even with
+  // this wait in place.
   await expect(page.getByTestId("travel-shell")).toHaveAttribute(
     "data-phase",
     "arrived"
