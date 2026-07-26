@@ -8,6 +8,15 @@ published_root="${PUBLISHED_PROFILE_ROOT:-$project_root/.local/published-profile
 api_port="${FULL_STACK_API_PORT:-18080}"
 
 cd "$project_root/services/api"
+
+# The sparse-page test needs a context-only date to exist. publish-golden
+# publishes the one enriched date and nothing else, so without this the
+# test would only pass on a machine that had separately run the archive
+# publication — which is exactly how it passed locally and failed in CI.
+# Idempotent: an already-published date reports unchanged.
+DATABASE_URL="$database_url" PUBLISHED_PROFILE_ROOT="$published_root" \
+  "$python_bin" -m app.publish_cli publish-context --date "${FULL_STACK_CONTEXT_DATE:-1983-10-12}"
+
 DATABASE_URL="$database_url" PUBLISHED_PROFILE_ROOT="$published_root" \
   "$python_bin" -m uvicorn app.main:app --host 127.0.0.1 --port "$api_port" \
   >"$project_root/.local/full-stack-api.log" 2>&1 &

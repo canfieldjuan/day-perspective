@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 
+import { CoverageSection } from "@/src/components/CoverageSection";
 import { DateInputForm } from "@/src/components/DateInputForm";
 import { DayProfileClient } from "@/src/components/DayProfileClient";
 import { formatPublicDate } from "@/src/lib/date";
@@ -28,7 +29,6 @@ export default async function DayProfilePage({ params }: DayPageProps) {
   const { date } = await params;
   const monument = formatPublicDate(date);
   const eraLine = eraLineForDate(date);
-
   return (
     <DayProfileClient
       date={date}
@@ -40,6 +40,7 @@ export default async function DayProfilePage({ params }: DayPageProps) {
           <DateInputForm initialDate={date} />
         </>
       }
+      discovery={<CoverageSection date={date} />}
     />
   );
 }
