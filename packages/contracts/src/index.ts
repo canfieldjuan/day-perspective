@@ -110,6 +110,46 @@ export interface PublishedProfileResponse {
   profile: PublishedDayProfile;
 }
 
+/**
+ * Coverage index (epic #32). Once every supported date carries annual
+ * context, "is anything published?" stops distinguishing anything. These
+ * shapes carry how rich a date is and where the nearest richer date lies,
+ * so navigation can be honest about a dense archive.
+ */
+export type CoverageSectionCounts = Partial<Record<DayProfileSectionKey, number>>;
+
+export interface CoverageDateResponse {
+  status: "coverage";
+  date: string;
+  profile_type: ProfileType;
+  publication_tier: PublicationTier;
+  has_recorded_event: boolean;
+  /** Published statement counts per section, from immutable evidence rows. */
+  sections: CoverageSectionCounts;
+  /** Nearest date offering more than annual context, or null if none. */
+  nearest_enriched_before: string | null;
+  nearest_enriched_after: string | null;
+  nearest_recorded_event_before: string | null;
+  nearest_recorded_event_after: string | null;
+}
+
+/** A date with no published profile is absent from the index, never empty. */
+export interface CoverageNotIndexedResponse {
+  status: "coverage_not_indexed";
+  date: string;
+  detail: string;
+}
+
+export interface CoverageSummaryResponse {
+  status: "coverage_summary";
+  total_published: number;
+  by_tier: Record<PublicationTier, number>;
+  with_recorded_event: number;
+  earliest: string | null;
+  latest: string | null;
+  supported_range: { minimum: string; maximum: string };
+}
+
 export function profileTypeForDate(value: string): ProfileType | undefined {
   if (value < PUBLIC_DATE_MIN || value > PUBLIC_DATE_MAX) {
     return undefined;
