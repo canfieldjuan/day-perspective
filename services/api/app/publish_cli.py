@@ -19,6 +19,7 @@ from app.database import SessionLocal
 from app.golden_canary import (
     GOLDEN_CANARY_KIND,
     CanaryValidation,
+    current_un_wpp_release_id,
     plan_golden_canary,
     record_canary_publication,
     start_golden_canary_run,
@@ -237,6 +238,20 @@ def main() -> None:
                         raise SystemExit(
                             "The golden set no longer matches the run being "
                             "resumed; finish or discard that run first."
+                        )
+                    recorded_release = (run.requested or {}).get("source_release_id")
+                    current_release = current_un_wpp_release_id(session)
+                    if (
+                        recorded_release is not None
+                        and current_release is not None
+                        and str(current_release) != str(recorded_release)
+                    ):
+                        # Resuming would publish the remaining dates from a
+                        # different release than the completed ones, and
+                        # validate a mixture that tests neither fully.
+                        raise SystemExit(
+                            "A newer UN WPP release was ingested since this "
+                            "run started; start a fresh canary run instead."
                         )
                     subject = recorded_dates or plan.publishable
                     dates = outstanding_dates(session, batch_run=run)

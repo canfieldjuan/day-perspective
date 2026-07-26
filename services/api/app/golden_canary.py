@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -45,6 +46,13 @@ from app.un_wpp import SUPPORTED_YEARS
 GOLDEN_CANARY_KIND = f"{CONTEXT_BATCH_KIND}:golden-canary"
 
 DAILY_EQUIVALENT_ASSIGNMENT = "uniform_period_allocation"
+#: Sections a context profile always fills. Declared available and empty,
+#: they tell a reader there is nothing when the pipeline simply produced
+#: nothing.
+ANNUAL_CONTEXT_SECTIONS = (
+    "typical_day_in_this_year",
+    "wider_historical_context",
+)
 MODELED_STATUS = "modeled"
 _DENOMINATOR = re.compile(r"divided by (\d+) days")
 
@@ -83,6 +91,26 @@ def plan_golden_canary(path: Path) -> CanaryPlan:
     )
 
 
+def current_un_wpp_release_id(session: Session) -> UUID | None:
+    """The release a context publication would use right now.
+
+    Recorded on the run so a resume can tell that the ground truth moved
+    underneath it.
+    """
+    from app.models import Source, SourceRelease
+    from app.un_wpp import UN_WPP_SOURCE_SLUG
+
+    source = session.scalar(select(Source).where(Source.slug == UN_WPP_SOURCE_SLUG))
+    if source is None:
+        return None
+    return session.scalar(
+        select(SourceRelease.id)
+        .where(SourceRelease.source_id == source.id)
+        .order_by(SourceRelease.ingested_at.desc())
+        .limit(1)
+    )
+
+
 def start_golden_canary_run(
     session: Session, *, dates: Sequence[date], force_new_version: bool = False
 ) -> PublicationBatchRun:
@@ -100,6 +128,13 @@ def start_golden_canary_run(
             "selection": "golden-set",
             "dates": [value.isoformat() for value in dates],
             "force_new_version": force_new_version,
+            # Each publication independently picks the newest release, so a
+            # release ingested mid-run would leave the finished dates on the
+            # old one and the resumed dates on the new one — a canary whose
+            # verdict covers neither release completely.
+            "source_release_id": str(release)
+            if (release := current_un_wpp_release_id(session)) is not None
+            else None,
         },
     )
 
@@ -164,6 +199,20 @@ def validate_context_payload(payload: dict[str, Any]) -> list[str]:
         elif status != "available":
             issues.append(
                 _issue(profile_date, f"{key} has an unknown state {status!r}")
+            )
+
+    # A publisher regression that emits no statements while leaving the
+    # sections available would otherwise validate clean: every per-statement
+    # check iterates nothing.
+    for key in ANNUAL_CONTEXT_SECTIONS:
+        state = states.get(key)
+        available = isinstance(state, dict) and state.get("status") == "available"
+        if available and not sections.get(key):
+            issues.append(
+                _issue(
+                    profile_date,
+                    f"{key} is available but carries no statements",
+                )
             )
 
     tier = payload.get("publication_tier")
@@ -286,6 +335,26 @@ def _validate_daily_equivalent(
                 "that it is not an observation",
             )
         )
+    displayed = _displayed_count(text)
+    expected_value = details.get("average_daily_equivalent")
+    if isinstance(expected_value, int):
+        if displayed is None:
+            issues.append(
+                _issue(
+                    profile_date,
+                    f"{statement_id} states no readable daily count",
+                )
+            )
+        elif displayed != expected_value:
+            # The UI renders `statement` directly. A correct derived value
+            # under a wrong sentence is a wrong page.
+            issues.append(
+                _issue(
+                    profile_date,
+                    f"{statement_id} displays {displayed:,} where its derived "
+                    f"value is {expected_value:,}",
+                )
+            )
     if str(year) not in text:
         # A statement naming a different year than the profile it appears in
         # attributes one year's figures to another.
@@ -311,6 +380,20 @@ def _statements(sections: dict[str, Any]) -> list[dict[str, Any]]:
         for statement in statements
         if isinstance(statement, dict)
     ]
+
+
+_DISPLAYED_COUNT = re.compile(r"about ([\d,]+)")
+
+
+def _displayed_count(text: str) -> int | None:
+    """The count a reader actually sees, or None if the sentence has none."""
+    match = _DISPLAYED_COUNT.search(text)
+    if match is None:
+        return None
+    try:
+        return int(match.group(1).replace(",", ""))
+    except ValueError:
+        return None
 
 
 def _validate_data_status(

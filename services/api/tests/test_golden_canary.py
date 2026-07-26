@@ -405,6 +405,41 @@ class TestPayloadValidation:
         assert any("without a usable reason" in issue for issue in issues), issues
 
 
+    def test_a_wrong_displayed_count_is_caught(self) -> None:
+        # The UI renders `statement` directly, so a correct derived value
+        # under a wrong sentence is still a wrong page.
+        statement = _daily_statement()
+        statement["details"] = {
+            **_mapping(statement, "details"),
+            "average_daily_equivalent": 999,
+        }
+
+        issues = validate_context_payload(_payload(typical=[statement]))
+
+        assert any("displays 1,000 where" in issue for issue in issues), issues
+
+    def test_a_matching_displayed_count_passes(self) -> None:
+        statement = _daily_statement()
+        statement["details"] = {
+            **_mapping(statement, "details"),
+            "average_daily_equivalent": 1000,
+        }
+
+        assert validate_context_payload(_payload(typical=[statement])) == []
+
+    def test_an_available_annual_section_may_not_be_empty(self) -> None:
+        # A publisher regression that emits nothing would otherwise pass
+        # every per-statement check by iterating nothing.
+        payload = _payload(typical=[])
+
+        issues = validate_context_payload(payload)
+
+        assert any(
+            "typical_day_in_this_year is available but carries no statements" in issue
+            for issue in issues
+        ), issues
+
+
 class TestGoldenSetStatuses:
     def test_the_canary_plan_only_offers_dates_the_pipeline_supports(self) -> None:
         plan = plan_golden_canary(GOLDEN_SET)
