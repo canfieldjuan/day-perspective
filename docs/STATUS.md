@@ -272,3 +272,37 @@ against the real golden artifact in CI.
 *Correction (2026-07-25, PR #31): the counts above were recorded from an
 earlier tree; the merged arc-close tree enumerates 87 web unit tests and
 54 mocked e2e checks (88 unit tests after PR #31 itself).*
+
+## Archive activation: the full 1950-2025 range is published
+
+*Added at the close of slice AA5 (issue #38, epic #32), additively per the
+document-ownership rule.*
+
+Every date the pipelines support now has a published profile. The archive
+holds **27,759 dates** from 1950-01-01 to 2025-12-31, all served by
+`GET /api/v1/day/{date}` and all present in the coverage index.
+
+The run: 76 ledgered year-batches via `make publish-archive`, 1,869
+seconds, **zero failures**. Of 27,759 dates requested, 26,963 were newly
+published, 795 were already published and reported unchanged, and one was
+skipped — 1964-03-27, recorded as "preserved a richer published profile",
+which is the guard that stops a mass context run burying the single
+reviewed-enriched date.
+
+Verification on the settled archive: `reconcile` reports zeros across
+completed-pending, abandoned-pending, missing-profiles, orphan-artifacts,
+hash-mismatches and stale-temps against 27,825 healthy manifests (27,759
+dates plus 66 golden dates carrying a second version).
+`make rebuild-coverage` re-derived all 27,759 entries in 82 seconds with
+zero unreadable, which also re-read and hash-verified every artifact. A
+106-date sample — every leap day in range, both era boundaries, the
+2023/2024 estimate-to-projection boundary, and ten random dates per decade
+— passed the AA4 canary validator with zero issues.
+
+What is *not* claimed: these are `context_only` profiles. They carry the
+reviewed annual context of their year, selected by the standing editorial
+rule, and nothing date-specific. 27,758 of 27,759 dates are
+`context_only`; exactly one is `reviewed_enriched`. Dates in 1900-1949
+remain honestly unpublished because no annual-context pipeline covers
+them, and `/api/v1/day` reports `profile_not_published` for them rather
+than inventing content.

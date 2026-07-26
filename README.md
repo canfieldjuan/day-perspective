@@ -175,6 +175,21 @@ make validate-golden-set
 make verify
 ```
 
+### Publishing the archive
+
+`make publish-golden` proves one evidence-to-publication chain. To publish
+the whole supported range as annual-context profiles:
+
+```bash
+make publish-archive          # 1950-2025 in ledgered year batches
+make reconcile-publications   # expect zeros
+make rebuild-coverage         # expect zero unreadable
+make golden-canary            # validate the golden-100 stress dates
+```
+
+`FROM_YEAR` and `TO_YEAR` narrow the range. Publication is idempotent, so
+re-running reports `unchanged` rather than creating versions.
+
 Security, operations and deployment state are documented in:
 
 - `docs/SECURITY_REVIEW.md`

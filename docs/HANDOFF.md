@@ -556,3 +556,35 @@ test-level retries and tracked on epic #7.
 (#18), published-dates index endpoint for sighted navigation (#19), CI
 docs-only fast path (#20); dark theme, maps/timelines, search,
 bookmarks per UI_UX_CONTRACT C-15.
+
+## Archive activation (slice AA5, 2026-07-26)
+
+**Commands.** `make publish-archive` publishes the whole supported range
+in year-sized ledgered batches; `FROM_YEAR` and `TO_YEAR` narrow it. A
+failing year is recorded and the loop continues, then the target exits
+non-zero naming the failed years — one unpublishable year must not cost
+the other seventy-five. Re-running is safe: publication is idempotent, so
+an already-published date reports `unchanged` rather than creating a
+version.
+
+**Recovery.** A killed run leaves its year's batch run `running` with
+outstanding dates; `make publish-context-resume` finishes it, and
+`make publish-context-retry-failed` re-attempts only the failed dates.
+`make reconcile-publications` reports interrupted publication state and
+`make reconcile-publications-repair` applies recovery. Coverage is
+maintained as publication's final step, so it does not normally need
+rebuilding; `make rebuild-coverage` regenerates it deterministically and
+exits non-zero if any published date's artifact cannot be read.
+
+**Distrust list.** The AA5 run was executed against a development
+database that had applied `20260726_0014` before that migration was
+amended, so it carries three vestigial columns (`quality_floor`,
+`review_status`, `index_version`) that the model no longer references.
+They are nullable or defaulted and affect neither publication nor the
+index, but a from-scratch database — which is what CI builds — will not
+have them. Treat CI's pipeline, not that database, as the authority on
+the migration.
+
+Coverage carries no quality floor or review status: both were deferred to
+issue #45 after repeatedly disagreeing between their six writers. Anything
+reading coverage for evidence quality or review state will find neither.
