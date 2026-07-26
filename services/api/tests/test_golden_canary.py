@@ -15,6 +15,7 @@ import json
 from datetime import date
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 import pytest
 from sqlalchemy.orm import Session
@@ -23,6 +24,7 @@ from app.batch_publication import outstanding_dates, run_context_batch
 from app.golden_canary import (
     GOLDEN_CANARY_KIND,
     CanaryValidation,
+    canary_run_is_resumable,
     plan_golden_canary,
     record_canary_publication,
     start_golden_canary_run,
@@ -778,3 +780,117 @@ class TestConflictContextValidation:
         assert any(
             "describes the year rather than this date" in issue for issue in issues
         ), issues
+
+
+class TestCanaryReleasePinning:
+    """A canary verdict must cover one set of inputs completely.
+
+    Since UC2 a context profile rests on two releases, so pinning only the
+    demographic one leaves the conflict release free to move mid-run: the
+    dates already published would carry release A's counts and the resumed
+    ones release B's, and the run would still report a clean verdict.
+    """
+
+    DATES = [date(1952, 2, 29), date(1953, 6, 15)]
+
+    def _recorded(self, **overrides: object) -> dict[str, Any]:
+        recorded: dict[str, Any] = {
+            "dates": [value.isoformat() for value in self.DATES],
+            "source_release_id": "11111111-1111-1111-1111-111111111111",
+            "ucdp_source_release_id": "22222222-2222-2222-2222-222222222222",
+        }
+        recorded.update(overrides)
+        return recorded
+
+    def _current(self, **overrides: object) -> dict[str, Any]:
+        current: dict[str, Any] = {
+            "source_release_id": UUID("11111111-1111-1111-1111-111111111111"),
+            "ucdp_source_release_id": UUID(
+                "22222222-2222-2222-2222-222222222222"
+            ),
+        }
+        current.update(overrides)
+        return current
+
+    def test_unchanged_inputs_resume(self) -> None:
+        assert canary_run_is_resumable(
+            self._recorded(), dates=self.DATES, current_releases=self._current()
+        )
+
+    def test_a_moved_conflict_release_blocks_the_resume(self) -> None:
+        # The case this pinning exists for: only the UCDP release moved.
+        assert not canary_run_is_resumable(
+            self._recorded(),
+            dates=self.DATES,
+            current_releases=self._current(
+                ucdp_source_release_id=UUID(
+                    "33333333-3333-3333-3333-333333333333"
+                )
+            ),
+        )
+
+    def test_a_moved_demographic_release_still_blocks_the_resume(self) -> None:
+        # The pre-existing guard must survive the generalization.
+        assert not canary_run_is_resumable(
+            self._recorded(),
+            dates=self.DATES,
+            current_releases=self._current(
+                source_release_id=UUID("33333333-3333-3333-3333-333333333333")
+            ),
+        )
+
+    def test_a_different_golden_set_blocks_the_resume(self) -> None:
+        assert not canary_run_is_resumable(
+            self._recorded(dates=["1960-01-01"]),
+            dates=self.DATES,
+            current_releases=self._current(),
+        )
+
+    def test_a_ledger_predating_conflict_context_is_not_blocked(self) -> None:
+        # Runs recorded before UC2 carry no UCDP key. That is an absent
+        # constraint, not a mismatch — treating it as a mismatch would strand
+        # every pre-existing interrupted run.
+        recorded = self._recorded()
+        del recorded["ucdp_source_release_id"]
+        assert canary_run_is_resumable(
+            recorded, dates=self.DATES, current_releases=self._current()
+        )
+
+    def test_an_uningested_conflict_source_is_not_a_mismatch(self) -> None:
+        # Nothing to compare against is not evidence that something moved.
+        assert canary_run_is_resumable(
+            self._recorded(),
+            dates=self.DATES,
+            current_releases=self._current(ucdp_source_release_id=None),
+        )
+
+
+@pytest.mark.integration
+def test_the_canary_run_pins_both_releases_it_rests_on(
+    session: Session, tmp_path: Path, reviewed_un_wpp: None
+) -> None:
+    """The recording side of the same guard: a predicate that compares a key
+    the run never wrote would silently always pass."""
+    from app.adapters.base import LocalFilesystemRawSourceStore
+    from app.ucdp import ingest_ucdp_annual
+
+    from .helpers import synthetic_ucdp_multiyear_csv
+
+    fixture = tmp_path / "conflicts.csv"
+    fixture.write_text(
+        synthetic_ucdp_multiyear_csv([("900", "1952")]), encoding="utf-8"
+    )
+    ingested = ingest_ucdp_annual(
+        session,
+        fixture_path=fixture,
+        raw_store=LocalFilesystemRawSourceStore(tmp_path / "raw"),
+    )
+    session.commit()
+
+    run = start_golden_canary_run(session, dates=[date(1952, 2, 29)])
+
+    recorded = run.requested or {}
+    assert recorded.get("source_release_id") is not None
+    assert recorded.get("ucdp_source_release_id") == str(
+        ingested.source_release_id
+    )

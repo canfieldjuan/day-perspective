@@ -113,6 +113,34 @@ def current_un_wpp_release_id(session: Session) -> UUID | None:
     )
 
 
+def current_ucdp_release_id(session: Session) -> UUID | None:
+    """The conflict-context release a context publication would use now.
+
+    Since UC2 a context profile rests on two releases, so pinning only the
+    demographic one leaves the same mid-run substitution hazard open on the
+    other: finished dates carry release A's conflict counts while resumed
+    dates carry release B's, and the canary's verdict covers neither
+    completely.
+    """
+    from app.models import Source, SourceRelease
+    from app.ucdp import UCDP_ANNUAL_URL, UCDP_SOURCE_SLUG
+
+    source = session.scalar(select(Source).where(Source.slug == UCDP_SOURCE_SLUG))
+    if source is None:
+        return None
+    return session.scalar(
+        select(SourceRelease.id)
+        .where(
+            SourceRelease.source_id == source.id,
+            # The same release the publisher selects: the GED dataset shares
+            # this source and must not be mistaken for the annual one.
+            SourceRelease.source_url == UCDP_ANNUAL_URL,
+        )
+        .order_by(SourceRelease.ingested_at.desc())
+        .limit(1)
+    )
+
+
 def start_golden_canary_run(
     session: Session, *, dates: Sequence[date], force_new_version: bool = False
 ) -> PublicationBatchRun:
@@ -137,8 +165,45 @@ def start_golden_canary_run(
             "source_release_id": str(release)
             if (release := current_un_wpp_release_id(session)) is not None
             else None,
+            # Pinned for the same reason, and separately: the two releases
+            # move independently.
+            "ucdp_source_release_id": str(conflict_release)
+            if (conflict_release := current_ucdp_release_id(session)) is not None
+            else None,
         },
     )
+
+
+def canary_run_is_resumable(
+    recorded: dict[str, Any] | None,
+    *,
+    dates: Sequence[date],
+    current_releases: dict[str, UUID | None],
+) -> bool:
+    """Whether an interrupted canary run's recorded inputs still hold.
+
+    A run recorded against a different golden set, or against a release that
+    has since been superseded, cannot be finished without producing a mixed
+    verdict: the dates already published rest on the old inputs and the
+    resumed ones would rest on the new. Such a run is skipped rather than
+    resumed, so it cannot block newer interrupted runs behind a ledger there
+    is no command to clear.
+
+    Every release the profile rests on is checked separately, because they
+    move independently. A key absent from an older ledger carries no
+    constraint; a key present and moved does.
+    """
+    recorded = recorded or {}
+    dates_match = [
+        date.fromisoformat(str(value)) for value in recorded.get("dates", [])
+    ] in ([], list(dates))
+    releases_match = all(
+        recorded.get(key) is None
+        or current is None
+        or str(current) == str(recorded.get(key))
+        for key, current in current_releases.items()
+    )
+    return dates_match and releases_match
 
 
 def _issue(profile_date: str, message: str) -> str:
