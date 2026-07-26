@@ -24,7 +24,7 @@ from app.golden_canary import (
     record_canary_publication,
     start_golden_canary_run,
 )
-from app.models import BatchRunStatus
+from app.models import BatchRunStatus, PublicationBatchRun
 from app.services import LocalFilesystemPublishedProfileStore, reconcile_publications
 
 #: Repo-root-relative, resolved from this module: the CLI runs with its
@@ -314,35 +314,47 @@ def main() -> None:
             subject = plan.publishable
             if not args.validate_only:
                 if args.resume:
+                    current_release = current_un_wpp_release_id(session)
+
+                    def resumable(candidate: PublicationBatchRun) -> bool:
+                        """Whether this run's recorded inputs still hold.
+
+                        A run recorded against a different golden set or a
+                        superseded release cannot be finished without
+                        producing a mixed verdict. Such a run is skipped so
+                        it cannot block newer interrupted runs behind a
+                        ledger there is no command to clear.
+                        """
+                        recorded = candidate.requested or {}
+                        dates_match = [
+                            date.fromisoformat(str(value))
+                            for value in recorded.get("dates", [])
+                        ] in ([], plan.publishable)
+                        recorded_release = recorded.get("source_release_id")
+                        release_matches = (
+                            recorded_release is None
+                            or current_release is None
+                            or str(current_release) == str(recorded_release)
+                        )
+                        return dates_match and release_matches
+
                     run = recoverable_batch_run(
-                        session, kind=GOLDEN_CANARY_KIND
+                        session,
+                        kind=GOLDEN_CANARY_KIND,
+                        is_resumable=resumable,
                     )
                     if run is None:
                         raise SystemExit("No golden canary run exists to resume.")
-                    recorded_dates = [
+                    if not resumable(run):
+                        raise SystemExit(
+                            "No resumable canary run: the golden set or UN WPP "
+                            "release has changed since every unfinished run "
+                            "started. Start a fresh canary run instead."
+                        )
+                    subject = [
                         date.fromisoformat(str(value))
                         for value in (run.requested or {}).get("dates", [])
-                    ]
-                    if recorded_dates and recorded_dates != plan.publishable:
-                        raise SystemExit(
-                            "The golden set no longer matches the run being "
-                            "resumed; finish or discard that run first."
-                        )
-                    recorded_release = (run.requested or {}).get("source_release_id")
-                    current_release = current_un_wpp_release_id(session)
-                    if (
-                        recorded_release is not None
-                        and current_release is not None
-                        and str(current_release) != str(recorded_release)
-                    ):
-                        # Resuming would publish the remaining dates from a
-                        # different release than the completed ones, and
-                        # validate a mixture that tests neither fully.
-                        raise SystemExit(
-                            "A newer UN WPP release was ingested since this "
-                            "run started; start a fresh canary run instead."
-                        )
-                    subject = recorded_dates or plan.publishable
+                    ] or plan.publishable
                     dates = outstanding_dates(session, batch_run=run)
                     # Finish the run as it was requested: resuming a forced
                     # republication without the flag would leave half the

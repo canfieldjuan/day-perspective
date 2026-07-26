@@ -627,3 +627,46 @@ def test_a_resumed_canary_finishes_the_run_it_was_asked_for(
     run = start_golden_canary_run(session, dates=dates, force_new_version=True)
 
     assert run.requested["force_new_version"] is True
+
+
+@pytest.mark.integration
+def test_a_stale_canary_run_does_not_block_recovery(
+    session: Session, tmp_path: Path, reviewed_un_wpp: None
+) -> None:
+    """An unfinished run recorded against inputs that have since changed must
+    be stepped over. Returning it blocks every later resume behind a ledger
+    the CLI offers no way to clear."""
+    from app.batch_publication import recoverable_batch_run
+
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+    plan = plan_golden_canary(GOLDEN_SET)
+
+    stale_dates = [date(1953, 6, 15), date(1954, 6, 15)]
+    stale = start_golden_canary_run(session, dates=stale_dates)
+    run_context_batch(
+        session, store=store, dates=stale_dates[:1], batch_run=stale
+    )
+    assert outstanding_dates(session, batch_run=stale) == stale_dates[1:]
+
+    current_dates = plan.publishable[:2]
+    current = start_golden_canary_run(session, dates=current_dates)
+    run_context_batch(
+        session, store=store, dates=current_dates[:1], batch_run=current
+    )
+    assert outstanding_dates(session, batch_run=current) == current_dates[1:]
+
+    def resumable(candidate: object) -> bool:
+        recorded = getattr(candidate, "requested", None) or {}
+        return [
+            date.fromisoformat(str(value)) for value in recorded.get("dates", [])
+        ] in ([], current_dates)
+
+    # Oldest-first alone would return the stale run forever.
+    oldest = recoverable_batch_run(session, kind=GOLDEN_CANARY_KIND)
+    assert oldest is not None and oldest.id == stale.id
+
+    selected = recoverable_batch_run(
+        session, kind=GOLDEN_CANARY_KIND, is_resumable=resumable
+    )
+    assert selected is not None
+    assert selected.id == current.id, "a stale run blocked a resumable one"

@@ -8,7 +8,7 @@ its ledger rather than restarted from the beginning.
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from uuid import UUID
@@ -159,6 +159,7 @@ def recoverable_batch_run(
     *,
     kind: str = CONTEXT_BATCH_KIND,
     only_failed: bool = False,
+    is_resumable: Callable[[PublicationBatchRun], bool] | None = None,
 ) -> PublicationBatchRun | None:
     """The oldest run that still owes dates, else the most recent run.
 
@@ -176,8 +177,14 @@ def recoverable_batch_run(
     newest: PublicationBatchRun | None = None
     for run in candidates:
         newest = run
-        if outstanding_dates(session, batch_run=run, only_failed=only_failed):
-            return run
+        if not outstanding_dates(session, batch_run=run, only_failed=only_failed):
+            continue
+        # A run this caller cannot resume — because its recorded inputs no
+        # longer match — must be stepped over, not returned. Returning it
+        # would block every later resume behind a ledger nothing can clear.
+        if is_resumable is not None and not is_resumable(run):
+            continue
+        return run
     return newest
 
 
