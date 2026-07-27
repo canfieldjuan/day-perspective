@@ -280,3 +280,25 @@ describe("deriveEvidenceClass review-round hardening", () => {
     expect(result.caveat).toBeNull();
   });
 });
+
+describe("the app-derived label is a claim about authorship", () => {
+  it("does not attribute a source's assertion to the application", () => {
+    // "App-derived comparison" says Day Perspective computed this. A
+    // statement in that section rooted in a resolved claim is a source
+    // asserting something, and labelling it app-derived misattributes it.
+    // This is C-4.1 in the one section that was not gated on its root.
+    const result = deriveEvidenceClass(
+      "derived_comparisons",
+      resolvedStatement()
+    );
+    expect(result.key).not.toBe("comparison");
+    expect(result.label).not.toBe("App-derived comparison");
+    expect(result.key).toBe("unclassified");
+  });
+
+  it("still labels a genuinely derived comparison as app-derived", () => {
+    const result = deriveEvidenceClass("derived_comparisons", derivedStatement());
+    expect(result.key).toBe("comparison");
+    expect(result.label).toBe("App-derived comparison");
+  });
+});

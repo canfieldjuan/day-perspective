@@ -1054,3 +1054,44 @@ needed.
 **Revisit trigger:** A section becomes load-bearing enough that silently
 omitting it would mislead, at which point that section needs the
 fail-closed treatment instead.
+
+## D039: The first comparison publishes on one date, because the tier says something
+
+**Status:** Accepted (2026-07-27, epic #51 / UC4)
+
+**Context:** UC4 publishes the archive's first app-derived comparison into
+`derived_comparisons`. The obvious move is to carry it onto every date, the
+way UC2 carried conflict context. But `derived_comparisons` is one of
+`EDITORIAL_SECTIONS` (`services/api/app/services.py:1242-1246`), so
+populating it promotes a profile from `context_only` to
+`partially_enriched`.
+
+**Decision:** The comparison publishes on the golden date only, which is
+already `reviewed_enriched` and whose tier therefore does not move. Carrying
+it archive-wide is deferred to #62, which is a contract question about
+what the tier means.
+
+**Alternatives considered:** Publishing it on all 27,759 dates — every
+context profile would become `partially_enriched`, telling readers those
+pages carry curated or comparison content beyond annual context when what
+they carry is one mechanically-derived annual number. The coverage index,
+the enriched-navigation controls and the landing disclosure all key off the
+tier, so the archive's one genuinely enriched date would stop being
+distinguishable. Changing what the tier means so the promotion is
+justified — that is a contract change, and per the working agreement it is
+its own deliberate PR rather than a side effect of a feature.
+
+**Reason:** The tier is a claim about how much a page offers. Promoting
+every page because a derived annual comparison was added would make the
+claim false in exactly the way this product exists not to be false, and it
+would do so silently.
+
+**Consequences:** One date carries a comparison. The derivation runs for all
+80 years, so the data is ready when the breadth question is decided —
+deriving is not publishing. A minimum reference period of 20 years means the
+committed single-year fixture publishes no comparison, so development and CI
+exercise the absence path.
+
+**Revisit trigger:** The tier vocabulary gains a level that distinguishes
+mechanically-derived annual content from curated per-date content, at which
+point the archive-wide question can be reopened without overstating.

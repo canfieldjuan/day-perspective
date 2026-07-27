@@ -1036,3 +1036,112 @@ class TestConflictCaveatWording:
             "describes the year rather than this date" in issue
             for issue in issues
         ), issues
+
+
+def _comparison_statement(
+    *,
+    text: str | None = None,
+    value: object = 10,
+    root_type: str = "derived_value",
+    model_card: object = "conflict-count-vs-reference-median-v1",
+) -> dict[str, object]:
+    details: dict[str, object] = {"value": value, "data_status": "final"}
+    if model_card is not None:
+        details["model_card"] = model_card
+    return {
+        "statement_id": "conflict-vs-median-1952",
+        "statement": text
+        if text is not None
+        else (
+            "Day Perspective compares this: UCDP/PRIO records 46 state-based "
+            "armed conflicts as active in 1952, 10 conflicts more than the "
+            "1946–2025 median of 36. This is a count of distinct conflicts, "
+            "not a measure of their scale."
+        ),
+        "details": details,
+        "provenance": {"root_type": root_type},
+    }
+
+
+class TestComparisonValidation:
+    """The one statement the application asserts on its own account (UC4),
+    so the burden is heavier than for a source's claim."""
+
+    def _payload_with(self, statement: dict[str, object]) -> dict[str, object]:
+        payload = _payload()
+        sections = _mapping(payload, "sections")
+        sections["derived_comparisons"] = [statement]
+        payload["sections"] = sections
+        _support(payload, "derived_comparisons")
+        return payload
+
+    def test_a_correct_comparison_passes(self) -> None:
+        assert validate_context_payload(
+            self._payload_with(_comparison_statement())
+        ) == []
+
+    def test_a_comparison_without_a_model_card_is_caught(self) -> None:
+        # "No comparison ships without one" is the directory's rule; this is
+        # what makes it more than a convention.
+        issues = validate_context_payload(
+            self._payload_with(_comparison_statement(model_card=None))
+        )
+        assert any("no model card" in issue for issue in issues), issues
+
+    def test_a_comparison_rooted_in_a_source_claim_is_caught(self) -> None:
+        issues = validate_context_payload(
+            self._payload_with(_comparison_statement(root_type="resolved_claim"))
+        )
+        assert any("app-derived but its root is" in issue for issue in issues), issues
+
+    def test_prose_and_displayed_difference_must_agree(self) -> None:
+        issues = validate_context_payload(
+            self._payload_with(_comparison_statement(value=3))
+        )
+        assert any("displayed value is 3" in issue for issue in issues), issues
+
+    def test_the_sign_must_agree_not_only_the_magnitude(self) -> None:
+        # "10 more" against a displayed -10 is the same magnitude and the
+        # opposite claim.
+        issues = validate_context_payload(
+            self._payload_with(_comparison_statement(value=-10))
+        )
+        assert any("displayed value is -10" in issue for issue in issues), issues
+
+    def test_a_comparison_claiming_severity_is_caught(self) -> None:
+        issues = validate_context_payload(
+            self._payload_with(
+                _comparison_statement(
+                    text=(
+                        "Day Perspective compares this: 1952 was a worse year "
+                        "than the median. This is a count of distinct "
+                        "conflicts, not a measure of their scale."
+                    )
+                )
+            )
+        )
+        assert any("implies 'worse'" in issue for issue in issues), issues
+
+    def test_a_comparison_without_the_scale_disclaimer_is_caught(self) -> None:
+        issues = validate_context_payload(
+            self._payload_with(
+                _comparison_statement(
+                    text=(
+                        "Day Perspective compares this: UCDP/PRIO records 46 "
+                        "state-based armed conflicts as active in 1952, 10 "
+                        "conflicts more than the 1946–2025 median of 36."
+                    )
+                )
+            )
+        )
+        assert any("not a measure of" in issue for issue in issues), issues
+
+    def test_the_context_rules_do_not_fire_on_a_comparison(self) -> None:
+        # The comparison mentions the same conflicts but is a different claim
+        # with a different shape. Validating it under the annual-context rules
+        # reported three defects in a statement that had none.
+        issues = validate_context_payload(
+            self._payload_with(_comparison_statement())
+        )
+        assert not any("period_context marker" in issue for issue in issues), issues
+        assert not any("names no year" in issue for issue in issues), issues

@@ -294,6 +294,85 @@ def validate_context_payload(payload: dict[str, Any]) -> list[str]:
                 statement, profile_date=profile_date, year=year
             )
         )
+    for statement in _section_statements(sections, "derived_comparisons"):
+        issues.extend(
+            _validate_comparison(statement, profile_date=profile_date)
+        )
+    return issues
+
+
+def _validate_comparison(
+    statement: dict[str, Any], *, profile_date: str
+) -> list[str]:
+    """An app-derived comparison's honesty properties.
+
+    This is the one kind of statement the application asserts on its own
+    account, so the burden is heavier than for a source's claim: the reader
+    must be able to see that we computed it, reach the card that bounds it,
+    and check the arithmetic against the number we display.
+    """
+    issues: list[str] = []
+    statement_id = str(statement.get("statement_id", "?"))
+    text = str(statement.get("statement", ""))
+    details = statement.get("details")
+    details = details if isinstance(details, dict) else {}
+    provenance = statement.get("provenance")
+    provenance = provenance if isinstance(provenance, dict) else {}
+
+    if provenance.get("root_type") != "derived_value":
+        issues.append(
+            _issue(
+                profile_date,
+                f"{statement_id} is presented as app-derived but its root is "
+                f"{provenance.get('root_type')!r}",
+            )
+        )
+    if not details.get("model_card"):
+        issues.append(
+            _issue(
+                profile_date,
+                f"{statement_id} publishes a comparison with no model card",
+            )
+        )
+    if COMPARISON_SCALE_DISCLAIMER not in text:
+        issues.append(
+            _issue(
+                profile_date,
+                f"{statement_id} does not say the count is not a measure of "
+                "scale",
+            )
+        )
+    stated = re.search(r"(\d+) conflicts? (more|fewer) than", text)
+    displayed = details.get("value")
+    if stated is not None:
+        signed = int(stated.group(1)) * (1 if stated.group(2) == "more" else -1)
+        if displayed != signed:
+            issues.append(
+                _issue(
+                    profile_date,
+                    f"{statement_id} prose says {stated.group(0)!r} but its "
+                    f"displayed value is {displayed!r}",
+                )
+            )
+    elif "the same as the" in text and displayed != 0:
+        issues.append(
+            _issue(
+                profile_date,
+                f"{statement_id} says the value equals the baseline but "
+                f"displays {displayed!r}",
+            )
+        )
+    lowered = text.lower()
+    for word in (*CONFLICT_MORTALITY_WORDS, "worse", "deadlier", "trend",
+                 "rising", "falling", "more violent"):
+        if word in lowered:
+            issues.append(
+                _issue(
+                    profile_date,
+                    f"{statement_id} implies {word!r}, which a count of "
+                    "distinct conflicts does not support",
+                )
+            )
     return issues
 
 
@@ -302,6 +381,11 @@ def validate_context_payload(payload: dict[str, Any]) -> list[str]:
 #: statements carry that marker too — keying on it would validate them
 #: against conflict rules and let an unmarked conflict statement through.
 CONFLICT_TEXT = "state-based armed conflicts"
+
+#: Must appear on every published comparison.
+COMPARISON_SCALE_DISCLAIMER = (
+    "This is a count of distinct conflicts, not a measure of their scale."
+)
 
 #: The UCDP/PRIO annual dataset establishes that a conflict was active, not
 #: how many people it killed. Battle-related deaths are a separate dataset
@@ -367,17 +451,27 @@ CONFLICT_MORTALITY_WORDS = (
 )
 
 
+def _section_statements(sections: dict[str, Any], key: str) -> list[dict[str, Any]]:
+    statements = sections.get(key)
+    if not isinstance(statements, list):
+        return []
+    return [item for item in statements if isinstance(item, dict)]
+
+
 def _conflict_statements(sections: dict[str, Any]) -> list[dict[str, Any]]:
-    found: list[dict[str, Any]] = []
-    for statements in sections.values():
-        if not isinstance(statements, list):
-            continue
-        for statement in statements:
-            if not isinstance(statement, dict):
-                continue
-            if CONFLICT_TEXT in str(statement.get("statement", "")).lower():
-                found.append(statement)
-    return found
+    """The annual conflict-context statement, scoped to its own section.
+
+    Scanning every section for the phrase swept in the app-derived
+    comparison, which mentions the same conflicts but is a different claim
+    with a different shape — its displayed value is a difference, not a
+    count — so the context rules fired on it and reported three defects in
+    a statement that had none.
+    """
+    return [
+        statement
+        for statement in _section_statements(sections, "wider_historical_context")
+        if CONFLICT_TEXT in str(statement.get("statement", "")).lower()
+    ]
 
 
 def _validate_conflict_context(

@@ -131,6 +131,14 @@ export function deriveEvidenceClass(
   if (sectionDefault === "daily-average" && !hasDerived) {
     return CLASSES.unclassified;
   }
+  // "App-derived comparison" is a claim about who made the claim. A
+  // statement in this section rooted in a resolved claim is a source's
+  // assertion, and labelling it app-derived misattributes it — the same
+  // C-4.1 failure as the two gates above, in the one section that lacked
+  // the check.
+  if (sectionDefault === "comparison" && !hasDerived) {
+    return CLASSES.unclassified;
+  }
   if (sectionDefault === "comparison") {
     const comparability = detailString(
       statementValue.details,

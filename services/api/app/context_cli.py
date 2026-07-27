@@ -6,6 +6,7 @@ from pathlib import Path
 from sqlalchemy import select
 
 from app.config import get_settings
+from app.conflict_comparison import derive_release_comparisons
 from app.database import SessionLocal
 from app.models import Source, SourceRelease
 from app.ucdp import (
@@ -160,6 +161,11 @@ def main() -> None:
                     # up later as a wall of publication failures instead.
                     print(label)
                     raise SystemExit(1)
+                # Only now, with every year reviewed, is the reference cohort
+                # complete. Deriving earlier would compare a year against a
+                # baseline that is about to change.
+                comparisons = derive_release_comparisons(session, release.id)
+                label += f" comparisons={comparisons}"
             else:
                 derived = review_ucdp_annual(session, release.id)
                 label = f"derived_value_id={derived.id}"
