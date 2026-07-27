@@ -43,6 +43,10 @@ function coverageBody(
     date,
     profile_type: "standard_statistical",
     publication_tier: tier,
+    // Required since MD1: the validator rejects a coverage payload missing
+    // them, so a mock without these renders no discovery panel at all.
+    review_status: "automated_only",
+    quality_floor: "not_assessed",
     has_recorded_event: tier !== "context_only",
     sections: { typical_day_in_this_year: 2 },
     nearest_enriched_before: before,

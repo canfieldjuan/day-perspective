@@ -194,6 +194,31 @@ def _date_transaction(
         raise
 
 
+def refresh_coverage_metadata(session: Session, *, profile_date: date) -> bool:
+    """Re-derive review status and quality floor for one date.
+
+    Publication is not the only thing that changes these. A reviewer
+    recording a decision, or a source being regraded, changes how published
+    content was validated without changing the content — so without this the
+    index would keep reporting `automated_only` after a review, or an
+    obsolete floor after a downgrade, until someone happened to rebuild.
+
+    This is a seventh caller of the derivation, which is exactly what #45
+    warned about — but it is safe for the reason that made the design work:
+    it re-derives rather than supplying a value, so it cannot disagree with
+    the other six.
+
+    Returns False when the date has no servable manifest, so governance
+    writers can call it unconditionally: recording a selection before the
+    profile exists is normal during publication.
+    """
+    manifest = _latest_published_manifest(session, profile_date)
+    if manifest is None:
+        return False
+    upsert_coverage_entry(session, manifest=manifest)
+    return True
+
+
 def rebuild_coverage_index(
     session: Session,
     *,

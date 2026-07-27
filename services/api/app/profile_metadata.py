@@ -24,13 +24,14 @@ from dataclasses import dataclass
 from datetime import date
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.governance import EditorialSelection, EditorialSelectionStatus
 from app.models import (
     Claim,
     DerivedValue,
+    DerivedValueInput,
     PublicationManifest,
     PublicationStatementEvidence,
     QualityAssessment,
@@ -116,7 +117,8 @@ def derive_review_status(
     if not keyed:
         return ReviewStatus.AUTOMATED_ONLY
 
-    if _has_open_review_task(session, resolved_ids):
+    pending_over = resolved_ids | _claims_behind_derived(session, derived_ids)
+    if _has_open_review_task(session, pending_over):
         return ReviewStatus.REVIEW_PENDING
 
     latest: dict[tuple[str, UUID], EditorialSelection] = {}
@@ -139,6 +141,48 @@ def derive_review_status(
         ):
             return ReviewStatus.AUTOMATED_ONLY
     return ReviewStatus.HUMAN_REVIEWED
+
+
+def _claims_behind_derived(session: Session, derived_ids: set[UUID]) -> set[UUID]:
+    """Resolved claims a derivation was computed from.
+
+    A statement rooted in a derived value has no resolved claim of its own,
+    so checking only the direct roots meant an open review task on a
+    derivation's inputs could never surface as review_pending — the content
+    most likely to be mid-review was the content that could never report it.
+    """
+    if not derived_ids:
+        return set()
+    roots = set(
+        session.scalars(
+            select(DerivedValueInput.resolved_claim_id).where(
+                DerivedValueInput.derived_value_id.in_(derived_ids),
+                DerivedValueInput.resolved_claim_id.is_not(None),
+            )
+        )
+    )
+    # A derivation over other derivations (UC4's comparison) reaches its
+    # claims one level further down.
+    nested = set(
+        session.scalars(
+            select(DerivedValueInput.input_derived_value_id).where(
+                DerivedValueInput.derived_value_id.in_(derived_ids),
+                DerivedValueInput.input_derived_value_id.is_not(None),
+            )
+        )
+    )
+    if nested:
+        roots |= set(
+            session.scalars(
+                select(DerivedValueInput.resolved_claim_id).where(
+                    DerivedValueInput.derived_value_id.in_(nested),
+                    DerivedValueInput.resolved_claim_id.is_not(None),
+                )
+            )
+        )
+    # Narrowed after the is_not(None) filters, which the type checker cannot
+    # see through.
+    return {root for root in roots if root is not None}
 
 
 def _has_open_review_task(session: Session, resolved_ids: set[UUID]) -> bool:
@@ -176,17 +220,7 @@ def derive_quality_floor(
     claim available.
     """
     _, resolved_ids, derived_ids = _statement_roots(session, manifest.id)
-    releases = _releases_behind(session, resolved_ids, derived_ids)
-    if not releases:
-        return QualityFloor.NOT_ASSESSED
-
-    grades = list(
-        session.scalars(
-            select(QualityAssessment.public_grade).where(
-                QualityAssessment.source_release_id.in_(releases)
-            )
-        )
-    )
+    grades = _applicable_grades(session, resolved_ids, derived_ids)
     if not grades:
         return QualityFloor.NOT_ASSESSED
 
@@ -204,6 +238,43 @@ def derive_quality_floor(
         if rank == weakest:
             return QualityFloor(letter)
     return QualityFloor.NOT_ASSESSED
+
+
+def _applicable_grades(
+    session: Session, resolved_ids: set[UUID], derived_ids: set[UUID]
+) -> list[str]:
+    """Every grade bearing on this profile's published evidence.
+
+    QualityAssessment can target a claim, an observation, a derived value or
+    a methodology as well as a source release. Reading only release-level
+    rows let a D on a published derived value be skipped while an A on its
+    release set the floor — the floor reporting the strongest assessment
+    rather than the weakest, which is the one direction it must never fail
+    in.
+    """
+    claim_ids = set(
+        session.scalars(
+            select(ResolvedClaimEvidence.claim_id).where(
+                ResolvedClaimEvidence.resolved_claim_id.in_(resolved_ids)
+            )
+        )
+    ) if resolved_ids else set()
+    releases = _releases_behind(session, resolved_ids, derived_ids)
+
+    conditions = []
+    if releases:
+        conditions.append(QualityAssessment.source_release_id.in_(releases))
+    if claim_ids:
+        conditions.append(QualityAssessment.claim_id.in_(claim_ids))
+    if derived_ids:
+        conditions.append(QualityAssessment.derived_value_id.in_(derived_ids))
+    if not conditions:
+        return []
+    return list(
+        session.scalars(
+            select(QualityAssessment.public_grade).where(or_(*conditions))
+        )
+    )
 
 
 def _releases_behind(

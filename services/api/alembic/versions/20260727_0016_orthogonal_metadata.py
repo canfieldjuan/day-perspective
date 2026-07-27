@@ -92,6 +92,28 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # Restore the narrower column, or refuse. Silently truncating a
+    # published grade would leave the archive asserting a quality string
+    # nobody wrote, which is worse than a failed downgrade.
+    too_long = op.get_bind().execute(
+        sa.text(
+            "SELECT count(*) FROM quality_assessments "
+            "WHERE length(public_grade) > 8"
+        )
+    ).scalar_one()
+    if too_long:
+        raise RuntimeError(
+            f"{too_long} quality grade(s) exceed 8 characters and would be "
+            "truncated by this downgrade. Shorten or remove them first; this "
+            "migration will not silently rewrite published grades."
+        )
+    op.alter_column(
+        "quality_assessments",
+        "public_grade",
+        type_=sa.String(length=8),
+        existing_type=sa.Text(),
+        existing_nullable=False,
+    )
     op.drop_column("coverage_entries", "quality_floor")
     op.drop_column("coverage_entries", "review_status")
     op.execute("DROP TYPE quality_floor")

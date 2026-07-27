@@ -388,3 +388,138 @@ def test_the_migration_default_understates_rather_than_flatters(
 
     assert entry.review_status is ReviewStatus.AUTOMATED_ONLY
     assert entry.quality_floor is QualityFloor.NOT_ASSESSED
+
+
+@pytest.mark.integration
+def test_recording_a_review_refreshes_the_index_without_republishing(
+    session: Session, published: PublicationManifest
+) -> None:
+    """Publication is not the only thing that changes these fields.
+
+    A decision recorded after publication changes how the content was
+    validated without changing the content. Before this, the index kept
+    reporting automated_only until somebody happened to rebuild — the
+    interface telling a reader nobody had checked a page a reviewer had just
+    checked.
+    """
+    from app.models import CoverageEntry
+
+    entry = session.scalar(
+        select(CoverageEntry).where(CoverageEntry.profile_date == PROFILE_DATE)
+    )
+    assert entry is not None
+    assert entry.review_status is ReviewStatus.AUTOMATED_ONLY
+    content_hash_before = published.content_hash
+
+    for row in _roots(session, published):
+        record_editorial_selection(
+            session,
+            profile_date=PROFILE_DATE,
+            section_key=row.statement_path.split("/")[2],
+            resolved_claim_id=row.resolved_claim_id,
+            derived_value_id=row.derived_value_id,
+            status=EditorialSelectionStatus.SELECTED,
+            display_rank=1,
+            rationale="Checked after publication.",
+            reviewed_by="a-human-reviewer",
+        )
+
+    session.refresh(entry)
+    assert entry.review_status is ReviewStatus.HUMAN_REVIEWED
+    # The content did not change, so the artifact must not have.
+    assert published.content_hash == content_hash_before
+
+
+@pytest.mark.integration
+def test_a_grade_on_published_evidence_can_lower_the_floor(
+    session: Session, published: PublicationManifest
+) -> None:
+    """QualityAssessment can target a claim or derived value, not only a
+    release. Reading release rows alone let a D on published evidence be
+    skipped while an A on its release set the floor — the floor reporting
+    the strongest assessment rather than the weakest."""
+    from app.models import PublicationStatementEvidence, QualityAssessment
+
+    release_rows = list(
+        session.scalars(
+            select(QualityAssessment).where(
+                QualityAssessment.source_release_id.is_not(None)
+            )
+        )
+    )
+    assert release_rows
+    for row in release_rows:
+        row.public_grade = "A"
+    session.flush()
+    assert derive_quality_floor(session, manifest=published) is QualityFloor.A
+
+    derived_root = session.scalar(
+        select(PublicationStatementEvidence.derived_value_id).where(
+            PublicationStatementEvidence.publication_manifest_id == published.id,
+            PublicationStatementEvidence.derived_value_id.is_not(None),
+        )
+    )
+    assert derived_root is not None
+    session.add(
+        QualityAssessment(
+            derived_value_id=derived_root,
+            methodology_id=release_rows[0].methodology_id,
+            assessment_kind="targeted-for-test",
+            findings={},
+            public_grade="D",
+            public_explanation="A weak assessment of published evidence.",
+        )
+    )
+    session.flush()
+
+    assert derive_quality_floor(session, manifest=published) is QualityFloor.D
+
+
+@pytest.mark.integration
+def test_an_open_task_on_a_derivations_inputs_reads_as_pending(
+    session: Session, published: PublicationManifest
+) -> None:
+    """A statement rooted in a derived value has no resolved claim of its
+    own, so checking only direct roots meant the content most likely to be
+    mid-review was the content that could never report it."""
+    from app.models import (
+        DerivedValueInput,
+        PublicationStatementEvidence,
+        ResolvedClaimEvidence,
+        ReviewTask,
+    )
+
+    derived_root = session.scalar(
+        select(PublicationStatementEvidence.derived_value_id).where(
+            PublicationStatementEvidence.publication_manifest_id == published.id,
+            PublicationStatementEvidence.derived_value_id.is_not(None),
+        )
+    )
+    assert derived_root is not None
+    input_claim = session.scalar(
+        select(DerivedValueInput.resolved_claim_id).where(
+            DerivedValueInput.derived_value_id == derived_root,
+            DerivedValueInput.resolved_claim_id.is_not(None),
+        )
+    )
+    assert input_claim is not None
+    claim_id = session.scalar(
+        select(ResolvedClaimEvidence.claim_id).where(
+            ResolvedClaimEvidence.resolved_claim_id == input_claim
+        )
+    )
+    assert claim_id is not None
+
+    session.add(
+        ReviewTask(
+            claim_id=claim_id,
+            status="open",
+            priority="normal",
+            rationale="Verifying the derivation's input claim.",
+        )
+    )
+    session.flush()
+
+    assert derive_review_status(session, manifest=published) is (
+        ReviewStatus.REVIEW_PENDING
+    )
