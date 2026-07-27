@@ -14,6 +14,8 @@ const base: CoverageDateResponse = {
   date: "1983-10-12",
   profile_type: "standard_statistical",
   publication_tier: "context_only",
+  review_status: "automated_only",
+  quality_floor: "not_assessed",
   has_recorded_event: false,
   sections: {},
   nearest_enriched_before: null,

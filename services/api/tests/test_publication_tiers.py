@@ -88,7 +88,7 @@ def test_editorial_material_without_a_recorded_event_is_partially_enriched(
     )
 
 
-def test_a_recorded_event_makes_the_profile_reviewed_enriched() -> None:
+def test_a_recorded_event_makes_the_profile_enriched() -> None:
     assert (
         derive_publication_tier(
             profile_payload(
@@ -98,14 +98,14 @@ def test_a_recorded_event_makes_the_profile_reviewed_enriched() -> None:
                 }
             )
         )
-        is PublicationTier.REVIEWED_ENRICHED
+        is PublicationTier.ENRICHED
     )
 
 
 def test_tiers_are_ordered_from_sparse_to_rich() -> None:
     assert PublicationTier.CONTEXT_ONLY.rank == 0
     assert PublicationTier.PARTIALLY_ENRICHED.rank == 1
-    assert PublicationTier.REVIEWED_ENRICHED.rank == 2
+    assert PublicationTier.ENRICHED.rank == 2
 
 
 def test_malformed_sections_degrade_to_context_only_without_raising() -> None:
@@ -221,10 +221,10 @@ def test_tier_is_queryable_for_coverage(session: Session, tmp_path: Path) -> Non
         session.scalars(
             select(PublicationManifest.publication_tier).where(
                 PublicationManifest.publication_tier
-                == PublicationTier.REVIEWED_ENRICHED
+                == PublicationTier.ENRICHED
             )
         )
-    ) == [PublicationTier.REVIEWED_ENRICHED]
+    ) == [PublicationTier.ENRICHED]
 
 
 @pytest.mark.integration

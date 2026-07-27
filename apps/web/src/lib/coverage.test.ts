@@ -9,6 +9,8 @@ const base = {
   date: "1983-10-12",
   profile_type: "standard_statistical",
   publication_tier: "context_only",
+  review_status: "automated_only",
+  quality_floor: "not_assessed",
   has_recorded_event: false,
   sections: { typical_day_in_this_year: 2 },
   nearest_enriched_before: null,
@@ -57,7 +59,7 @@ describe("isCoverageResponse", () => {
 describe("discoveryStateFor", () => {
   it("reports an enriched page as needing no discovery prompt", () => {
     const state = discoveryStateFor(
-      { ...base, publication_tier: "reviewed_enriched", has_recorded_event: true },
+      { ...base, publication_tier: "enriched", has_recorded_event: true },
       "1964-03-27"
     );
     expect(state.kind).toBe("on-enriched-date");
@@ -249,7 +251,9 @@ describe("discovery from an enriched page", () => {
     const state = discoveryStateFor(
       {
         ...base,
-        publication_tier: "reviewed_enriched",
+        publication_tier: "enriched",
+        review_status: "automated_only",
+        quality_floor: "not_assessed",
         has_recorded_event: true,
         nearest_enriched_before: "1964-03-27"
       },
@@ -263,7 +267,9 @@ describe("discovery from an enriched page", () => {
     const state = discoveryStateFor(
       {
         ...base,
-        publication_tier: "reviewed_enriched",
+        publication_tier: "enriched",
+        review_status: "automated_only",
+        quality_floor: "not_assessed",
         has_recorded_event: true
       },
       "1964-03-27"

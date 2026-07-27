@@ -11,6 +11,8 @@ const base: CoverageDateResponse = {
   date: "1983-10-12",
   profile_type: "standard_statistical",
   publication_tier: "context_only",
+  review_status: "automated_only",
+  quality_floor: "not_assessed",
   has_recorded_event: false,
   sections: {},
   nearest_enriched_before: null,
@@ -185,7 +187,9 @@ describe("CoverageDiscovery", () => {
 
   it("renders nothing on an enriched page, which is not sparse", () => {
     renderFor({
-      publication_tier: "reviewed_enriched",
+      publication_tier: "enriched",
+      review_status: "automated_only",
+      quality_floor: "not_assessed",
       has_recorded_event: true
     });
     expect(screen.queryByTestId("coverage-discovery")).toBeNull();

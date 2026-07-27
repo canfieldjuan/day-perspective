@@ -133,17 +133,54 @@ class PublicationStatus(str, Enum):
     WITHDRAWN = "withdrawn"
 
 
+class ReviewStatus(str, Enum):
+    """Who or what validated a profile's published content.
+
+    Deliberately separate from PublicationTier. Richness and review are
+    different questions, and answering both with one label is what made
+    "enriched" unable to describe a reviewed context page or an
+    unreviewed enriched one.
+    """
+
+    AUTOMATED_ONLY = "automated_only"
+    REVIEW_PENDING = "review_pending"
+    HUMAN_REVIEWED = "human_reviewed"
+
+
+class QualityFloor(str, Enum):
+    """The weakest graded evidence among a profile's published content.
+
+    not_assessed is the honest answer when any published item's grade cannot
+    be ranked: the floor is then at best the weakest letter seen and possibly
+    worse, so no letter can be claimed.
+    """
+
+    A = "A"
+    B = "B"
+    C = "C"
+    D = "D"
+    NOT_ASSESSED = "not_assessed"
+
+
 class PublicationTier(str, Enum):
-    """How much a published profile actually offers.
+    """How much a published profile actually offers — and only that.
 
     Ordered from sparse to rich. A date carrying only annual demographic
-    context is useful, but it is not equivalent to a date with a reviewed
-    recorded event, and the product must never imply otherwise.
+    context is useful, but it is not equivalent to a date with a recorded
+    event, and the product must never imply otherwise.
+
+    This axis says nothing about who checked the content: that is
+    ReviewStatus. The retired ``reviewed_enriched`` fused the two, so the
+    archive could not describe a reviewed context page or an unreviewed
+    enriched one. A tier rises only for content tied to the specific date —
+    annual averages, annual conflict counts and period comparisons are all
+    ``context_only``, however many of them a page carries, or the word
+    stops meaning anything.
     """
 
     CONTEXT_ONLY = "context_only"
     PARTIALLY_ENRICHED = "partially_enriched"
-    REVIEWED_ENRICHED = "reviewed_enriched"
+    ENRICHED = "enriched"
 
     @property
     def rank(self) -> int:
@@ -153,7 +190,7 @@ class PublicationTier(str, Enum):
 _PUBLICATION_TIER_RANKS = {
     PublicationTier.CONTEXT_ONLY: 0,
     PublicationTier.PARTIALLY_ENRICHED: 1,
-    PublicationTier.REVIEWED_ENRICHED: 2,
+    PublicationTier.ENRICHED: 2,
 }
 
 
@@ -914,6 +951,14 @@ class CoverageEntry(Base):
     profile_date: Mapped[date] = mapped_column(Date)
     profile_type: Mapped[ProfileType] = mapped_column(
         enum_type(ProfileType, "profile_type")
+    )
+    review_status: Mapped[ReviewStatus] = mapped_column(
+        enum_type(ReviewStatus, "review_status"),
+        default=ReviewStatus.AUTOMATED_ONLY,
+    )
+    quality_floor: Mapped[QualityFloor] = mapped_column(
+        enum_type(QualityFloor, "quality_floor"),
+        default=QualityFloor.NOT_ASSESSED,
     )
     publication_manifest_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("publication_manifests.id")

@@ -1265,7 +1265,7 @@ def derive_publication_tier(payload: dict[str, Any]) -> PublicationTier:
         return isinstance(statements, list) and len(statements) > 0
 
     if populated(RECORDED_SECTION):
-        return PublicationTier.REVIEWED_ENRICHED
+        return PublicationTier.ENRICHED
     if any(populated(key) for key in EDITORIAL_SECTIONS):
         return PublicationTier.PARTIALLY_ENRICHED
     return PublicationTier.CONTEXT_ONLY

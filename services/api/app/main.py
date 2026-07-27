@@ -30,7 +30,9 @@ from app.models import (
     PublicationManifest,
     PublicationStatus,
     PublicationTier,
+    QualityFloor,
     ResolvedClaimEvidence,
+    ReviewStatus,
     ReviewTask,
     Source,
     SourceRelease,
@@ -107,6 +109,11 @@ class CoverageDateResponse(APIModel):
     date: dtmod.date
     profile_type: ProfileType
     publication_tier: PublicationTier
+    #: Three independent axes: how much is here, who checked it, and how
+    #: strong the weakest included evidence is. Rendered separately, because
+    #: fusing them is what the retired reviewed_enriched got wrong.
+    review_status: ReviewStatus
+    quality_floor: QualityFloor
     has_recorded_event: bool
     sections: dict[str, int]
     nearest_enriched_before: dtmod.date | None
@@ -315,6 +322,8 @@ def read_coverage_for_date(
         date=record.profile_date,
         profile_type=record.profile_type,
         publication_tier=record.publication_tier,
+        review_status=record.review_status,
+        quality_floor=record.quality_floor,
         has_recorded_event=record.has_recorded_event,
         sections=record.sections,
         nearest_enriched_before=record.nearest_enriched_before,

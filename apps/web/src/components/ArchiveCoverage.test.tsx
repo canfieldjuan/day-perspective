@@ -8,7 +8,7 @@ import { ArchiveCoverage } from "./ArchiveCoverage";
 const summary: CoverageSummaryResponse = {
   status: "coverage_summary",
   total_published: 27759,
-  by_tier: { context_only: 27758, partially_enriched: 0, reviewed_enriched: 1 },
+  by_tier: { context_only: 27758, partially_enriched: 0, enriched: 1 },
   with_recorded_event: 1,
   earliest: "1950-01-01",
   latest: "2025-12-31",

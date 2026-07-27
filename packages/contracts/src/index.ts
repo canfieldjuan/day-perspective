@@ -66,17 +66,44 @@ export interface ProfileStatement {
 }
 
 /**
- * How much a published profile actually offers, ordered sparse to rich.
- * A date carrying only annual demographic context is useful, but it is not
- * equivalent to a date with a reviewed recorded event.
+ * How much a published profile actually offers, ordered sparse to rich —
+ * and only that. A date carrying only annual demographic context is useful,
+ * but it is not equivalent to a date with a recorded event.
+ *
+ * This axis says nothing about who checked the content (REVIEW_STATUSES) or
+ * how strong its weakest evidence is (QUALITY_FLOORS). The retired
+ * `reviewed_enriched` fused richness with review, so the archive could not
+ * describe a reviewed context page or an unreviewed enriched one.
+ *
+ * A tier rises only for content tied to the specific date. Annual averages,
+ * annual conflict counts and period comparisons are all `context_only`
+ * however many a page carries.
  */
 export const PUBLICATION_TIERS = [
   "context_only",
   "partially_enriched",
-  "reviewed_enriched"
+  "enriched"
 ] as const;
 
 export type PublicationTier = (typeof PUBLICATION_TIERS)[number];
+
+/** Who or what validated a profile's published content. */
+export const REVIEW_STATUSES = [
+  "automated_only",
+  "review_pending",
+  "human_reviewed"
+] as const;
+
+export type ReviewStatus = (typeof REVIEW_STATUSES)[number];
+
+/**
+ * The weakest graded evidence among a profile's published content.
+ * `not_assessed` is the honest answer when any item's grade cannot be
+ * ranked: the floor is then at best the weakest letter seen, possibly worse.
+ */
+export const QUALITY_FLOORS = ["A", "B", "C", "D", "not_assessed"] as const;
+
+export type QualityFloor = (typeof QUALITY_FLOORS)[number];
 
 export interface PublishedDayProfile {
   schema_version: "1";
@@ -123,6 +150,13 @@ export interface CoverageDateResponse {
   date: string;
   profile_type: ProfileType;
   publication_tier: PublicationTier;
+  /**
+   * Independent of the tier, and rendered independently. "Enriched" answers
+   * how much is here; "reviewed" answers who or what checked it; the floor
+   * answers how strong the weakest included evidence is.
+   */
+  review_status: ReviewStatus;
+  quality_floor: QualityFloor;
   has_recorded_event: boolean;
   /** Published statement counts per section, from immutable evidence rows. */
   sections: CoverageSectionCounts;

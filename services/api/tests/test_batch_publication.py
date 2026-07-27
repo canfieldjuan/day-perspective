@@ -304,7 +304,7 @@ def test_a_batch_never_buries_a_richer_published_profile(
     assert preserved.id == enriched_manifest_id, (
         "The enriched date was superseded by a context-only version."
     )
-    assert preserved.publication_tier is PublicationTier.REVIEWED_ENRICHED
+    assert preserved.publication_tier is PublicationTier.ENRICHED
 
 
 @pytest.mark.integration

@@ -168,7 +168,7 @@ def test_the_index_records_richness_not_merely_publication(
 
     enriched = coverage_entry(session, enriched_date)
     assert enriched is not None
-    assert enriched.publication_tier is PublicationTier.REVIEWED_ENRICHED
+    assert enriched.publication_tier is PublicationTier.ENRICHED
     assert enriched.sections["recorded_on_this_date"] == 1
     assert enriched.has_recorded_event is True
 
@@ -225,7 +225,7 @@ def test_rebuilding_is_idempotent_and_follows_supersession(
     session.commit()
     corrected = coverage_entry(session, profile_date)
     assert corrected is not None
-    assert corrected.publication_tier is PublicationTier.REVIEWED_ENRICHED
+    assert corrected.publication_tier is PublicationTier.ENRICHED
 
 
 @pytest.mark.integration
@@ -881,7 +881,7 @@ def test_the_summary_reports_the_shape_of_the_archive(
 
     assert summary.total_published == 4
     assert summary.by_tier["context_only"] == 3
-    assert summary.by_tier["reviewed_enriched"] == 1
+    assert summary.by_tier["enriched"] == 1
     assert summary.with_recorded_event == 1
     assert summary.earliest == date(1982, 5, 1)
     assert summary.latest == date(1982, 6, 1)
