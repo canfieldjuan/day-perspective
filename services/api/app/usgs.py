@@ -23,6 +23,7 @@ from app.adapters.base import (
     RawSourceStore,
     SourceMetadata,
 )
+from app.conflict_comparison import optional_conflict_comparison
 from app.governance import (
     EditorialSelectionStatus,
     LicenseInput,
@@ -1184,6 +1185,11 @@ def publish_golden_profile(
         )
     un_context = build_un_wpp_profile_content(session)
     ucdp_context = build_ucdp_annual_profile_content(session)
+    # Absent unless the comparison has been derived, which requires the whole
+    # reference cohort. A profile without it simply makes no comparison.
+    comparison = optional_conflict_comparison(
+        session, year=GOLDEN_DATE.year, statement_index=0
+    )
     resolved_values = {
         predicate: row.resolved_value for predicate, row in resolved.items()
     }
@@ -1314,12 +1320,21 @@ def publish_golden_profile(
             *ucdp_context.statements,
         ],
         "curated_claims": [],
-        "derived_comparisons": [],
+        # The archive's first app-derived claim. Published here rather than
+        # on every date because derived_comparisons is an EDITORIAL_SECTION:
+        # populating it archive-wide would flip 27,759 context_only profiles
+        # to partially_enriched, telling readers those pages offer curated
+        # content they do not. This date is already reviewed_enriched, so
+        # carrying the comparison changes no tier. #62 holds the
+        # archive-wide question; D039 records the reasoning.
+        "derived_comparisons": list(comparison.statements) if comparison else [],
         "wonder_and_progress": [],
         "evidence_notes": [evidence_statement],
     }
     evidence.extend(un_context.evidence)
     evidence.extend(ucdp_context.evidence)
+    if comparison is not None:
+        evidence.extend(comparison.evidence)
     payload = {
         "schema_version": "1",
         "date": GOLDEN_DATE.isoformat(),
@@ -1329,12 +1344,15 @@ def publish_golden_profile(
             key: (
                 {"status": "available"}
                 if key
-                in {
-                    "recorded_on_this_date",
-                    "typical_day_in_this_year",
-                    "wider_historical_context",
-                    "evidence_notes",
-                }
+                in (
+                    {
+                        "recorded_on_this_date",
+                        "typical_day_in_this_year",
+                        "wider_historical_context",
+                        "evidence_notes",
+                    }
+                    | ({"derived_comparisons"} if comparison else set())
+                )
                 else {
                     "status": "not_yet_supported",
                     "reason": "This vertical slice does not publish this evidence class.",

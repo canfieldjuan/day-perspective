@@ -4,6 +4,7 @@ import React, { useEffect, useRef } from "react";
 
 import type { ProfileStatement } from "@day-perspective/contracts";
 import styles from "./EvidencePanel.module.css";
+import { modelCardUrl } from "@/src/lib/model-card";
 
 type EvidencePanelProps = {
   open: boolean;
@@ -39,6 +40,12 @@ export function EvidencePanel({
   }, [open]);
 
   const provenance = statement?.provenance;
+  // Read from the derived value the panel already shows, so the card named
+  // here is the one that governs the computation on screen rather than a
+  // label attached alongside it.
+  const modelCardValue = provenance?.derived_value?.value?.model_card;
+  const modelCard =
+    typeof modelCardValue === "string" && modelCardValue ? modelCardValue : null;
 
   return (
     <dialog
@@ -71,6 +78,20 @@ export function EvidencePanel({
                 <dd>
                   {provenance.derived_value.kind}, calculation version{" "}
                   {provenance.derived_value.calculation_version}
+                </dd>
+              </>
+            ) : null}
+            {/* A comparison the application made carries the card that says
+                what it must not be read as. Naming it here is what makes
+                "no comparison ships without one" reachable by a reader
+                rather than a promise kept in the repository. */}
+            {modelCard ? (
+              <>
+                <dt>Model card</dt>
+                <dd>
+                  <a href={modelCardUrl(modelCard)} rel="noreferrer">
+                    {modelCard}
+                  </a>
                 </dd>
               </>
             ) : null}

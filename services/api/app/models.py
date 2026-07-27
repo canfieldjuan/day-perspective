@@ -743,6 +743,13 @@ class DerivedValueInput(Base):
     resolved_claim_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("resolved_claims.id", ondelete="RESTRICT")
     )
+    #: A derivation computed from other derivations. The first is UC4's
+    #: comparison of a year's conflict count against the median of every
+    #: year's count; naming only a resolved claim would present one source
+    #: record as the provenance of a period-wide computation.
+    input_derived_value_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("derived_values.id", ondelete="RESTRICT")
+    )
     input_role: Mapped[str] = mapped_column(String(32))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

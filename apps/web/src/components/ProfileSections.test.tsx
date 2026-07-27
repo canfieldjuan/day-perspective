@@ -497,3 +497,68 @@ describe("ProfileSections evidence-panel quality fallback", () => {
     expect(panel).toHaveTextContent("Grade B");
   });
 });
+
+describe("the app's own comparison is labelled as the app's", () => {
+  it("marks a derived comparison distinctly from a source's assertion", () => {
+    // #56: visibly distinct from source-asserted content. Both statements
+    // sit in the same profile, so the badge is the only thing telling a
+    // reader which one the application made up.
+    const sections = {
+      ...emptySections,
+      derived_comparisons: [
+        {
+          statement_id: "conflict-vs-median-1964",
+          statement:
+            "Day Perspective compares this: UCDP/PRIO records 25 state-based armed conflicts as active in 1964, 11 conflicts fewer than the 1946–2025 median of 36. This is a count of distinct conflicts, not a measure of their scale.",
+          details: {
+            model_card: "conflict-count-vs-reference-median-v1",
+            comparability_status: "comparable"
+          },
+          provenance: {
+            root_type: "derived_value",
+            published_statement:
+              "25 active conflicts in 1964 against a reference median of 36.",
+            derived_value: {
+              kind: "conflict_count_vs_reference_median",
+              calculation_version: "1.0.0",
+              value: { model_card: "conflict-count-vs-reference-median-v1" }
+            },
+            supporting_claims: [],
+            dissenting_claims: [],
+            source_release: {
+              source: "Day Perspective (derived)",
+              publisher: "Day Perspective",
+              release: "conflict-count-vs-reference-median-v1",
+              source_url:
+                "docs/MODEL_CARDS/conflict-count-vs-reference-median-v1.md",
+              raw_checksum_sha256: "c".repeat(64),
+              retrieved_at: "2026-07-27T00:00:00Z"
+            },
+            methodology: {
+              name: "UCDP annual context method",
+              version: "1",
+              description: "Counts distinct conflict-year records."
+            }
+          }
+        }
+      ]
+    } as PublishedDayProfile["sections"];
+
+    render(
+      <ProfileSections
+        availability="published"
+        sections={sections}
+        profileDate="1964-03-27"
+      />
+    );
+
+    const chipLabels = screen
+      .getAllByTestId("evidence-chip")
+      .map((chip) => chip.textContent);
+    expect(chipLabels.join(" ")).toContain("App-derived comparison");
+    // The caveat is what stops the badge being decorative.
+    expect(
+      screen.getByText(/not a measure of their scale/)
+    ).toBeInTheDocument();
+  });
+});

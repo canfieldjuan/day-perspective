@@ -106,3 +106,86 @@ describe("EvidencePanel", () => {
     expect(closed).toBe(true);
   });
 });
+
+describe("an app-derived comparison names its model card", () => {
+  it("shows the card that governs the computation", () => {
+    // #56: no comparison ships without a card the reader can reach. Read
+    // from the derived value already on screen, so the card named is the
+    // one governing that computation.
+    render(
+      <EvidencePanel
+        open
+        statement={{
+          statement_id: "conflict-vs-median-1964",
+          statement: "Day Perspective compares this: …",
+          provenance: {
+            root_type: "derived_value",
+            published_statement: "25 active conflicts against a median of 36.",
+            derived_value: {
+              kind: "conflict_count_vs_reference_median",
+              calculation_version: "1.0.0",
+              value: { model_card: "conflict-count-vs-reference-median-v1" }
+            },
+            supporting_claims: [],
+            dissenting_claims: [],
+            source_release: {
+              source: "Day Perspective (derived)",
+              publisher: "Day Perspective",
+              release: "conflict-count-vs-reference-median-v1",
+              source_url: "docs/MODEL_CARDS/conflict-count-vs-reference-median-v1.md",
+              raw_checksum_sha256: "abc",
+              retrieved_at: "2026-07-27T00:00:00+00:00"
+            },
+            methodology: { name: "m", version: "1", description: "d" }
+          }
+        }}
+        onClose={() => {}}
+      />
+    );
+
+    const link = screen.getByRole("link", {
+      name: "conflict-count-vs-reference-median-v1"
+    });
+    expect(link).toHaveAttribute(
+      "href",
+      "https://github.com/canfieldjuan/day-perspective/blob/main/docs/MODEL_CARDS/conflict-count-vs-reference-median-v1.md"
+    );
+  });
+
+  it("shows no model card row for a derivation that has none", () => {
+    // Every other derived value on the site is a source-backed computation
+    // with no card, and inventing an empty row would imply one exists.
+    render(
+      <EvidencePanel
+        open
+        statement={{
+          statement_id: "average-daily-births",
+          statement: "Average daily births in 1964: about 320,470.",
+          provenance: {
+            root_type: "derived_value",
+            published_statement: "Annual total divided by 366 days.",
+            derived_value: {
+              kind: "daily_equivalent",
+              calculation_version: "0.3.0",
+              value: { per_day: 320470 }
+            },
+            supporting_claims: [],
+            dissenting_claims: [],
+            source_release: {
+              source: "UN WPP",
+              publisher: "UN",
+              release: "2024",
+              source_url: "https://example.invalid",
+              raw_checksum_sha256: "abc",
+              retrieved_at: "2026-07-27T00:00:00+00:00"
+            },
+            methodology: { name: "m", version: "1", description: "d" }
+          }
+        }}
+        onClose={() => {}}
+      />
+    );
+
+    expect(screen.queryByText("Model card")).not.toBeInTheDocument();
+  });
+});

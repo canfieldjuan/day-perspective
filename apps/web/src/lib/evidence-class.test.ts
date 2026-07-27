@@ -123,6 +123,31 @@ describe("deriveEvidenceClass", () => {
     expect(result.label).toBe("App-derived comparison");
   });
 
+  it("keeps the app-derived label on a comparison marked period context", () => {
+    // The published comparison carries temporal_assignment: period_context,
+    // because it does describe a year. Handling that before the section
+    // default rendered it "Period context" and dropped both the authorship
+    // and the comparability caveat — the two things this class exists for.
+    const result = deriveEvidenceClass(
+      "derived_comparisons",
+      derivedStatement({
+        temporal_assignment: "period_context",
+        comparability_status: "comparable"
+      })
+    );
+    expect(result.key).toBe("comparison");
+    expect(result.label).toBe("App-derived comparison");
+    expect(result.caveat).toBe("Comparability: comparable.");
+  });
+
+  it("still reads period context as period context outside that section", () => {
+    const result = deriveEvidenceClass(
+      "wider_historical_context",
+      derivedStatement({ temporal_assignment: "period_context" })
+    );
+    expect(result.key).toBe("period-context");
+  });
+
   it("classifies evidence-notes statements as archive notes", () => {
     const result = deriveEvidenceClass("evidence_notes", derivedStatement());
     expect(result.key).toBe("archive-note");
@@ -278,5 +303,27 @@ describe("deriveEvidenceClass review-round hardening", () => {
     const result = deriveEvidenceClass("derived_comparisons", derivedStatement());
     expect(result.key).toBe("comparison");
     expect(result.caveat).toBeNull();
+  });
+});
+
+describe("the app-derived label is a claim about authorship", () => {
+  it("does not attribute a source's assertion to the application", () => {
+    // "App-derived comparison" says Day Perspective computed this. A
+    // statement in that section rooted in a resolved claim is a source
+    // asserting something, and labelling it app-derived misattributes it.
+    // This is C-4.1 in the one section that was not gated on its root.
+    const result = deriveEvidenceClass(
+      "derived_comparisons",
+      resolvedStatement()
+    );
+    expect(result.key).not.toBe("comparison");
+    expect(result.label).not.toBe("App-derived comparison");
+    expect(result.key).toBe("unclassified");
+  });
+
+  it("still labels a genuinely derived comparison as app-derived", () => {
+    const result = deriveEvidenceClass("derived_comparisons", derivedStatement());
+    expect(result.key).toBe("comparison");
+    expect(result.label).toBe("App-derived comparison");
   });
 });

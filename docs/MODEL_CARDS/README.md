@@ -1,6 +1,13 @@
 # Model Cards
 
-No comparison model is approved for public use yet.
+## Approved for public use
+
+- [`conflict-count-vs-reference-median-v1`](conflict-count-vs-reference-median-v1.md)
+  — a year's count of active state-based armed conflicts against the
+  1946–2025 discrete median. Counts distinct conflicts only; explicitly not
+  severity, mortality, or trend.
+
+No other comparison model is approved.
 
 This directory is intentionally present so a comparison cannot be published
 without a version-controlled model card. Each future card must identify inputs,
