@@ -404,11 +404,20 @@ def test_recording_a_review_refreshes_the_index_without_republishing(
     """
     from app.models import CoverageEntry
 
-    entry = session.scalar(
-        select(CoverageEntry).where(CoverageEntry.profile_date == PROFILE_DATE)
-    )
-    assert entry is not None
-    assert entry.review_status is ReviewStatus.AUTOMATED_ONLY
+    def indexed_status() -> ReviewStatus:
+        """Re-read rather than narrow. Asserting on one bound variable lets
+        the type checker conclude the value can never change, which is the
+        opposite of what this test exists to prove."""
+        row = session.scalar(
+            select(CoverageEntry).where(
+                CoverageEntry.profile_date == PROFILE_DATE
+            )
+        )
+        assert row is not None
+        session.refresh(row)
+        return row.review_status
+
+    assert indexed_status() is ReviewStatus.AUTOMATED_ONLY
     content_hash_before = published.content_hash
 
     for row in _roots(session, published):
@@ -424,8 +433,7 @@ def test_recording_a_review_refreshes_the_index_without_republishing(
             reviewed_by="a-human-reviewer",
         )
 
-    session.refresh(entry)
-    assert entry.review_status is ReviewStatus.HUMAN_REVIEWED
+    assert indexed_status() is ReviewStatus.HUMAN_REVIEWED
     # The content did not change, so the artifact must not have.
     assert published.content_hash == content_hash_before
 
