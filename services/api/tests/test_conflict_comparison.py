@@ -383,3 +383,39 @@ def test_a_comparison_records_every_cohort_year_as_an_input(
     subject_value = session.get(DerivedValue, subject.input_derived_value_id)
     assert subject_value is not None
     assert subject_value.period_start.year == 1990
+
+
+@pytest.mark.integration
+def test_a_rerun_repairs_a_comparison_that_has_no_lineage(
+    session: Session, reviewed_cohort: UUID
+) -> None:
+    """The idempotency branch returns before writing inputs, so a comparison
+    derived before lineage existed could never gain it. Re-deriving must
+    complete the record rather than only decline to duplicate it."""
+    from app.models import DerivedValueInput
+
+    derived = derive_conflict_comparison(
+        session, year=1990, release_id=reviewed_cohort
+    )
+    assert derived is not None
+    for row in session.scalars(
+        select(DerivedValueInput).where(
+            DerivedValueInput.derived_value_id == derived.id
+        )
+    ):
+        session.delete(row)
+    session.flush()
+
+    again = derive_conflict_comparison(
+        session, year=1990, release_id=reviewed_cohort
+    )
+
+    assert again is not None and again.id == derived.id, "must not duplicate"
+    rows = list(
+        session.scalars(
+            select(DerivedValueInput).where(
+                DerivedValueInput.derived_value_id == derived.id
+            )
+        )
+    )
+    assert len(rows) == 21, "the rerun did not restore the lineage"

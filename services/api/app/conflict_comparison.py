@@ -199,7 +199,10 @@ def derive_conflict_comparison(
         "cohort_sha256"
     ) == fingerprint:
         # Same cohort, same answer. Reruns must not accumulate versions of
-        # an identical computation.
+        # an identical computation — but they must still leave the lineage
+        # complete. A comparison derived before input rows existed would
+        # otherwise never gain them, since this branch returns first.
+        _record_cohort_inputs(session, derived=existing, year=year, release_id=release_id)
         return existing
 
     methodology = session.get(Methodology, subject.methodology_id)
@@ -237,12 +240,36 @@ def derive_conflict_comparison(
     session.add(derived)
     session.flush()
 
-    # Durable lineage, not just a hash. The comparison is computed from the
-    # cohort's derived counts, so those are what the inputs name — one row
-    # per year, with the subject distinguished from the reference set. The
-    # cohort hash proves reproducibility; these rows let a reader walk it.
-    cohort_values = _cohort_values(session, release_id)
-    for cohort_year, cohort_derived in sorted(cohort_values.items()):
+    _record_cohort_inputs(session, derived=derived, year=year, release_id=release_id)
+    return derived
+
+
+def _record_cohort_inputs(
+    session: Session, *, derived: DerivedValue, year: int, release_id: UUID
+) -> None:
+    """Name every cohort year as an input of the comparison.
+
+    Durable lineage, not just a hash. The comparison is computed from the
+    cohort's derived counts, so those are what the inputs name — one row per
+    year, with the year described distinguished from the reference set. The
+    cohort hash proves the computation is reproducible; these rows let a
+    reader walk it.
+
+    Idempotent, so it can also repair a comparison derived before the rows
+    existed.
+    """
+    already = set(
+        session.scalars(
+            select(DerivedValueInput.input_derived_value_id).where(
+                DerivedValueInput.derived_value_id == derived.id
+            )
+        )
+    )
+    for cohort_year, cohort_derived in sorted(
+        _cohort_values(session, release_id).items()
+    ):
+        if cohort_derived.id in already:
+            continue
         session.add(
             DerivedValueInput(
                 derived_value_id=derived.id,
@@ -254,7 +281,6 @@ def derive_conflict_comparison(
             )
         )
     session.flush()
-    return derived
 
 
 def _sentence(value: dict[str, Any]) -> str:
