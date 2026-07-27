@@ -842,6 +842,39 @@ def _observation_snapshot(session: Session, observation_id: UUID) -> dict[str, A
     }
 
 
+def _derived_input_reference(
+    session: Session, input_derived_value_id: UUID
+) -> dict[str, Any]:
+    """Identify a derivation used as another derivation's input.
+
+    Deliberately a reference rather than a nested snapshot. Recursing would
+    expand every cohort year's full claim lineage into every published
+    comparison — the artifact describing the archive rather than the
+    statement — and a cycle would not terminate at all.
+
+    The identity, kind and calculation version are enough to find the input
+    and check what it was, which is what durable lineage has to support.
+    """
+    source = session.get(DerivedValue, input_derived_value_id)
+    if source is None:
+        raise ValueError(
+            "Publication evidence references an unknown derived input."
+        )
+    return {
+        "schema_version": "1",
+        "root_type": "derived_value_reference",
+        "derived_value": {
+            "id": str(source.id),
+            "kind": source.value_kind,
+            "calculation_version": source.calculation_version,
+            "period_start": source.period_start.isoformat(),
+            "period_end": (
+                source.period_end.isoformat() if source.period_end else None
+            ),
+        },
+    }
+
+
 def _derived_value_snapshot(session: Session, derived_value_id: UUID) -> dict[str, Any]:
     derived = session.get(DerivedValue, derived_value_id)
     if derived is None:
@@ -865,6 +898,18 @@ def _derived_value_snapshot(session: Session, derived_value_id: UUID) -> dict[st
                 "root_type": "observation",
                 "observation": _observation_snapshot(session, item.observation_id),
             }
+        elif item.input_derived_value_id is not None:
+            # A derivation computed from other derivations. UC4's comparison
+            # is the first, and the snapshot rejected it outright: this
+            # branch did not exist when the only inputs a derivation could
+            # have were claims and observations.
+            #
+            # Recorded by identity and kind rather than by recursing into
+            # the input's own snapshot. Eighty cohort years would otherwise
+            # each expand their full claim lineage into every published
+            # comparison, and the artifact would describe the whole archive
+            # instead of this statement.
+            root = _derived_input_reference(session, item.input_derived_value_id)
         else:
             raise ValueError("Derived publication evidence contains an empty input.")
         inputs.append({"input_role": item.input_role, "root": root})

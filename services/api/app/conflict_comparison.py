@@ -42,9 +42,16 @@ from app.services import PublicationStatementEvidenceInput
 #: Version-controlled card in docs/MODEL_CARDS. No comparison publishes
 #: without one, and the identifier travels in the statement so a reader can
 #: reach it from the page rather than being told it exists.
-COMPARISON_MODEL_CARD = "conflict-count-vs-reference-median-v1"
-COMPARISON_VALUE_KIND = "conflict_count_vs_reference_median"
-COMPARISON_CALCULATION_VERSION = "1.0.0"
+COMPARISON_MODEL_CARD = "conflict-count-vs-reference-percentile-v2"
+COMPARISON_VALUE_KIND = "conflict_count_vs_reference_percentile"
+COMPARISON_CALCULATION_VERSION = "2.0.0"
+
+# v1 published a median difference under value_kind
+# conflict_count_vs_reference_median. Its rows are left in place and simply
+# stop being read: the lookups below match on the v2 kind, so a v1 row can
+# neither be served nor mistaken for a current one. Its card is retained and
+# marked superseded, which is how a reader of an older artifact finds out
+# what its number meant.
 CONFLICT_COUNT_KIND = "active_state_based_conflict_count"
 
 #: Below this, a median is not a reference period. A cohort of one year
@@ -57,7 +64,14 @@ MINIMUM_REFERENCE_YEARS = 20
 #: What the sentence must always carry. The count is of distinct conflicts;
 #: a reader who takes it for a measure of scale has been misled by us, not
 #: by the source.
-SCALE_DISCLAIMER = "This is a count of distinct conflicts, not a measure of their scale."
+SCALE_DISCLAIMER = (
+    "This comparison describes the year, not this specific day."
+)
+
+#: Said before the number, not after it. "Higher than 95% of years" reads as
+#: a ranking of how bad a year was unless the sentence first says what is
+#: being counted.
+COUNT_SUBJECT = "active state-based conflicts"
 
 
 @dataclass(frozen=True)
@@ -65,6 +79,34 @@ class ComparisonContent:
     statements: list[dict[str, object]]
     evidence: list[PublicationStatementEvidenceInput]
     derived_value_id: UUID
+
+
+def percentile_rank(value: int, cohort: list[int]) -> int:
+    """Where ``value`` sits in ``cohort``, as a whole percent.
+
+    Three conventions, each of which would be defensible-looking if got
+    wrong and wrong in a way nobody would notice:
+
+    **Strictly lower.** The published sentence says *higher than*, so only
+    years the subject genuinely exceeds may be counted. Counting ties as
+    "lower or equal" would let a year rank above itself.
+
+    **Ties share a rank.** Two years with the same count have the same set
+    of strictly-lower years, so both report the same percentage. Any
+    tie-break would invent an ordering the data does not contain and make
+    two identical counts read as different findings.
+
+    **Floor, never round.** At 74.6% the page says 74%, which is true.
+    Rounding to 75% states something the cohort does not support.
+
+    The denominator is the whole cohort including the subject year, matching
+    the published phrase "of N supported years". A year is never strictly
+    lower than itself, so including it cannot inflate the rank.
+    """
+    if not cohort:
+        raise ValueError("A percentile requires a cohort.")
+    strictly_lower = sum(1 for other in cohort if other < value)
+    return (strictly_lower * 100) // len(cohort)
 
 
 def discrete_median(values: list[int]) -> int:
@@ -182,9 +224,10 @@ def derive_conflict_comparison(
         # period would still render as a confident sentence.
         return None
 
-    median = discrete_median(list(cohort.values()))
+    counts = list(cohort.values())
     count = int(subject.value_numeric)
-    difference = count - median
+    rank = percentile_rank(count, counts)
+    median = discrete_median(counts)
     fingerprint = cohort_fingerprint(cohort)
 
     existing = session.scalars(
@@ -217,15 +260,15 @@ def derive_conflict_comparison(
         period_start=date(year, 1, 1),
         period_end=date(year, 12, 31),
         temporal_assignment=TemporalAssignment.PERIOD_CONTEXT,
-        value_numeric=Decimal(difference),
+        value_numeric=Decimal(rank),
         value_json={
             "year": year,
             "count": count,
+            "percentile_rank": rank,
+            # Retained as context rather than published. The median is what
+            # v1 asserted, and keeping it lets a reader of the record see
+            # both readings of the same cohort.
             "reference_median": median,
-            "difference": difference,
-            "direction": (
-                "same" if difference == 0 else "more" if difference > 0 else "fewer"
-            ),
             "reference_period": [min(cohort), max(cohort)],
             "cohort_size": len(cohort),
             "cohort_sha256": fingerprint,
@@ -289,28 +332,26 @@ def _sentence(value: dict[str, Any]) -> str:
     Every number is read back out of the derived value rather than passed
     alongside it, so the sentence cannot describe one computation while the
     provenance panel shows another.
+
+    The order is deliberate: what was counted, then the rank, then the
+    caveat. Leading with "higher than 95% of years" invites a reader to
+    supply their own subject, and the one they supply is severity.
     """
     period = value["reference_period"]
     if not isinstance(period, list) or len(period) != 2:
         raise ValueError("A comparison must record its reference period.")
+    # The year itself is not named: the page is that date, and "the selected
+    # date occurred during a year with ..." reads from it. The period range
+    # is named because a rank is meaningless without the cohort it ranks in.
     first, last = int(period[0]), int(period[1])
-    year = int(value["year"])
     count = int(value["count"])
-    median = int(value["reference_median"])
-    difference = abs(int(value["difference"]))
-    direction = str(value["direction"])
+    rank = int(value["percentile_rank"])
+    cohort_size = int(value["cohort_size"])
 
-    if direction == "same":
-        relation = f"the same as the {first}–{last} median of {median}"
-    else:
-        plural = "conflict" if difference == 1 else "conflicts"
-        relation = (
-            f"{difference} {plural} {direction} than the "
-            f"{first}–{last} median of {median}"
-        )
     return (
-        f"Day Perspective compares this: UCDP/PRIO records {count} state-based "
-        f"armed conflicts as active in {year}, {relation}. {SCALE_DISCLAIMER}"
+        f"The selected date occurred during a year with {count} "
+        f"{COUNT_SUBJECT}, ranking higher than {rank}% of {cohort_size} "
+        f"supported years ({first}\u2013{last}). {SCALE_DISCLAIMER}"
     )
 
 
@@ -346,15 +387,16 @@ def optional_conflict_comparison(
         "statement": _sentence(value),
         "details": {
             "title": f"Active conflicts in {year} against the reference median",
-            "value": value["difference"],
-            "unit": "conflict-year records",
+            "value": value["percentile_rank"],
+            "unit": "percent of supported years ranked below",
             "temporal_assignment": TemporalAssignment.PERIOD_CONTEXT.value,
             "data_status": derived.data_status.value,
             "comparability_status": derived.comparability_status.value,
             # Carried on the statement so the interface can link the card
             # from the page. A card nobody can reach is not disclosure.
             "model_card": COMPARISON_MODEL_CARD,
-            "reference_median": value["reference_median"],
+            "percentile_rank": value["percentile_rank"],
+            "cohort_size": value["cohort_size"],
             "reference_period": value["reference_period"],
             "cohort_sha256": value["cohort_sha256"],
             "missing_data_explanation": (
@@ -369,8 +411,9 @@ def optional_conflict_comparison(
         "provenance": {
             "root_type": "derived_value",
             "published_statement": (
-                f"{value['count']} active conflicts in {year} against a "
-                f"reference median of {value['reference_median']}."
+                f"{value['count']} active conflicts in {year} rank above "
+                f"{value['percentile_rank']}% of {value['cohort_size']} "
+                "years in the reference period."
             ),
             "derived_value": {
                 "kind": derived.value_kind,
