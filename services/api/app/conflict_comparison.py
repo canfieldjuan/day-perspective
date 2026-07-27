@@ -46,10 +46,12 @@ COMPARISON_MODEL_CARD = "conflict-count-vs-reference-percentile-v2"
 COMPARISON_VALUE_KIND = "conflict_count_vs_reference_percentile"
 COMPARISON_CALCULATION_VERSION = "2.0.0"
 
-#: v1 published a median difference and its card stays accurate for what it
-#: published. v2 supersedes rather than edits it: a different statistic
-#: deserves its own card rather than a rewritten one.
-SUPERSEDED_MODEL_CARD = "conflict-count-vs-reference-median-v1"
+# v1 published a median difference under value_kind
+# conflict_count_vs_reference_median. Its rows are left in place and simply
+# stop being read: the lookups below match on the v2 kind, so a v1 row can
+# neither be served nor mistaken for a current one. Its card is retained and
+# marked superseded, which is how a reader of an older artifact finds out
+# what its number meant.
 CONFLICT_COUNT_KIND = "active_state_based_conflict_count"
 
 #: Below this, a median is not a reference period. A cohort of one year
