@@ -306,3 +306,19 @@ rule, and nothing date-specific. 27,758 of 27,759 dates are
 remain honestly unpublished because no annual-context pipeline covers
 them, and `/api/v1/day` reports `profile_not_published` for them rather
 than inventing content.
+
+## Conflict context across the archive (2026-07-26, epic #51)
+
+All 27,759 published dates carry their year's UCDP/PRIO state-based
+armed-conflict count as period context, sourced from the live v26.1 release
+(1946–2025, source release `383d339c-40de-44a6-aec2-2870262d258a`).
+
+- Tiers unchanged: 27,758 `context_only`, 1 `reviewed_enriched`.
+- Annual conflict context does not make a date enriched. It describes the
+  year, not the date, and every statement says so.
+- The dataset supports conflict presence, type and intensity for 1946–2025.
+  It is **not** battle-related mortality; that is a separate dataset
+  covering 1989 onward, and the two must not be conflated.
+- Republication and recovery commands, counts and elapsed times are in
+  `docs/HANDOFF.md`.
+

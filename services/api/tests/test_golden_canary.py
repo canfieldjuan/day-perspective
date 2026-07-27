@@ -894,3 +894,61 @@ def test_the_canary_run_pins_both_releases_it_rests_on(
     assert recorded.get("ucdp_source_release_id") == str(
         ingested.source_release_id
     )
+
+
+class TestConflictCaveatWording:
+    """The caveat is a property, not a sentence.
+
+    The archive holds two honest phrasings: the year-general form UC2
+    introduced when one statement began serving every date in its year, and
+    the date-specific form that predates it and is still the more precise
+    of the two on a profile published for one date.
+    """
+
+    def test_the_year_general_form_passes(self) -> None:
+        assert validate_context_payload(
+            _payload(context=[_conflict_statement()])
+        ) == []
+
+    def test_the_date_specific_form_passes(self) -> None:
+        # This is the archive's only reviewed_enriched profile, verbatim.
+        # A literal check on the year-general sentence failed it.
+        assert validate_context_payload(
+            _payload(
+                profile_date="1964-03-27",
+                typical=[
+                    _daily_statement(year=1964, days_in_year=366, prose_days=366)
+                ],
+                context=[
+                    _conflict_statement(
+                        count=25,
+                        year=1964,
+                        text=(
+                            "UCDP/PRIO records 25 state-based armed conflicts "
+                            "as active at some point in 1964. This is annual "
+                            "context, not a March 27 count."
+                        ),
+                    )
+                ],
+            )
+        ) == []
+
+    def test_a_statement_with_no_caveat_at_all_is_still_caught(self) -> None:
+        # Widening the accepted forms must not widen it to everything.
+        issues = validate_context_payload(
+            _payload(
+                context=[
+                    _conflict_statement(
+                        text=(
+                            "UCDP/PRIO records 17 state-based armed conflicts "
+                            "as active at some point in 1952. Conditions were "
+                            "much the same on this date."
+                        )
+                    )
+                ]
+            )
+        )
+        assert any(
+            "describes the year rather than this date" in issue
+            for issue in issues
+        ), issues

@@ -307,6 +307,20 @@ CONFLICT_TEXT = "state-based armed conflicts"
 #: how many people it killed. Battle-related deaths are a separate dataset
 #: with a shorter span, so mortality language here would claim evidence the
 #: statement does not rest on.
+#: Two honest ways to say the same thing, both of which appear in the
+#: archive. The year-general form arrived with UC2, when one statement began
+#: serving every date in its year. The date-specific form predates it and is
+#: still correct — on a profile published for a single date it is the more
+#: precise of the two.
+#:
+#: The property being checked is that the reader is told the count describes
+#: the year rather than this date. Pinning one literal sentence failed the
+#: archive's only reviewed_enriched profile for wording that was never
+#: wrong, which is a defect in the check rather than in the statement.
+_YEAR_NOT_DATE = re.compile(
+    r"not a count for any single date|not an? [A-Z][a-z]+ \d{1,2} count"
+)
+
 CONFLICT_MORTALITY_WORDS = (
     "deaths",
     "died",
@@ -352,7 +366,7 @@ def _validate_conflict_context(
                 "period_context marker",
             )
         )
-    if "not a count for any single date" not in text:
+    if _YEAR_NOT_DATE.search(text) is None:
         issues.append(
             _issue(
                 profile_date,

@@ -667,3 +667,52 @@ building selects the most recently ingested.
 
 **Frozen as UC2's input:** source release
 `383d339c-40de-44a6-aec2-2870262d258a`.
+
+### Archive republication with conflict context (2026-07-26, UC3)
+
+Every published date now carries its year's UCDP/PRIO conflict context. All
+27,759 dates changed content, so this was a genuine version-2 pass rather
+than a no-op.
+
+| | |
+|---|---|
+| Command | `make publish-archive FROM_YEAR=1950 TO_YEAR=2025` |
+| Elapsed | **83m 05s** (~180 ms/date) |
+| Requested / published / unchanged / skipped | 27,759 / 27,391 / 365 / 1 |
+| Failed | 2, both recovered (below) |
+| Reconcile | 0 mismatches, 55,583 healthy published manifests |
+| Coverage rebuild | 27,759 indexed, 0 dropped, 0 unreadable, 85s |
+| Ledger | 0 unresolved failures |
+| Sample validation | 119 dates spanning 1950–2025, **0 canary issues** |
+
+Prerequisite, run first: `make review-ucdp-annual-all-years` — 80 years, 75
+reviewed, 5 already current, 0 failed, 14s. Rerun reports 80 already
+current. Without it every date in an unreviewed year fails closed (D037).
+
+**The 365 unchanged dates** are 1971, republished earlier as a timing trial;
+its content already matched, so the pass correctly reported it unchanged
+rather than minting a second version.
+
+**The 1 skipped date** is 1964-03-27. `richer_published_profile` returns the
+existing profile rather than burying a `reviewed_enriched` page under a
+sparser context version. Verified after the run: still v1, still
+`reviewed_enriched`, still the archive's only enriched date.
+
+**The 2 failures were operator-caused, not a defect.** An earlier ad-hoc
+verification published 1991-06-15 and 1991-06-16 with
+`PUBLISHED_PROFILE_ROOT` pointed at `.local/published` instead of the
+Makefile's `.local/published-profiles`, so their manifests referenced
+artifacts outside the configured root. `reconcile` identified exactly those
+two as hash mismatches; placing the artifacts under the operational root
+and running `make publish-context-retry-failed` drained them as
+`unchanged=2 failed=0`. Worth repeating as the lesson: always publish
+through the Makefile targets, which carry the correct roots.
+
+**A validator defect the sample caught.** The conflict caveat check pinned
+one literal sentence ("not a count for any single date in it"), which UC2
+introduced when the statement began serving every date in its year. The
+golden profile predates it and says "not a March 27 count" — equally honest
+and, on a single-date page, more precise. The check now accepts both forms
+and still rejects a statement carrying no caveat at all. The archive was
+right; the check was wrong.
+
