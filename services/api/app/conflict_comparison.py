@@ -27,10 +27,13 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models import (
+    Claim,
     ComparabilityStatus,
     DataStatus,
     DerivedValue,
+    DerivedValueInput,
     Methodology,
+    ResolvedClaimEvidence,
     SourceRelease,
     TemporalAssignment,
 )
@@ -92,36 +95,73 @@ def cohort_fingerprint(cohort: dict[int, int]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _counts_from_release(session: Session, release_id: UUID) -> list[DerivedValue]:
+    """Conflict counts derived from this release, newest first.
+
+    Scoped by walking each count back to the claims it rests on. An
+    unscoped query takes the newest count per year from the whole database,
+    so a fixture release sitting beside a full one — which is the ordinary
+    development state — would assemble a median from a mixture of releases
+    and publish a number belonging to neither.
+    """
+    return list(
+        session.scalars(
+            select(DerivedValue)
+            .join(
+                DerivedValueInput,
+                DerivedValueInput.derived_value_id == DerivedValue.id,
+            )
+            .join(
+                ResolvedClaimEvidence,
+                ResolvedClaimEvidence.resolved_claim_id
+                == DerivedValueInput.resolved_claim_id,
+            )
+            .join(Claim, Claim.id == ResolvedClaimEvidence.claim_id)
+            .where(
+                DerivedValue.value_kind == CONFLICT_COUNT_KIND,
+                Claim.source_release_id == release_id,
+                ResolvedClaimEvidence.stance == "supporting",
+            )
+            .order_by(DerivedValue.created_at.desc())
+            .distinct()
+        )
+    )
+
+
 def reference_cohort(session: Session, release_id: UUID) -> dict[int, int]:
     """Every year's reviewed conflict count, as the comparison sees them.
 
     Reads the derived counts rather than the raw claims, so the cohort is
-    made of the same reviewed values the per-year statements publish. A year
-    that has not been reviewed is absent here, and absence propagates: the
-    comparison refuses rather than quietly comparing against a partial
-    period.
+    made of the same reviewed values the per-year statements publish, and
+    only those belonging to the requested release. A year that has not been
+    reviewed is absent here, and absence propagates: the comparison refuses
+    rather than quietly comparing against a partial period.
     """
     cohort: dict[int, int] = {}
-    for derived in session.scalars(
-        select(DerivedValue)
-        .where(DerivedValue.value_kind == CONFLICT_COUNT_KIND)
-        .order_by(DerivedValue.created_at.desc())
-    ):
+    for derived in _counts_from_release(session, release_id):
         year = derived.period_start.year
         if year not in cohort and derived.value_numeric is not None:
             cohort[year] = int(derived.value_numeric)
     return cohort
 
 
-def _conflict_count_for(session: Session, year: int) -> DerivedValue | None:
-    return session.scalars(
-        select(DerivedValue)
-        .where(
-            DerivedValue.value_kind == CONFLICT_COUNT_KIND,
-            DerivedValue.period_start == date(year, 1, 1),
-        )
-        .order_by(DerivedValue.created_at.desc())
-    ).first()
+def _cohort_values(
+    session: Session, release_id: UUID
+) -> dict[int, DerivedValue]:
+    """The derived count backing each cohort year, for lineage rows."""
+    values: dict[int, DerivedValue] = {}
+    for derived in _counts_from_release(session, release_id):
+        values.setdefault(derived.period_start.year, derived)
+    return values
+
+
+def _conflict_count_for(
+    session: Session, year: int, release_id: UUID
+) -> DerivedValue | None:
+    for derived in _counts_from_release(session, release_id):
+        if derived.period_start.year == year:
+            return derived
+    return None
 
 
 def derive_conflict_comparison(
@@ -133,7 +173,7 @@ def derive_conflict_comparison(
     point of the slice: a year we cannot compare produces no comparison at
     all, rather than a zero difference, which would be a claim we invented.
     """
-    subject = _conflict_count_for(session, year)
+    subject = _conflict_count_for(session, year, release_id)
     if subject is None or subject.value_numeric is None:
         return None
     cohort = reference_cohort(session, release_id)
@@ -195,6 +235,24 @@ def derive_conflict_comparison(
         calculation_version=COMPARISON_CALCULATION_VERSION,
     )
     session.add(derived)
+    session.flush()
+
+    # Durable lineage, not just a hash. The comparison is computed from the
+    # cohort's derived counts, so those are what the inputs name — one row
+    # per year, with the subject distinguished from the reference set. The
+    # cohort hash proves reproducibility; these rows let a reader walk it.
+    cohort_values = _cohort_values(session, release_id)
+    for cohort_year, cohort_derived in sorted(cohort_values.items()):
+        session.add(
+            DerivedValueInput(
+                derived_value_id=derived.id,
+                input_derived_value_id=cohort_derived.id,
+                # The vocabulary the table already allows: the year being
+                # described is the primary input, the rest are what it is
+                # compared against.
+                input_role="primary" if cohort_year == year else "comparison",
+            )
+        )
     session.flush()
     return derived
 

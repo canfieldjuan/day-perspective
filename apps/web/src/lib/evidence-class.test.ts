@@ -123,6 +123,31 @@ describe("deriveEvidenceClass", () => {
     expect(result.label).toBe("App-derived comparison");
   });
 
+  it("keeps the app-derived label on a comparison marked period context", () => {
+    // The published comparison carries temporal_assignment: period_context,
+    // because it does describe a year. Handling that before the section
+    // default rendered it "Period context" and dropped both the authorship
+    // and the comparability caveat — the two things this class exists for.
+    const result = deriveEvidenceClass(
+      "derived_comparisons",
+      derivedStatement({
+        temporal_assignment: "period_context",
+        comparability_status: "comparable"
+      })
+    );
+    expect(result.key).toBe("comparison");
+    expect(result.label).toBe("App-derived comparison");
+    expect(result.caveat).toBe("Comparability: comparable.");
+  });
+
+  it("still reads period context as period context outside that section", () => {
+    const result = deriveEvidenceClass(
+      "wider_historical_context",
+      derivedStatement({ temporal_assignment: "period_context" })
+    );
+    expect(result.key).toBe("period-context");
+  });
+
   it("classifies evidence-notes statements as archive notes", () => {
     const result = deriveEvidenceClass("evidence_notes", derivedStatement());
     expect(result.key).toBe("archive-note");

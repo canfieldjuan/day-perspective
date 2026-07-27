@@ -4,6 +4,7 @@ import React, { useEffect, useRef } from "react";
 
 import type { ProfileStatement } from "@day-perspective/contracts";
 import styles from "./EvidencePanel.module.css";
+import { modelCardUrl } from "@/src/lib/model-card";
 
 type EvidencePanelProps = {
   open: boolean;
@@ -87,7 +88,11 @@ export function EvidencePanel({
             {modelCard ? (
               <>
                 <dt>Model card</dt>
-                <dd>docs/MODEL_CARDS/{modelCard}.md</dd>
+                <dd>
+                  <a href={modelCardUrl(modelCard)} rel="noreferrer">
+                    {modelCard}
+                  </a>
+                </dd>
               </>
             ) : null}
             <dt>Why published</dt>

@@ -143,11 +143,13 @@ describe("an app-derived comparison names its model card", () => {
       />
     );
 
-    expect(
-      screen.getByText(
-        "docs/MODEL_CARDS/conflict-count-vs-reference-median-v1.md"
-      )
-    ).toBeInTheDocument();
+    const link = screen.getByRole("link", {
+      name: "conflict-count-vs-reference-median-v1"
+    });
+    expect(link).toHaveAttribute(
+      "href",
+      "https://github.com/canfieldjuan/day-perspective/blob/main/docs/MODEL_CARDS/conflict-count-vs-reference-median-v1.md"
+    );
   });
 
   it("shows no model card row for a derivation that has none", () => {

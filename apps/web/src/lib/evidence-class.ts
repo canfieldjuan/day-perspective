@@ -111,6 +111,24 @@ export function deriveEvidenceClass(
   if (hasDerived && temporalAssignment === "uniform_period_allocation") {
     return CLASSES["daily-average"];
   }
+  const sectionDefault = SECTION_DEFAULTS[sectionKey];
+
+  // Authorship outranks temporal framing. An app-derived comparison is also
+  // period context — it describes a year — but a reader who is told only
+  // "Period context" cannot tell that the application made this claim
+  // rather than a source. That distinction is the whole reason the class
+  // exists, so the comparison section is settled before the temporal
+  // branches below can claim it.
+  if (sectionDefault === "comparison" && hasDerived) {
+    const comparability = detailString(
+      statementValue.details,
+      "comparability_status"
+    );
+    return comparability
+      ? { ...CLASSES.comparison, caveat: "Comparability: " + comparability + "." }
+      : CLASSES.comparison;
+  }
+
   if (
     temporalAssignment === "period_context" ||
     temporalAssignment === "editorial_context"
@@ -118,7 +136,6 @@ export function deriveEvidenceClass(
     return CLASSES["period-context"];
   }
 
-  const sectionDefault = SECTION_DEFAULTS[sectionKey];
   if (!sectionDefault) {
     return CLASSES.unclassified;
   }
@@ -135,18 +152,10 @@ export function deriveEvidenceClass(
   // statement in this section rooted in a resolved claim is a source's
   // assertion, and labelling it app-derived misattributes it — the same
   // C-4.1 failure as the two gates above, in the one section that lacked
-  // the check.
-  if (sectionDefault === "comparison" && !hasDerived) {
-    return CLASSES.unclassified;
-  }
+  // the check. The derived case is settled earlier, above the temporal
+  // branches.
   if (sectionDefault === "comparison") {
-    const comparability = detailString(
-      statementValue.details,
-      "comparability_status"
-    );
-    return comparability
-      ? { ...CLASSES.comparison, caveat: "Comparability: " + comparability + "." }
-      : CLASSES.comparison;
+    return CLASSES.unclassified;
   }
   return CLASSES[sectionDefault];
 }

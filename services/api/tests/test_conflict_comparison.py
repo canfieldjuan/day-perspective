@@ -309,3 +309,77 @@ def test_a_single_year_release_produces_no_comparison(
         )
         is None
     )
+
+
+@pytest.mark.integration
+def test_the_cohort_ignores_counts_from_another_release(
+    session: Session, reviewed_cohort: UUID, tmp_path: Path
+) -> None:
+    """A second release must not leak into the median.
+
+    A fixture release sitting beside a full one is the ordinary development
+    state, and an unscoped query takes the newest count per year across the
+    whole database — assembling a baseline from a mixture of releases and
+    publishing a number belonging to neither.
+    """
+    other = tmp_path / "other-release.csv"
+    # Same years, wildly different counts, and a year the first lacks.
+    other.write_text(
+        synthetic_ucdp_multiyear_csv(
+            [(str(700 + n), "1980") for n in range(40)]
+            + [(str(700 + n), "2001") for n in range(5)]
+        ),
+        encoding="utf-8",
+    )
+    second = ingest_ucdp_annual(
+        session,
+        fixture_path=other,
+        raw_store=LocalFilesystemRawSourceStore(tmp_path / "raw2"),
+    )
+    assert second.source_release_id is not None
+    assert second.source_release_id != reviewed_cohort
+    review_ucdp_annual_release(session, second.source_release_id)
+
+    cohort = reference_cohort(session, reviewed_cohort)
+
+    assert len(cohort) == 21, "the second release's years leaked in"
+    assert 2001 not in cohort
+    assert cohort[1980] == 11, "1980 took its count from the wrong release"
+
+
+@pytest.mark.integration
+def test_a_comparison_records_every_cohort_year_as_an_input(
+    session: Session, reviewed_cohort: UUID
+) -> None:
+    """Durable lineage, not only a hash.
+
+    The comparison is computed from the cohort's derived counts, so those
+    are what its inputs must name. A hash proves the computation is
+    reproducible; it does not let a reader walk the inputs, which
+    docs/PRODUCT_CONTRACT.md requires to be inspectable.
+    """
+    from app.models import DerivedValueInput
+
+    derived = derive_conflict_comparison(
+        session, year=1990, release_id=reviewed_cohort
+    )
+    assert derived is not None
+
+    rows = list(
+        session.scalars(
+            select(DerivedValueInput).where(
+                DerivedValueInput.derived_value_id == derived.id
+            )
+        )
+    )
+    assert len(rows) == 21, "one input per cohort year"
+    assert all(row.input_derived_value_id is not None for row in rows)
+    roles = [row.input_role for row in rows]
+    assert roles.count("primary") == 1
+    assert roles.count("comparison") == 20
+
+    # The subject input is the year's own count, not an arbitrary member.
+    subject = next(row for row in rows if row.input_role == "primary")
+    subject_value = session.get(DerivedValue, subject.input_derived_value_id)
+    assert subject_value is not None
+    assert subject_value.period_start.year == 1990
