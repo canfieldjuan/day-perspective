@@ -307,6 +307,57 @@ CONFLICT_TEXT = "state-based armed conflicts"
 #: how many people it killed. Battle-related deaths are a separate dataset
 #: with a shorter span, so mortality language here would claim evidence the
 #: statement does not rest on.
+#: Two honest ways to say the same thing, both of which appear in the
+#: archive. The year-general form arrived with UC2, when one statement began
+#: serving every date in its year. The date-specific form predates it and is
+#: still correct — on a profile published for a single date it is the more
+#: precise of the two.
+#:
+#: The property being checked is that the reader is told the count describes
+#: the year rather than *this* date. Pinning one literal sentence failed the
+#: archive's only reviewed_enriched profile for wording that was never
+#: wrong; accepting any month and day would have passed a caveat that
+#: disclaims a different day than the profile's, which is no disclaimer at
+#: all. So the date-specific form is parsed and compared.
+_YEAR_GENERAL_CAVEAT = "not a count for any single date"
+_DATE_SPECIFIC_CAVEAT = re.compile(r"not an? ([A-Z][a-z]+) (\d{1,2}) count")
+#: Matched explicitly rather than via strptime, whose %B depends on the
+#: process locale. A validator must not read differently on another machine.
+_MONTH_NAMES = (
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+)
+
+
+def _disclaims_this_date(text: str, profile_date: str) -> bool:
+    """Whether the statement tells the reader this is not a count for the
+    date being read."""
+    if _YEAR_GENERAL_CAVEAT in text:
+        return True
+    named = _DATE_SPECIFIC_CAVEAT.search(text)
+    if named is None:
+        return False
+    if named.group(1) not in _MONTH_NAMES:
+        return False
+    try:
+        read = date.fromisoformat(profile_date)
+    except ValueError:
+        return False
+    return (_MONTH_NAMES.index(named.group(1)) + 1, int(named.group(2))) == (
+        read.month,
+        read.day,
+    )
+
 CONFLICT_MORTALITY_WORDS = (
     "deaths",
     "died",
@@ -352,7 +403,7 @@ def _validate_conflict_context(
                 "period_context marker",
             )
         )
-    if "not a count for any single date" not in text:
+    if not _disclaims_this_date(text, profile_date):
         issues.append(
             _issue(
                 profile_date,
