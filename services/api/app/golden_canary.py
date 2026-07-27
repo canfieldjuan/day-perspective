@@ -342,26 +342,49 @@ def _validate_comparison(
                 "scale",
             )
         )
-    stated = re.search(r"(\d+) conflicts? (more|fewer) than", text)
+    # The rank and the denominator are both checked, because a rank without
+    # its cohort size is unreadable: "higher than 95%" of four years and of
+    # eighty years are very different claims.
+    stated = re.search(r"higher than (\d+)% of (\d+) supported years", text)
     displayed = details.get("value")
-    if stated is not None:
-        signed = int(stated.group(1)) * (1 if stated.group(2) == "more" else -1)
-        if displayed != signed:
-            issues.append(
-                _issue(
-                    profile_date,
-                    f"{statement_id} prose says {stated.group(0)!r} but its "
-                    f"displayed value is {displayed!r}",
-                )
-            )
-    elif "the same as the" in text and displayed != 0:
+    if stated is None:
         issues.append(
             _issue(
                 profile_date,
-                f"{statement_id} says the value equals the baseline but "
-                f"displays {displayed!r}",
+                f"{statement_id} states no percentile rank against a stated "
+                "number of supported years",
             )
         )
+    else:
+        rank = int(stated.group(1))
+        if displayed != rank:
+            issues.append(
+                _issue(
+                    profile_date,
+                    f"{statement_id} prose says {rank}% but its displayed "
+                    f"value is {displayed!r}",
+                )
+            )
+        if rank > 99:
+            # A year is never strictly higher than itself, so a full cohort
+            # can never yield 100%. Seeing it means ties were counted as
+            # lower, and every tied year is ranking above the others.
+            issues.append(
+                _issue(
+                    profile_date,
+                    f"{statement_id} reports {rank}%, which no year can "
+                    "reach against a cohort that includes itself",
+                )
+            )
+        cohort_size = details.get("cohort_size")
+        if cohort_size != int(stated.group(2)):
+            issues.append(
+                _issue(
+                    profile_date,
+                    f"{statement_id} says {stated.group(2)} supported years "
+                    f"but its cohort size is {cohort_size!r}",
+                )
+            )
     lowered = text.lower()
     for word in (*CONFLICT_MORTALITY_WORDS, "worse", "deadlier", "trend",
                  "rising", "falling", "more violent"):
@@ -384,7 +407,7 @@ CONFLICT_TEXT = "state-based armed conflicts"
 
 #: Must appear on every published comparison.
 COMPARISON_SCALE_DISCLAIMER = (
-    "This is a count of distinct conflicts, not a measure of their scale."
+    "This comparison describes the year, not this specific day."
 )
 
 #: The UCDP/PRIO annual dataset establishes that a conflict was active, not

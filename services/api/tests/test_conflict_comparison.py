@@ -113,44 +113,20 @@ def test_a_comparison_records_its_cohort_and_calculation_version(
     assert derived is not None
     assert derived.value_kind == COMPARISON_VALUE_KIND
     assert derived.calculation_version == COMPARISON_CALCULATION_VERSION
-    # 21 conflicts against a median of 11.
-    assert int(derived.value_numeric or 0) == 10
+    # 21 conflicts, above 20 of the 21 cohort years.
+    assert int(derived.value_numeric or 0) == 95
     value = derived.value_json or {}
     assert value["count"] == 21
+    assert value["percentile_rank"] == 95
+    # Retained as context rather than published, so a reader of the record
+    # can see both readings of the same cohort.
     assert value["reference_median"] == MEDIAN
-    assert value["difference"] == 10
     assert value["reference_period"] == [1970, 1990]
     assert value["cohort_size"] == 21
     assert value["cohort_sha256"] == cohort_fingerprint(
         reference_cohort(session, reviewed_cohort)
     )
     assert value["model_card"] == COMPARISON_MODEL_CARD
-
-
-@pytest.mark.integration
-def test_a_year_below_the_median_reads_as_fewer_not_as_negative(
-    session: Session, reviewed_cohort: UUID
-) -> None:
-    derived = derive_conflict_comparison(
-        session, year=1970, release_id=reviewed_cohort
-    )
-
-    assert derived is not None
-    assert int(derived.value_numeric or 0) == -10
-    assert (derived.value_json or {})["direction"] == "fewer"
-
-
-@pytest.mark.integration
-def test_a_year_on_the_median_says_so_rather_than_claiming_a_difference(
-    session: Session, reviewed_cohort: UUID
-) -> None:
-    derived = derive_conflict_comparison(
-        session, year=1980, release_id=reviewed_cohort
-    )
-
-    assert derived is not None
-    assert int(derived.value_numeric or 0) == 0
-    assert (derived.value_json or {})["direction"] == "same"
 
 
 @pytest.mark.integration
@@ -210,12 +186,14 @@ class TestTheStatementRefusesWhatItCannotSupport:
         assert content is not None
         return content.statements[0]
 
-    def test_it_states_the_count_the_median_and_the_difference(
+    def test_it_states_the_count_the_rank_and_the_denominator(
         self, session: Session, reviewed_cohort: UUID
     ) -> None:
         text = str(self._statement(session, reviewed_cohort)["statement"])
-        # A reader can check the arithmetic only if all three are present.
-        assert "21" in text and "11" in text and "10" in text
+        # A reader can place the number only if all three are present.
+        assert "21 active state-based conflicts" in text
+        assert "95%" in text
+        assert "21 supported years" in text
         assert "1970" in text and "1990" in text
 
     def test_it_says_this_is_the_application_comparing(
@@ -247,7 +225,7 @@ class TestTheStatementRefusesWhatItCannotSupport:
         self, session: Session, reviewed_cohort: UUID
     ) -> None:
         text = str(self._statement(session, reviewed_cohort)["statement"])
-        assert "not a measure of their scale" in text
+        assert "describes the year, not this specific day" in text
 
 
 @pytest.mark.integration

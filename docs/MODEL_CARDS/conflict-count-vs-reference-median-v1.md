@@ -1,7 +1,7 @@
 # Conflict count vs reference median, v1
 
 **Card ID:** `conflict-count-vs-reference-median-v1`
-**Status:** Approved for public use, 2026-07-27 (epic #51, UC4)
+**Status:** Superseded by [`conflict-count-vs-reference-percentile-v2`](conflict-count-vs-reference-percentile-v2.md), 2026-07-27 (epic #64, MD2). Accurate for what it published; no longer published.
 **Calculation version:** `1.0.0`
 **Value kind:** `conflict_count_vs_reference_median`
 

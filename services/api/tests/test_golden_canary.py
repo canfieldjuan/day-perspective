@@ -1041,22 +1041,27 @@ class TestConflictCaveatWording:
 def _comparison_statement(
     *,
     text: str | None = None,
-    value: object = 10,
+    value: object = 74,
+    cohort_size: object = 80,
     root_type: str = "derived_value",
-    model_card: object = "conflict-count-vs-reference-median-v1",
+    model_card: object = "conflict-count-vs-reference-percentile-v2",
 ) -> dict[str, object]:
-    details: dict[str, object] = {"value": value, "data_status": "final"}
+    details: dict[str, object] = {
+        "value": value,
+        "cohort_size": cohort_size,
+        "data_status": "final",
+    }
     if model_card is not None:
         details["model_card"] = model_card
     return {
-        "statement_id": "conflict-vs-median-1952",
+        "statement_id": "conflict-vs-percentile-1952",
         "statement": text
         if text is not None
         else (
-            "Day Perspective compares this: UCDP/PRIO records 46 state-based "
-            "armed conflicts as active in 1952, 10 conflicts more than the "
-            "1946–2025 median of 36. This is a count of distinct conflicts, "
-            "not a measure of their scale."
+            "The selected date occurred during a year with 46 active "
+            "state-based conflicts, ranking higher than 74% of 80 supported "
+            "years (1946\u20132025). This comparison describes the year, not "
+            "this specific day."
         ),
         "details": details,
         "provenance": {"root_type": root_type},
@@ -1094,19 +1099,38 @@ class TestComparisonValidation:
         )
         assert any("app-derived but its root is" in issue for issue in issues), issues
 
-    def test_prose_and_displayed_difference_must_agree(self) -> None:
+    def test_prose_and_displayed_rank_must_agree(self) -> None:
         issues = validate_context_payload(
             self._payload_with(_comparison_statement(value=3))
         )
         assert any("displayed value is 3" in issue for issue in issues), issues
 
-    def test_the_sign_must_agree_not_only_the_magnitude(self) -> None:
-        # "10 more" against a displayed -10 is the same magnitude and the
-        # opposite claim.
+    def test_the_stated_denominator_must_match_the_cohort(self) -> None:
+        # A rank without its cohort size is unreadable: "higher than 95%" of
+        # four years and of eighty years are very different claims.
         issues = validate_context_payload(
-            self._payload_with(_comparison_statement(value=-10))
+            self._payload_with(_comparison_statement(cohort_size=12))
         )
-        assert any("displayed value is -10" in issue for issue in issues), issues
+        assert any("cohort size is 12" in issue for issue in issues), issues
+
+    def test_a_rank_no_year_can_reach_is_caught(self) -> None:
+        # A cohort includes the subject year, which is never strictly lower
+        # than itself, so 100% is unreachable. Seeing it means ties were
+        # counted as lower and every tied year outranks the others.
+        issues = validate_context_payload(
+            self._payload_with(
+                _comparison_statement(
+                    value=100,
+                    text=(
+                        "The selected date occurred during a year with 46 "
+                        "active state-based conflicts, ranking higher than "
+                        "100% of 80 supported years (1946\u20132025). This "
+                        "comparison describes the year, not this specific day."
+                    ),
+                )
+            )
+        )
+        assert any("no year can" in issue for issue in issues), issues
 
     def test_a_comparison_claiming_severity_is_caught(self) -> None:
         issues = validate_context_payload(
