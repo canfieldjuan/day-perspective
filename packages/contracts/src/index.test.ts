@@ -18,7 +18,7 @@ describe("publication tiers", () => {
     expect(PUBLICATION_TIERS).toEqual([
       "context_only",
       "partially_enriched",
-      "reviewed_enriched"
+      "enriched"
     ]);
   });
 });

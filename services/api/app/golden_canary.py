@@ -255,13 +255,13 @@ def validate_context_payload(payload: dict[str, Any]) -> list[str]:
                 "context_only profile carries a recorded-event statement",
             )
         )
-    if tier == PublicationTier.REVIEWED_ENRICHED.value and not has_recorded:
+    if tier == PublicationTier.ENRICHED.value and not has_recorded:
         # The other direction: a tier that promises a recorded event and
         # shows none oversells the page.
         issues.append(
             _issue(
                 profile_date,
-                "reviewed_enriched profile carries no recorded-event statement",
+                "enriched profile carries no recorded-event statement",
             )
         )
 
@@ -399,7 +399,7 @@ COMPARISON_SCALE_DISCLAIMER = (
 #:
 #: The property being checked is that the reader is told the count describes
 #: the year rather than *this* date. Pinning one literal sentence failed the
-#: archive's only reviewed_enriched profile for wording that was never
+#: archive's only enriched profile for wording that was never
 #: wrong; accepting any month and day would have passed a caveat that
 #: disclaims a different day than the profile's, which is no disclaimer at
 #: all. So the date-specific form is parsed and compared.

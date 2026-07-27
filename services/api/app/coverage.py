@@ -26,7 +26,10 @@ from app.models import (
     PublicationStatementEvidence,
     PublicationStatus,
     PublicationTier,
+    QualityFloor,
+    ReviewStatus,
 )
+from app.profile_metadata import derive_profile_metadata
 from app.services import PublishedProfileStore, _acquire_publication_lock
 
 SECTION_KEYS = (
@@ -48,6 +51,10 @@ class CoverageRecord:
     profile_date: date
     profile_type: ProfileType
     publication_tier: PublicationTier
+    #: Independent of the tier. Richness says how much is here; these say
+    #: who checked it and how strong the weakest included evidence is.
+    review_status: ReviewStatus
+    quality_floor: QualityFloor
     has_recorded_event: bool
     sections: dict[str, int]
     nearest_enriched_before: date | None = None
@@ -95,15 +102,22 @@ def upsert_coverage_entry(
     *,
     manifest: PublicationManifest,
 ) -> CoverageEntry:
-    """Record this date's richness. Called as publication's final step.
+    """Record this date's richness, review state and quality floor.
 
-    Every field is derived from the manifest and its immutable statement
-    evidence — nothing here reads the artifact or the editorial record, so
-    there is no payload to thread through the callers and no second source
-    that could disagree with this one.
+    Called as publication's final step, and the only place any of these are
+    computed. Richness comes from the manifest and its immutable statement
+    evidence; review status and quality floor come from
+    ``derive_profile_metadata``, which every writer routes through for the
+    same reason — #45 was cut after seven rounds because both fields were
+    threaded through six writers and each one was a chance to disagree.
+
+    Nothing here takes any of the three as a parameter. That is the whole
+    design: a caller cannot supply a value that differs from what the
+    records say.
     """
     counts = _section_counts(session, manifest.id)
     has_event = counts[RECORDED_SECTION] > 0
+    metadata = derive_profile_metadata(session, manifest=manifest)
     entry = session.scalar(
         select(CoverageEntry).where(
             CoverageEntry.profile_date == manifest.profile_date
@@ -113,6 +127,8 @@ def upsert_coverage_entry(
         "profile_type": manifest.profile_type,
         "publication_manifest_id": manifest.id,
         "publication_tier": manifest.publication_tier,
+        "review_status": metadata.review_status,
+        "quality_floor": metadata.quality_floor,
         "has_recorded_event": has_event,
         "sections": counts,
         "refreshed_at": datetime.now(UTC),
@@ -176,6 +192,31 @@ def _date_transaction(
     except BaseException:
         session.rollback()
         raise
+
+
+def refresh_coverage_metadata(session: Session, *, profile_date: date) -> bool:
+    """Re-derive review status and quality floor for one date.
+
+    Publication is not the only thing that changes these. A reviewer
+    recording a decision, or a source being regraded, changes how published
+    content was validated without changing the content — so without this the
+    index would keep reporting `automated_only` after a review, or an
+    obsolete floor after a downgrade, until someone happened to rebuild.
+
+    This is a seventh caller of the derivation, which is exactly what #45
+    warned about — but it is safe for the reason that made the design work:
+    it re-derives rather than supplying a value, so it cannot disagree with
+    the other six.
+
+    Returns False when the date has no servable manifest, so governance
+    writers can call it unconditionally: recording a selection before the
+    profile exists is normal during publication.
+    """
+    manifest = _latest_published_manifest(session, profile_date)
+    if manifest is None:
+        return False
+    upsert_coverage_entry(session, manifest=manifest)
+    return True
 
 
 def rebuild_coverage_index(
@@ -413,6 +454,8 @@ def coverage_for_date(session: Session, profile_date: date) -> CoverageRecord | 
         profile_date=entry.profile_date,
         profile_type=entry.profile_type,
         publication_tier=entry.publication_tier,
+        review_status=entry.review_status,
+        quality_floor=entry.quality_floor,
         has_recorded_event=entry.has_recorded_event,
         sections=dict(entry.sections or {}),
         nearest_enriched_before=_neighbour(

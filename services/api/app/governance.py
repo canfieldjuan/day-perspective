@@ -384,7 +384,27 @@ def record_editorial_selection(
     )
     session.add(row)
     session.flush()
+    _refresh_indexed_metadata(session, profile_date)
     return row
+
+
+def _refresh_indexed_metadata(session: Session, profile_date: date) -> None:
+    """Keep the coverage index honest about who checked this date.
+
+    Review status is derived at publication, so a decision recorded
+    afterwards would otherwise leave the index reporting ``automated_only``
+    until somebody happened to rebuild — the interface telling a reader
+    nobody had checked a page a reviewer had just checked.
+
+    Only the write path calls this. An identical decision returns early
+    above without touching anything, so there is nothing to re-derive.
+
+    Imported inside the function because coverage derives review status from
+    this module; the dependency only runs one way at import time.
+    """
+    from app.coverage import refresh_coverage_metadata
+
+    refresh_coverage_metadata(session, profile_date=profile_date)
 
 
 def lineage_root_ids(session: Session, release_id: UUID) -> frozenset[UUID]:

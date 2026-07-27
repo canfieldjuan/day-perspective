@@ -334,7 +334,7 @@ class TestPayloadValidation:
         # The other direction of the tier check: a tier that promises a
         # recorded event and shows none oversells the page.
         payload = _payload()
-        payload["publication_tier"] = "reviewed_enriched"
+        payload["publication_tier"] = "enriched"
 
         issues = validate_context_payload(payload)
 
@@ -911,7 +911,7 @@ class TestConflictCaveatWording:
         ) == []
 
     def test_the_date_specific_form_passes(self) -> None:
-        # This is the archive's only reviewed_enriched profile, verbatim.
+        # This is the archive's only enriched profile, verbatim.
         # A literal check on the year-general sentence failed it.
         assert validate_context_payload(
             _payload(

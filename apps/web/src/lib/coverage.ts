@@ -1,6 +1,8 @@
 import {
   DAY_PROFILE_SECTION_KEYS,
   PUBLICATION_TIERS,
+  QUALITY_FLOORS,
+  REVIEW_STATUSES,
   type CoverageDateResponse,
   type PublicationTier,
   type RandomEnrichedResponse
@@ -59,6 +61,15 @@ export function isCoverageResponse(
     typeof response.profile_type === "string" &&
     (PUBLICATION_TIERS as readonly string[]).includes(
       response.publication_tier as string
+    ) &&
+    // Validated like the tier rather than trusted: an unknown review status
+    // rendering as a label would tell a reader something was checked when
+    // nothing established that.
+    (REVIEW_STATUSES as readonly string[]).includes(
+      response.review_status as string
+    ) &&
+    (QUALITY_FLOORS as readonly string[]).includes(
+      response.quality_floor as string
     ) &&
     typeof response.has_recorded_event === "boolean" &&
     isSectionCounts(response.sections) &&

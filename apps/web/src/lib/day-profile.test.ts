@@ -178,7 +178,7 @@ describe("publication tier validation", () => {
   }
 
   it("accepts every tier in the contract vocabulary", () => {
-    for (const tier of ["context_only", "partially_enriched", "reviewed_enriched"]) {
+    for (const tier of ["context_only", "partially_enriched", "enriched"]) {
       expect(
         isPublishedProfileResponse(
           envelope({ publication_tier: tier }),

@@ -1324,7 +1324,7 @@ def publish_golden_profile(
         # on every date because derived_comparisons is an EDITORIAL_SECTION:
         # populating it archive-wide would flip 27,759 context_only profiles
         # to partially_enriched, telling readers those pages offer curated
-        # content they do not. This date is already reviewed_enriched, so
+        # content they do not. This date is already `enriched`, so
         # carrying the comparison changes no tier. #62 holds the
         # archive-wide question; D039 records the reasoning.
         "derived_comparisons": list(comparison.statements) if comparison else [],

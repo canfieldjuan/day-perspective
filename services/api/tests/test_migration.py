@@ -182,7 +182,7 @@ def test_publication_tier_backfill_derives_from_statement_evidence(
                 ).all()
             }
         assert observed[context_date.isoformat()] == "context_only"
-        assert observed[enriched_date.isoformat()] == "reviewed_enriched"
+        assert observed[enriched_date.isoformat()] == "enriched"
         assert observed[lookalike_date.isoformat()] == "context_only"
     finally:
         command.upgrade(alembic_config, "head")
