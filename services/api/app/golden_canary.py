@@ -314,12 +314,49 @@ CONFLICT_TEXT = "state-based armed conflicts"
 #: precise of the two.
 #:
 #: The property being checked is that the reader is told the count describes
-#: the year rather than this date. Pinning one literal sentence failed the
+#: the year rather than *this* date. Pinning one literal sentence failed the
 #: archive's only reviewed_enriched profile for wording that was never
-#: wrong, which is a defect in the check rather than in the statement.
-_YEAR_NOT_DATE = re.compile(
-    r"not a count for any single date|not an? [A-Z][a-z]+ \d{1,2} count"
+#: wrong; accepting any month and day would have passed a caveat that
+#: disclaims a different day than the profile's, which is no disclaimer at
+#: all. So the date-specific form is parsed and compared.
+_YEAR_GENERAL_CAVEAT = "not a count for any single date"
+_DATE_SPECIFIC_CAVEAT = re.compile(r"not an? ([A-Z][a-z]+) (\d{1,2}) count")
+#: Matched explicitly rather than via strptime, whose %B depends on the
+#: process locale. A validator must not read differently on another machine.
+_MONTH_NAMES = (
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
 )
+
+
+def _disclaims_this_date(text: str, profile_date: str) -> bool:
+    """Whether the statement tells the reader this is not a count for the
+    date being read."""
+    if _YEAR_GENERAL_CAVEAT in text:
+        return True
+    named = _DATE_SPECIFIC_CAVEAT.search(text)
+    if named is None:
+        return False
+    if named.group(1) not in _MONTH_NAMES:
+        return False
+    try:
+        read = date.fromisoformat(profile_date)
+    except ValueError:
+        return False
+    return (_MONTH_NAMES.index(named.group(1)) + 1, int(named.group(2))) == (
+        read.month,
+        read.day,
+    )
 
 CONFLICT_MORTALITY_WORDS = (
     "deaths",
@@ -366,7 +403,7 @@ def _validate_conflict_context(
                 "period_context marker",
             )
         )
-    if _YEAR_NOT_DATE.search(text) is None:
+    if not _disclaims_this_date(text, profile_date):
         issues.append(
             _issue(
                 profile_date,

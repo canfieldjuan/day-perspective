@@ -933,6 +933,90 @@ class TestConflictCaveatWording:
             )
         ) == []
 
+    def test_a_caveat_naming_a_different_day_is_caught(self) -> None:
+        """A caveat that disclaims some other day disclaims nothing.
+
+        Widening the check to accept the date-specific form must not widen
+        it to accept any date: on a 1964-03-27 profile, "not a March 28
+        count" leaves the reader with a count they may still take as
+        March 27's.
+        """
+        issues = validate_context_payload(
+            _payload(
+                profile_date="1964-03-27",
+                typical=[
+                    _daily_statement(year=1964, days_in_year=366, prose_days=366)
+                ],
+                context=[
+                    _conflict_statement(
+                        count=25,
+                        year=1964,
+                        text=(
+                            "UCDP/PRIO records 25 state-based armed conflicts "
+                            "as active at some point in 1964. This is annual "
+                            "context, not a March 28 count."
+                        ),
+                    )
+                ],
+            )
+        )
+        assert any(
+            "describes the year rather than this date" in issue
+            for issue in issues
+        ), issues
+
+    def test_a_caveat_naming_a_different_month_is_caught(self) -> None:
+        issues = validate_context_payload(
+            _payload(
+                profile_date="1964-03-27",
+                typical=[
+                    _daily_statement(year=1964, days_in_year=366, prose_days=366)
+                ],
+                context=[
+                    _conflict_statement(
+                        count=25,
+                        year=1964,
+                        text=(
+                            "UCDP/PRIO records 25 state-based armed conflicts "
+                            "as active at some point in 1964. This is annual "
+                            "context, not an April 27 count."
+                        ),
+                    )
+                ],
+            )
+        )
+        assert any(
+            "describes the year rather than this date" in issue
+            for issue in issues
+        ), issues
+
+    def test_a_capitalised_non_month_is_not_a_caveat(self) -> None:
+        # The pattern accepts a capitalised word; only real month names may
+        # satisfy it, or "not a Tuesday 27 count" would validate.
+        issues = validate_context_payload(
+            _payload(
+                profile_date="1964-03-27",
+                typical=[
+                    _daily_statement(year=1964, days_in_year=366, prose_days=366)
+                ],
+                context=[
+                    _conflict_statement(
+                        count=25,
+                        year=1964,
+                        text=(
+                            "UCDP/PRIO records 25 state-based armed conflicts "
+                            "as active at some point in 1964. This is annual "
+                            "context, not a Tuesday 27 count."
+                        ),
+                    )
+                ],
+            )
+        )
+        assert any(
+            "describes the year rather than this date" in issue
+            for issue in issues
+        ), issues
+
     def test_a_statement_with_no_caveat_at_all_is_still_caught(self) -> None:
         # Widening the accepted forms must not widen it to everything.
         issues = validate_context_payload(
