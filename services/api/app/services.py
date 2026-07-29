@@ -1294,26 +1294,81 @@ EDITORIAL_SECTIONS = (
 def derive_publication_tier(payload: dict[str, Any]) -> PublicationTier:
     """Classify how much a profile offers, from the payload alone.
 
+    The tier counts content tied to the **selected date**. Annual averages,
+    annual conflict counts and approved period comparisons are all
+    context_only however many of them a page carries — otherwise every page
+    becomes "enriched" because another annual statistic was added, and the
+    word stops distinguishing anything. The coverage index, the enriched
+    navigation and the landing disclosure all key off this, so an inflated
+    tier is not a cosmetic error.
+
     Pure and never-raising: a malformed payload degrades to the most modest
-    tier rather than overstating what the archive holds. A recorded event is
-    the strongest signal available today because publication already gates
-    it behind claim review and editorial selection; the tier does not yet
-    encode a per-date human editorial review, which does not exist as data
-    (see docs/DECISIONS.md D031).
+    tier rather than overstating what the archive holds.
+
+    Promotion is a claim — *this page holds something about this day* — so
+    it takes evidence. Editorial content carrying no temporal marker does
+    not promote. Both defaults are wrong in some case, and this one
+    understates; the other silently reclassifies the archive. A recorded
+    event is exempt because that section is date-specific by construction.
     """
     sections = payload.get("sections")
     if not isinstance(sections, dict):
         return PublicationTier.CONTEXT_ONLY
 
-    def populated(key: str) -> bool:
-        statements = sections.get(key)
-        return isinstance(statements, list) and len(statements) > 0
+    def statements(key: str) -> list[Any]:
+        rows = sections.get(key)
+        return rows if isinstance(rows, list) else []
 
-    if populated(RECORDED_SECTION):
+    if statements(RECORDED_SECTION):
         return PublicationTier.ENRICHED
-    if any(populated(key) for key in EDITORIAL_SECTIONS):
+    if any(
+        _is_date_specific(statement)
+        for key in EDITORIAL_SECTIONS
+        for statement in statements(key)
+    ):
         return PublicationTier.PARTIALLY_ENRICHED
     return PublicationTier.CONTEXT_ONLY
+
+
+#: Temporal assignments that genuinely place a statement on the selected
+#: date. An allow-list, not a deny-list: a value added to TemporalAssignment
+#: later then defaults to not promoting, which is the understating
+#: direction. A deny-list would silently promote every new kind of content.
+#:
+#: uniform_period_allocation is excluded deliberately — it is an annual
+#: total divided across days, which is the operator's canonical example of
+#: content that must stay context_only. modeled_period_allocation is
+#: included because it models a value *for this date*, which the operator
+#: lists as promoting.
+DATE_SPECIFIC_ASSIGNMENTS = frozenset(
+    {
+        "direct_record",
+        "reported",
+        "inferred",
+        "modeled_period_allocation",
+    }
+)
+
+
+def _is_date_specific(statement: Any) -> bool:
+    """Whether an editorial statement is about the date being read.
+
+    Requires a positive signal. A statement with no details, an unreadable
+    details map, a period assignment, or an explicit ``date_specific: false``
+    all fail to promote — the archive would rather call a page sparser than
+    it is than richer.
+    """
+    if not isinstance(statement, dict):
+        return False
+    details = statement.get("details")
+    if not isinstance(details, dict):
+        return False
+    if details.get("date_specific") is False:
+        return False
+    assignment = details.get("temporal_assignment")
+    if not isinstance(assignment, str):
+        return False
+    return assignment in DATE_SPECIFIC_ASSIGNMENTS
 
 
 class PendingPublicationError(RuntimeError):

@@ -19,6 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.adapters.base import LocalFilesystemRawSourceStore, RawSourceStore
+from app.conflict_comparison import optional_conflict_comparison
 from app.governance import (
     EditorialSelection,
     EditorialSelectionStatus,
@@ -1594,9 +1595,27 @@ def publish_context_profile(
     if conflict is not None:
         context_statements.extend(conflict.statements)
 
+    # The comparison is period content, so it does not raise the tier: a
+    # page carrying it is still context_only unless something ties it to
+    # this date (#62, D040). Published only where the conflict context it
+    # compares is published, so a page cannot rank a year it does not state.
+    comparison = (
+        optional_conflict_comparison(
+            session, year=profile_date.year, statement_index=0
+        )
+        if conflict is not None
+        else None
+    )
+    if comparison is not None and _root_declined_for_date(
+        session, profile_date=profile_date, evidence=comparison.evidence
+    ):
+        comparison = None
+
     evidence = list(content.evidence)
     if conflict is not None:
         evidence.extend(conflict.evidence)
+    if comparison is not None:
+        evidence.extend(comparison.evidence)
     ensure_annual_context_selections(
         session, profile_date=profile_date, evidence=evidence
     )
@@ -1610,6 +1629,14 @@ def publish_context_profile(
     if conflict is not None:
         evidence_by_release.setdefault(conflict.source_release_id, []).extend(
             conflict.evidence
+        )
+    if comparison is not None and conflict is not None:
+        # The comparison rests on the same release its cohort came from, and
+        # is only built when that conflict context exists — the pairing is
+        # asserted here rather than assumed, so the gate cannot be skipped
+        # by a future path that publishes one without the other.
+        evidence_by_release.setdefault(conflict.source_release_id, []).extend(
+            comparison.evidence
         )
     for release_id, items in evidence_by_release.items():
         resolved_by_section: dict[str, set[UUID]] = {}
@@ -1633,6 +1660,8 @@ def publish_context_profile(
         )
 
     supported = {"typical_day_in_this_year", "wider_historical_context"}
+    if comparison is not None:
+        supported.add("derived_comparisons")
     unsupported_reason = (
         "This vertical slice does not publish this evidence class."
     )
@@ -1641,7 +1670,9 @@ def publish_context_profile(
         "typical_day_in_this_year": list(content.typical_statements),
         "wider_historical_context": context_statements,
         "curated_claims": [],
-        "derived_comparisons": [],
+        "derived_comparisons": (
+            list(comparison.statements) if comparison is not None else []
+        ),
         "wonder_and_progress": [],
         "evidence_notes": [],
     }
