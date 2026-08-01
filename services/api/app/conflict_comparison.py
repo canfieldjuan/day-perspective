@@ -461,7 +461,8 @@ def derive_release_comparisons(session: Session, release_id: UUID) -> int:
 
     Deriving is not publishing. These values exist so a comparison can be
     published from reviewed provenance; which pages carry one is a separate
-    decision, and today only the golden profile does.
+    decision. Since MD3 (#62, D040) the standard context publish path carries
+    it on every eligible date, tier-neutrally.
     """
     cohort = reference_cohort(session, release_id)
     derived = 0

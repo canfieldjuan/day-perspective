@@ -1095,3 +1095,62 @@ exercise the absence path.
 **Revisit trigger:** The tier vocabulary gains a level that distinguishes
 mechanically-derived annual content from curated per-date content, at which
 point the archive-wide question can be reopened without overstating.
+
+## D040: Comparisons publish archive-wide, and the tier stays neutral
+
+**Status:** Accepted (2026-08-01, epic #64 / MD3, closes the #62 question)
+
+**Context:** D039 published the first app-derived comparison on the golden
+date alone, because `derived_comparisons` was an `EDITORIAL_SECTION` and
+populating it promoted a profile from `context_only` to
+`partially_enriched`. Carrying it archive-wide was deferred to #62 as a
+contract question: what does the tier mean?
+
+**Decision:** The tier counts **date-specific** content, not merely
+*editorial* content. A period comparison is annual context — it describes
+the year, not the day — so it no longer promotes any profile, and the
+standard context publish path carries it on every eligible date. Answered
+D039's revisit trigger not by adding a tier level but by correcting what the
+existing tiers count.
+
+**Mechanism:** `derive_publication_tier` promotes an editorial section only
+when it holds a statement `_is_date_specific` accepts
+(`services/api/app/services.py`). Date-specificity is an **allow-list** of
+temporal assignments (`DATE_SPECIFIC_ASSIGNMENTS = {direct_record, reported,
+inferred, modeled_period_allocation}`), not a deny-list: the comparison
+carries `temporal_assignment=period_context`, which is absent from the list,
+so it never promotes. An allow-list also fails safe — a temporal assignment
+added later defaults to not promoting (understating), never to silently
+reclassifying the archive. `publish_context_profile`
+(`services/api/app/un_wpp.py`) wires `optional_conflict_comparison` into the
+standard path, gated on the conflict context it compares being present.
+
+**Alternatives considered:** Adding a tier level between `context_only` and
+`partially_enriched` for mechanically-derived annual content — more
+vocabulary for readers to learn, when the real rule is simply that the tier
+measures per-date richness. A deny-list of period markers — it would have
+promoted `uniform_period_allocation` (annual averages) and every unmarked or
+future assignment, the exact silent-reclassification failure this avoids.
+
+**Reason:** The tier is a claim about how much a page offers about its day.
+One mechanically-derived annual number is not that, however many a page
+carries, so counting it would make the claim false in the way this product
+exists not to be.
+
+**Consequences:** Comparisons are safe to publish on all ~27,759 dates
+without moving any discovery signal — nearest-enriched, random-enriched, the
+tier buckets, or the recorded-event flag. Proven offline over a whole
+multi-year archive by `test_the_whole_archive_stays_context_only_when_comparisons_publish`
+and, for the golden date, `test_the_golden_date_stays_enriched_in_the_index`
+(`services/api/tests/test_tier_neutral_comparisons.py`). The archive-wide
+republish against the real release remains an operator pass
+(`docs/runbooks/archive-comparison-republish.md`); the code guarantee lands
+here.
+
+**Known follow-up:** The published comparison statement carries its
+neutrality only through `temporal_assignment`; its stored value also records
+`date_specific: false`, but that flag is not copied into the published
+`details`, so `_is_date_specific`'s explicit `date_specific` guard never
+fires for the real payload. Carrying it into the published statement would
+add a second, independent guard. Deferred (it changes the payload hash, so it
+belongs with a republish); tracked in #62.
