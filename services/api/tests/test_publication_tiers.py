@@ -44,6 +44,20 @@ def statement(identifier: str) -> dict[str, object]:
     return {"statement_id": identifier, "statement": "Synthetic tier statement."}
 
 
+def date_specific_statement(identifier: str) -> dict[str, object]:
+    """An editorial statement tied to the selected date.
+
+    MD3 (#62) promotes an editorial section only when it carries a statement
+    whose temporal assignment is date-specific. ``direct_record`` is one such
+    assignment; a bare :func:`statement` carries none and stays context_only.
+    """
+    return {
+        "statement_id": identifier,
+        "statement": "Synthetic tier statement.",
+        "details": {"temporal_assignment": "direct_record"},
+    }
+
+
 def test_context_only_covers_period_and_annual_context() -> None:
     assert (
         derive_publication_tier(
@@ -71,9 +85,14 @@ def test_context_only_when_the_profile_carries_nothing_yet() -> None:
     "section",
     ["curated_claims", "derived_comparisons", "wonder_and_progress"],
 )
-def test_editorial_material_without_a_recorded_event_is_partially_enriched(
+def test_non_date_specific_editorial_material_stays_context_only(
     section: str,
 ) -> None:
+    """MD3 (#62): editorial content promotes only when it is tied to the
+    selected date. A statement with no date-specific temporal assignment — an
+    annual average, an approved period comparison — is context_only however
+    many of them a page carries, otherwise every page becomes enriched because
+    another annual statistic was added."""
     assert (
         derive_publication_tier(
             profile_payload(
@@ -81,6 +100,30 @@ def test_editorial_material_without_a_recorded_event_is_partially_enriched(
                     "recorded_on_this_date": [],
                     "typical_day_in_this_year": [statement("avg")],
                     section: [statement("editorial")],
+                }
+            )
+        )
+        is PublicationTier.CONTEXT_ONLY
+    )
+
+
+@pytest.mark.parametrize(
+    "section",
+    ["curated_claims", "derived_comparisons", "wonder_and_progress"],
+)
+def test_date_specific_editorial_material_is_partially_enriched(
+    section: str,
+) -> None:
+    """The other side of the MD3 guard: a curated claim or modeled value whose
+    date applies to this day does promote — that is exactly what
+    partially_enriched describes."""
+    assert (
+        derive_publication_tier(
+            profile_payload(
+                {
+                    "recorded_on_this_date": [],
+                    "typical_day_in_this_year": [statement("avg")],
+                    section: [date_specific_statement("editorial")],
                 }
             )
         )
