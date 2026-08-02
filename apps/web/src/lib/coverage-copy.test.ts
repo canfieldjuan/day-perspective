@@ -107,9 +107,9 @@ function coverageFor(
     quality_floor: "not_assessed",
     has_recorded_event: tier === "enriched",
     sections:
-      tier === "context_only"
-        ? { typical_day_in_this_year: 2, wider_historical_context: 3 }
-        : { recorded_on_this_date: 1 },
+      tier === "enriched"
+        ? { recorded_on_this_date: 1 }
+        : { typical_day_in_this_year: 2, wider_historical_context: 3 },
     // A destination each way, so the discovery copy has something to say
     // whatever the tier.
     nearest_enriched_before: "1980-06-15",
