@@ -17,8 +17,10 @@ import { formatPublicDate } from "./date";
  * - **enriched** — `publication_tier != context_only`, which is what the
  *   `nearest_enriched_*` fields mean. Not "evidence-backed": every
  *   published date is that, including all 27,758 context-only ones, so
- *   denying such dates exist would be false. Not "reviewed": coverage
- *   carries no review-status field (removed in AA3a; see issue #45).
+ *   denying such dates exist would be false. Not "reviewed": review status
+ *   is orthogonal to richness (MD1, epic #64), so this vocabulary never
+ *   reads it — the coverage response carries `review_status`, but "reviewed"
+ *   left the richness axis and must not re-enter it here (issues #45, #62).
  * - **recorded event** — `has_recorded_event`, and per destination by
  *   comparison with `nearest_recorded_event_*`. A `partially_enriched`
  *   date is enriched without holding one.
