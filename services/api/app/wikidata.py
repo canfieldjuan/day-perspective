@@ -18,18 +18,26 @@ from app.adapters.base import (
     RawSourceStore,
 )
 from app.coverage import published_recorded_event_on
-from app.governance import LicenseInput, register_release_license
+from app.governance import (
+    LicenseInput,
+    assert_release_publication_eligible,
+    register_release_license,
+)
 from app.models import (
     Claim,
     ClaimAssertionStatus,
     DataStatus,
     DateRole,
+    DayProfile,
     Event,
     EventLocation,
     EventTime,
     LegalReviewStatus,
     Methodology,
     PipelineRun,
+    PublicationManifest,
+    PublicationStatementEvidence,
+    PublicationStatus,
     QualityCheck,
     RawSourceRecord,
     ResolutionMethod,
@@ -39,19 +47,25 @@ from app.models import (
     SourceRelease,
     TemporalAssignment,
     TemporalPrecision,
+    profile_type_for_date,
 )
 from app.services import (
+    PublicationStatementEvidenceInput,
+    PublishedProfileStore,
     canonical_json_bytes,
     content_hash,
     create_claim,
     create_source_release,
+    publish_day_profile,
     resolve_claim,
 )
 
 __all__ = [
     "LocalFilesystemRawSourceStore",
     "WikidataEnrichmentOutcome",
+    "WikidataPublishOutcome",
     "attempt_wikidata_enrichment",
+    "publish_wikidata_event",
     "resolve_wikidata_event",
 ]
 
@@ -755,3 +769,389 @@ def resolve_wikidata_event(session: Session) -> Event:
     )
     session.flush()
     return event
+
+
+@dataclass(frozen=True)
+class WikidataPublishOutcome:
+    """The result of one publish attempt for the reviewed Wikidata candidate.
+
+    ``published`` means the resolved candidate was published as the date's recorded
+    event (``manifest_id`` / ``day_profile_id`` set). ``deferred_to_merge_review``
+    means the occurrence date already publishes a recorded event, so the pass
+    published nothing and opened (or reused) a durable merge-review task
+    (``merge_review_task_id`` / ``colliding_manifest_id`` set) for a human to decide
+    merge, supersede, or distinct-event.
+    """
+
+    status: str
+    occurrence_date: date
+    manifest_id: UUID | None = None
+    day_profile_id: UUID | None = None
+    colliding_manifest_id: UUID | None = None
+    merge_review_task_id: UUID | None = None
+
+
+#: The reviewed predicates that become recorded-event statements, each paired with
+#: the honest, data-derived text it renders. Identity is provenance, not a
+#: reader-facing statement; magnitude/depth/fatalities resolution is a later slice.
+_PUBLISHED_PREDICATES = (
+    "candidate_name",
+    "candidate_event_type",
+    "candidate_occurrence_date",
+    "candidate_coordinates",
+)
+
+
+def _latest_resolved(
+    session: Session, *, qid: str, predicate: str
+) -> ResolvedClaim | None:
+    return session.scalar(
+        select(ResolvedClaim)
+        .where(ResolvedClaim.canonical_key == f"wikidata:{qid}:{predicate}")
+        .order_by(ResolvedClaim.version.desc())
+    )
+
+
+def _manifest_is_wikidata_event(
+    session: Session, *, manifest: PublicationManifest, qid: str
+) -> bool:
+    """Whether a published manifest is this Wikidata entity's own recorded event.
+
+    True when the manifest's statement evidence rests on a ``wikidata:{qid}:*``
+    resolved claim -- so re-publishing our own event is idempotent, while a
+    recorded event published from any other source (e.g. the USGS golden profile,
+    keyed ``usgs:*``) is a genuine collision that must defer.
+    """
+    prefix = f"wikidata:{qid}:"
+    keys = session.scalars(
+        select(ResolvedClaim.canonical_key)
+        .join(
+            PublicationStatementEvidence,
+            PublicationStatementEvidence.resolved_claim_id == ResolvedClaim.id,
+        )
+        .where(PublicationStatementEvidence.publication_manifest_id == manifest.id)
+    )
+    return any(isinstance(key, str) and key.startswith(prefix) for key in keys)
+
+
+def _ensure_merge_review_task(
+    session: Session,
+    *,
+    identity_claim: Claim,
+    qid: str,
+    occurrence_date: date,
+    colliding_manifest_id: UUID,
+) -> ReviewTask:
+    """Open (or reuse) the durable merge-review task for a recorded-event collision.
+
+    Idempotent via a ``MERGE-REVIEW:`` sentinel on the identity claim, so repeated
+    publish attempts never stack duplicate tasks. The pass records no decision on a
+    human's behalf (D038): the task asks a human to choose merge, supersede, or
+    distinct-event before any competing recorded event is published.
+    """
+    existing = session.scalar(
+        select(ReviewTask)
+        .where(
+            ReviewTask.claim_id == identity_claim.id,
+            ReviewTask.status == "open",
+            ReviewTask.rationale.like("MERGE-REVIEW:%"),
+        )
+        .order_by(ReviewTask.created_at.asc())
+    )
+    if existing is not None:
+        return existing
+    task = ReviewTask(
+        claim_id=identity_claim.id,
+        status="open",
+        priority="high",
+        rationale=(
+            f"MERGE-REVIEW: Wikidata {qid} occurs on {occurrence_date.isoformat()}, "
+            f"which already publishes recorded event {colliding_manifest_id}. A human "
+            "must decide merge, supersede, or distinct-event before publishing a "
+            "competing recorded event."
+        ),
+    )
+    session.add(task)
+    session.flush()
+    return task
+
+
+def _wikidata_statement_provenance(
+    *,
+    claim: Claim,
+    resolved: ResolvedClaim,
+    release: SourceRelease,
+    source: Source,
+    methodology: Methodology,
+) -> dict[str, Any]:
+    return {
+        "root_type": "resolved_claim",
+        "published_statement": (
+            "This statement is selected for the recorded-event section."
+        ),
+        "resolved_claim": {
+            "canonical_key": resolved.canonical_key,
+            "version": resolved.version,
+            "method": resolved.resolution_method.value,
+            "rationale": resolved.rationale,
+        },
+        "supporting_claims": [
+            {
+                "predicate": claim.claim_type,
+                "value": claim.assertion_json,
+                "source_record_locator": claim.source_record_locator,
+                "source_record_hash_sha256": claim.source_record_hash_sha256,
+            }
+        ],
+        "dissenting_claims": [],
+        "source_release": {
+            "source": source.name,
+            "publisher": source.publisher,
+            "release": release.release_label,
+            "source_url": release.source_url,
+            "raw_checksum_sha256": release.raw_checksum_sha256,
+            "retrieved_at": release.retrieved_at.isoformat(),
+        },
+        "methodology": {
+            "name": methodology.name,
+            "version": methodology.version,
+            "description": methodology.description,
+        },
+    }
+
+
+def _recorded_statement_text(
+    predicate: str, *, value: dict[str, Any], occurrence_date: date
+) -> str:
+    """Honest, data-derived statement text for one recorded predicate.
+
+    Every value is read from the reviewed candidate; nothing is invented (§12).
+    """
+    if predicate == "candidate_name":
+        return f'Wikidata records this event as "{value.get("label", "")}".'
+    if predicate == "candidate_event_type":
+        return f"Wikidata classifies the entity as type {value.get('id', '')}."
+    if predicate == "candidate_occurrence_date":
+        return (
+            "Wikidata records the occurrence on "
+            f"{occurrence_date:%B} {occurrence_date.day}, {occurrence_date.year}."
+        )
+    if predicate == "candidate_coordinates":
+        return (
+            "Wikidata places the event at "
+            f"{value.get('latitude')} latitude, {value.get('longitude')} longitude."
+        )
+    raise ValueError(f"No recorded-statement rendering for {predicate}.")
+
+
+def publish_wikidata_event(
+    session: Session,
+    *,
+    store: PublishedProfileStore,
+    force_new_version: bool = False,
+) -> WikidataPublishOutcome:
+    """Publish the resolved Wikidata candidate as its date's recorded event.
+
+    Generalizes the USGS golden publisher off ``GOLDEN_DATE`` and the
+    ``ProfileType`` literal: the date and profile type come from the event's own
+    occurrence, and publication runs through the same source-agnostic spine
+    (``publish_day_profile``) and eligibility gate. The pass consumes the human
+    stages before it -- claim acceptance (D019) and editorial ranking -- and
+    fabricates neither (D038); an unaccepted or unranked candidate is refused.
+
+    Before minting anything, it checks ``published_recorded_event_on``: a date that
+    already publishes a *different* recorded event defers to a durable merge-review
+    task and no competing event or profile is created. Re-publishing this entity's
+    own recorded event is idempotent.
+    """
+    source = session.scalar(
+        select(Source).where(Source.slug == WIKIDATA_SOURCE_SLUG)
+    )
+    release = (
+        session.scalars(
+            select(SourceRelease)
+            .where(SourceRelease.source_id == source.id)
+            .order_by(SourceRelease.ingested_at.desc())
+        ).first()
+        if source is not None
+        else None
+    )
+    if source is None or release is None:
+        raise ValueError("Wikidata candidate has not been ingested.")
+
+    claims = {
+        claim.claim_type: claim
+        for claim in session.scalars(
+            select(Claim).where(Claim.source_release_id == release.id)
+        )
+    }
+    for claim_type in REQUIRED_EVENT_CLAIMS:
+        claim = claims.get(claim_type)
+        if claim is None:
+            raise ValueError(f"Wikidata candidate is missing {claim_type}.")
+        if claim.assertion_status is not ClaimAssertionStatus.ACCEPTED:
+            raise ValueError(
+                "Wikidata candidates must be human-reviewed and accepted before "
+                f"publication ({claim_type} is {claim.assertion_status.value})."
+            )
+
+    qid = _candidate_value(claims["candidate_event_identity"]).get("entity_id")
+    if not isinstance(qid, str):
+        raise ValueError("Wikidata identity candidate has no entity id.")
+    occurrence_date = _parse_occurrence_date(
+        _candidate_value(claims["candidate_occurrence_date"])
+    )
+    profile_type = profile_type_for_date(occurrence_date)
+    if profile_type is None:
+        raise ValueError(
+            "Wikidata occurrence date is outside the public archive band."
+        )
+
+    # Dedup before minting a competing recorded event: a date that already
+    # publishes a different recorded event defers to human merge review.
+    collision = published_recorded_event_on(session, occurrence_date)
+    if collision is not None and not _manifest_is_wikidata_event(
+        session, manifest=collision, qid=qid
+    ):
+        task = _ensure_merge_review_task(
+            session,
+            identity_claim=claims["candidate_event_identity"],
+            qid=qid,
+            occurrence_date=occurrence_date,
+            colliding_manifest_id=collision.id,
+        )
+        return WikidataPublishOutcome(
+            status="deferred_to_merge_review",
+            occurrence_date=occurrence_date,
+            colliding_manifest_id=collision.id,
+            merge_review_task_id=task.id,
+        )
+
+    # The event must already be resolved (G2a) -- resolution is a prior stage.
+    identity_resolved = _latest_resolved(
+        session, qid=qid, predicate="candidate_event_identity"
+    )
+    event = (
+        session.scalar(
+            select(Event).where(Event.resolved_claim_id == identity_resolved.id)
+        )
+        if identity_resolved is not None
+        else None
+    )
+    if event is None:
+        raise ValueError(
+            "The Wikidata candidate must be resolved into an event before publication."
+        )
+    methodology = _wikidata_methodology(session)
+
+    statements: list[dict[str, Any]] = []
+    evidence: list[PublicationStatementEvidenceInput] = []
+    selected_roots: set[UUID] = set()
+    for predicate in _PUBLISHED_PREDICATES:
+        resolved = _latest_resolved(session, qid=qid, predicate=predicate)
+        if resolved is None:
+            # Only the optional coordinate predicate can be absent; a required
+            # predicate without a resolution means the event was not fully
+            # resolved, which the identity lookup above already guards.
+            continue
+        index = len(statements)
+        statements.append(
+            {
+                "statement_id": predicate.replace("candidate_", "wikidata-").replace(
+                    "_", "-"
+                ),
+                "statement": _recorded_statement_text(
+                    predicate,
+                    value=_candidate_value(claims[predicate]),
+                    occurrence_date=occurrence_date,
+                ),
+                "details": resolved.resolved_value,
+                "provenance_note": (
+                    "Wikidata CC0 structured data; single reviewed candidate."
+                ),
+                "provenance": _wikidata_statement_provenance(
+                    claim=claims[predicate],
+                    resolved=resolved,
+                    release=release,
+                    source=source,
+                    methodology=methodology,
+                ),
+            }
+        )
+        evidence.append(
+            PublicationStatementEvidenceInput(
+                statement_path=f"/sections/recorded_on_this_date/{index}",
+                resolved_claim_id=resolved.id,
+            )
+        )
+        selected_roots.add(resolved.id)
+
+    # Publication consumes the human editorial-ranking stage; it is refused when a
+    # human has not selected these roots (this also enforces licensing and the
+    # source pipeline's quality gate).
+    assert_release_publication_eligible(
+        session,
+        source_release_id=release.id,
+        profile_date=occurrence_date,
+        resolved_root_ids_by_section={"recorded_on_this_date": selected_roots},
+    )
+
+    payload = {
+        "schema_version": "1",
+        "date": occurrence_date.isoformat(),
+        "profile_type": profile_type.value,
+        "sections": {"recorded_on_this_date": statements},
+        "section_states": {"recorded_on_this_date": {"status": "available"}},
+        "source_attribution": {
+            "name": source.name,
+            "publisher": source.publisher,
+            "url": f"https://www.wikidata.org/wiki/{qid}",
+        },
+    }
+
+    previous_manifest = session.scalar(
+        select(PublicationManifest)
+        .where(
+            PublicationManifest.profile_date == occurrence_date,
+            PublicationManifest.profile_type == profile_type,
+            PublicationManifest.status == PublicationStatus.PUBLISHED,
+        )
+        .order_by(PublicationManifest.version.desc())
+    )
+    previous_profile = (
+        session.scalar(
+            select(DayProfile).where(
+                DayProfile.publication_manifest_id == previous_manifest.id
+            )
+        )
+        if previous_manifest is not None
+        else None
+    )
+    profile = publish_day_profile(
+        session,
+        store=store,
+        profile_date=occurrence_date,
+        profile_type=profile_type,
+        payload=payload,
+        statement_evidence=evidence,
+        methodology_id=methodology.id,
+        supersedes_manifest_id=(
+            previous_manifest.id if previous_manifest is not None else None
+        ),
+        supersedes_day_profile_id=(
+            previous_profile.id if previous_profile is not None else None
+        ),
+        editorial_revision=(
+            previous_manifest.editorial_revision + 1
+            if previous_manifest is not None
+            else 1
+        ),
+        manifest_metadata={"wikidata_entity_id": qid},
+        force_new_version=force_new_version,
+    )
+    return WikidataPublishOutcome(
+        status="published",
+        occurrence_date=occurrence_date,
+        manifest_id=profile.publication_manifest_id,
+        day_profile_id=profile.id,
+    )

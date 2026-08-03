@@ -1154,3 +1154,56 @@ neutrality only through `temporal_assignment`; its stored value also records
 fires for the real payload. Carrying it into the published statement would
 add a second, independent guard. Deferred (it changes the payload hash, so it
 belongs with a republish); tracked in #62.
+
+## D041: A recorded event publishes through one source-agnostic spine, and a pass consumes human decisions rather than making them
+
+**Status:** Accepted (2026-08-03, epic #71 / Golden 100 G2b)
+
+**Context:** Until now the only recorded-event publisher was
+`publish_golden_profile` (`services/api/app/usgs.py`) -- hardcoded to
+`GOLDEN_DATE`, a `ProfileType` literal, and nine USGS predicates. The Golden
+100 arc adds a second source (Wikidata), and later an operator run over the
+real 99 dates, so a recorded event must be publishable from any reviewed
+source on its own date without forking that publisher. The shared question:
+what is a pass allowed to do on the path to a published recorded event?
+
+**Decision:** A recorded event publishes through the shared, source-agnostic
+spine (`publish_day_profile`), with the profile **date and type derived from
+the event's own occurrence** (`profile_type_for_date`), never a literal. The
+publishing pass **consumes** the human stages before it -- claim acceptance
+(D019) and editorial ranking -- and fabricates neither (D038): it publishes
+only what a human accepted and a human ranked, and on a date that already
+holds a recorded event it **defers** to a durable merge-review task rather
+than publish a competing one or decide the merge itself.
+
+**Mechanism:** `publish_wikidata_event` (`services/api/app/wikidata.py`)
+requires the core candidate claims `ACCEPTED` (D019), derives the occurrence
+date from P585 and the profile type from it, and before minting anything
+calls `published_recorded_event_on` (G1's collision primitive): a collision
+with a recorded event that is not this entity's own opens or reuses a
+`MERGE-REVIEW:` `ReviewTask` on the identity claim and returns
+`deferred_to_merge_review`, creating no competing `Event`, manifest, or
+profile. Otherwise it builds recorded statements whose text derives only from
+the resolved values (honest data, §12), and calls
+`assert_release_publication_eligible` -- which requires a human editorial
+selection for every published root, so an unranked candidate is refused, the
+pass never recording the selection itself. Re-publishing the same entity's
+event is idempotent by content hash.
+
+**Alternatives considered:** Generalizing `publish_golden_profile` in place
+-- it would fork the golden publisher's USGS-specific statement derivation and
+risk the one real enriched date; a sibling caller of the shared spine reuses
+the two-phase publish, idempotency, and coverage indexing without touching
+golden. Having the pass record the editorial selection from the human's claim
+acceptance -- convenient, but it manufactures a human decision that was never
+made, the exact overstep D038 forbids; requiring a separate human ranking
+keeps `review_status` honest.
+
+**Consequences:** Recorded-event publication is now source-neutral: the
+operator run (G4) and any future source publish through the same gated spine.
+Proven offline against the committed `Q749610` fixture by
+`test_publish_marks_the_date_enriched_from_the_resolved_candidate` and
+`test_publish_defers_on_recorded_event_collision`
+(`services/api/tests/test_wikidata_publish.py`). The real 99-date enrichment
+-- live Wikidata ingest, review, publish, canary -- remains an operator arc
+(G4, epic #71), like the UCDP/MD4 passes.

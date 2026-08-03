@@ -7,9 +7,11 @@ from typing import Any
 from app.adapters.base import LocalFilesystemRawSourceStore
 from app.config import get_settings
 from app.database import SessionLocal
+from app.services import LocalFilesystemPublishedProfileStore
 from app.wikidata import (
     attempt_wikidata_enrichment,
     ingest_wikidata_candidate,
+    publish_wikidata_event,
     resolve_wikidata_event,
 )
 
@@ -44,6 +46,20 @@ def _resolve(args: argparse.Namespace, settings: Any, session: Any) -> str:
     )
 
 
+def _publish(args: argparse.Namespace, settings: Any, session: Any) -> str:
+    outcome = publish_wikidata_event(
+        session,
+        store=LocalFilesystemPublishedProfileStore(settings.published_profile_root),
+        force_new_version=args.force_new_version,
+    )
+    return (
+        f"status={outcome.status} occurrence_date={outcome.occurrence_date} "
+        f"manifest_id={outcome.manifest_id} "
+        f"colliding_manifest_id={outcome.colliding_manifest_id} "
+        f"merge_review_task_id={outcome.merge_review_task_id}"
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Offline candidate source pipelines.")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -67,6 +83,16 @@ def main() -> None:
         help="Resolve the reviewed (accepted) Wikidata candidate into a canonical event.",
     )
     resolve.set_defaults(handler=_resolve, commit_on_error=False)
+
+    publish = subparsers.add_parser(
+        "publish",
+        help=(
+            "Publish the resolved, editorially-ranked Wikidata candidate as its "
+            "date's recorded event, or defer on a recorded-event collision."
+        ),
+    )
+    publish.add_argument("--force-new-version", action="store_true")
+    publish.set_defaults(handler=_publish, commit_on_error=False)
 
     args = parser.parse_args()
     settings = get_settings()
