@@ -83,7 +83,7 @@ def test_candidate_cli_commits_failed_ingestion_audit_before_exiting(
     monkeypatch.setattr(
         sys,
         "argv",
-        ["candidate-cli", "--fixture", str(invalid)],
+        ["candidate-cli", "ingest", "--fixture", str(invalid)],
     )
 
     with pytest.raises(ValueError):

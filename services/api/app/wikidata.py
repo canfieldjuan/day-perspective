@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,7 @@ from app.adapters.base import (
     LocalFilesystemRawSourceStore,
     RawSourceStore,
 )
+from app.coverage import published_recorded_event_on
 from app.governance import LicenseInput, register_release_license
 from app.models import (
     Claim,
@@ -38,10 +40,18 @@ from app.services import (
     create_source_release,
 )
 
-__all__ = ["LocalFilesystemRawSourceStore"]
+__all__ = [
+    "LocalFilesystemRawSourceStore",
+    "WikidataEnrichmentOutcome",
+    "attempt_wikidata_enrichment",
+]
 
 WIKIDATA_SOURCE_SLUG = "wikidata-candidates"
 ENTITY_ID = "Q749610"
+#: Sentinel that opens every merge-review task's rationale, so the enrichment
+#: pass can find its own deferrals (and stay idempotent) without a dedicated
+#: ReviewTask.kind column -- that column is a deferred follow-up.
+MERGE_REVIEW_SENTINEL = "MERGE-REVIEW:"
 REVISION_ID = 2497659168
 ENTITY_URL = (
     "https://www.wikidata.org/wiki/Special:EntityData/"
@@ -406,3 +416,108 @@ def ingest_wikidata_candidate(
         )
         session.flush()
         raise
+
+
+@dataclass(frozen=True)
+class WikidataEnrichmentOutcome:
+    """The result of one enrichment attempt.
+
+    ``no_collision`` means the candidate's date is clear to enrich (a later
+    slice publishes it). ``deferred_to_merge_review`` means the date already
+    holds a published recorded event, so the attempt recorded a merge-review
+    task and published nothing.
+    """
+
+    status: str
+    occurrence_date: date
+    merge_review_task_id: UUID | None = None
+    colliding_manifest_id: UUID | None = None
+
+
+def attempt_wikidata_enrichment(
+    session: Session, *, entity_id: str = ENTITY_ID
+) -> WikidataEnrichmentOutcome:
+    """Attempt to enrich from the ingested Wikidata candidate, deferring on collision.
+
+    This slice does exactly one thing: if the candidate's occurrence date already
+    publishes a recorded event, defer to a human merge review rather than
+    publishing a competing one. Per D038 an automated pass asks the human, it
+    never overrules one -- so this records a review task and makes no editorial
+    decision on the claim. It creates no Event, resolution, editorial selection,
+    derived value, manifest, or profile; publishing a Wikidata recorded event is
+    a later slice, which calls ``published_recorded_event_on`` first exactly as
+    this does. The caller commits (matching the ingest CLI).
+    """
+    source = session.scalar(
+        select(Source).where(Source.slug == WIKIDATA_SOURCE_SLUG)
+    )
+    release = (
+        session.scalars(
+            select(SourceRelease)
+            .where(SourceRelease.source_id == source.id)
+            .order_by(SourceRelease.ingested_at.desc())
+        ).first()
+        if source is not None
+        else None
+    )
+    if release is None:
+        raise ValueError("Wikidata candidate has not been ingested.")
+
+    claims = {
+        claim.claim_type: claim
+        for claim in session.scalars(
+            select(Claim).where(Claim.source_release_id == release.id)
+        )
+    }
+    occurrence = claims.get("candidate_occurrence_date")
+    identity = claims.get("candidate_event_identity")
+    if occurrence is None or identity is None:
+        raise ValueError("Wikidata candidate is missing required predicates.")
+    if occurrence.date_role is not DateRole.OCCURRED or occurrence.temporal_start is None:
+        raise ValueError("Wikidata candidate has no resolved occurrence date.")
+    occurrence_date = occurrence.temporal_start
+
+    manifest = published_recorded_event_on(session, occurrence_date)
+    if manifest is None:
+        return WikidataEnrichmentOutcome(
+            status="no_collision", occurrence_date=occurrence_date
+        )
+
+    identity_value = (identity.assertion_json or {}).get("value") or {}
+    qid = identity_value.get("entity_id", entity_id)
+
+    existing = session.scalars(
+        select(ReviewTask).where(
+            ReviewTask.claim_id == identity.id,
+            ReviewTask.status == "open",
+            ReviewTask.rationale.like(f"{MERGE_REVIEW_SENTINEL}%"),
+        )
+    ).first()
+    if existing is not None:
+        return WikidataEnrichmentOutcome(
+            status="deferred_to_merge_review",
+            occurrence_date=occurrence_date,
+            merge_review_task_id=existing.id,
+            colliding_manifest_id=manifest.id,
+        )
+
+    task = ReviewTask(
+        claim_id=identity.id,
+        status="open",
+        priority="high",
+        rationale=(
+            f"{MERGE_REVIEW_SENTINEL} Wikidata candidate {qid} occurs on "
+            f"{occurrence_date.isoformat()}, which already publishes a recorded "
+            f"event (manifest {manifest.id}). Defer to a human: decide merge, "
+            "supersede, or distinct-event before any Wikidata recorded event "
+            "publishes on this date."
+        ),
+    )
+    session.add(task)
+    session.flush()
+    return WikidataEnrichmentOutcome(
+        status="deferred_to_merge_review",
+        occurrence_date=occurrence_date,
+        merge_review_task_id=task.id,
+        colliding_manifest_id=manifest.id,
+    )
