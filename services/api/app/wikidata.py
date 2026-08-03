@@ -9,7 +9,7 @@ from typing import Any
 from uuid import UUID
 
 from geoalchemy2.elements import WKTElement
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.adapters.base import (
@@ -672,6 +672,25 @@ def resolve_wikidata_event(session: Session) -> Event:
     if not isinstance(qid, str):
         raise ValueError("Wikidata identity candidate has no entity id.")
 
+    # Validate the occurrence date before any write: a bad P585 must not leave a
+    # half-resolved identity behind. The CLI commits its audit trail on failure,
+    # which would otherwise persist an identity with no event and wedge retries
+    # (the next call finds the identity, no event, and re-resolves without a
+    # supersession id).
+    occurrence_date = _parse_occurrence_date(
+        _candidate_value(claims["candidate_occurrence_date"])
+    )
+
+    # Serialize per entity so two concurrent resolves cannot double-create the
+    # event or its location (the governance writers' advisory-lock pattern).
+    session.execute(
+        select(
+            func.pg_advisory_xact_lock(
+                func.hashtextextended(f"wikidata-resolve:{qid}", 0)
+            )
+        )
+    )
+
     methodology = _wikidata_methodology(session)
 
     # Idempotent on the required core: an already-resolved entity reuses its
@@ -699,9 +718,6 @@ def resolve_wikidata_event(session: Session) -> Event:
             )
             for claim_type in REQUIRED_EVENT_CLAIMS
         }
-        occurrence_date = _parse_occurrence_date(
-            _candidate_value(claims["candidate_occurrence_date"])
-        )
         event = Event(
             resolved_claim_id=resolved["candidate_event_identity"].id,
             event_type=str(

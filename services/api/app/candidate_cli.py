@@ -53,19 +53,20 @@ def main() -> None:
     )
     ingest.add_argument("--fixture", type=Path, required=True)
     ingest.add_argument("--dry-run", action="store_true")
-    ingest.set_defaults(handler=_ingest)
+    # Ingestion writes a failed-run audit trail that must survive an error.
+    ingest.set_defaults(handler=_ingest, commit_on_error=True)
 
     enrich = subparsers.add_parser(
         "enrich",
         help="Attempt enrichment; defer to merge review on a recorded-event collision.",
     )
-    enrich.set_defaults(handler=_enrich)
+    enrich.set_defaults(handler=_enrich, commit_on_error=False)
 
     resolve = subparsers.add_parser(
         "resolve",
         help="Resolve the reviewed (accepted) Wikidata candidate into a canonical event.",
     )
-    resolve.set_defaults(handler=_resolve)
+    resolve.set_defaults(handler=_resolve, commit_on_error=False)
 
     args = parser.parse_args()
     settings = get_settings()
@@ -73,9 +74,14 @@ def main() -> None:
         try:
             message = args.handler(args, settings, session)
         except Exception:
-            # Persist the audit trail (e.g. the failed-ingestion pipeline run and
-            # quality check) before surfacing the error.
-            session.commit()
+            # Ingestion persists a failed-run audit trail (pipeline run + quality
+            # check) that must survive the error; other commands have nothing to
+            # preserve, so a partial write is rolled back rather than committed
+            # (a half-resolved identity with no event would wedge later retries).
+            if getattr(args, "commit_on_error", False):
+                session.commit()
+            else:
+                session.rollback()
             raise
         session.commit()
         print(message)

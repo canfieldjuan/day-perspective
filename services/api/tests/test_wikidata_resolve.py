@@ -205,3 +205,25 @@ def test_resolve_attaches_coordinates_accepted_after_first_resolve(
         select(EventLocation).where(EventLocation.event_id == event.id)
     ).one()
     assert location.geography_version_id is None
+
+
+@pytest.mark.integration
+def test_resolve_writes_nothing_when_the_occurrence_date_is_invalid(
+    session: Session, tmp_path: Path
+) -> None:
+    # A bad occurrence date must be rejected before any write, so a failure
+    # (which the CLI commits its audit trail through) cannot persist a
+    # half-resolved identity with no event and wedge later retries.
+    _ingest(session, tmp_path)
+    _accept_core(session)
+    occurrence = _claim(session, "candidate_occurrence_date")
+    corrupted = dict(occurrence.assertion_json or {})
+    corrupted["value"] = {**corrupted.get("value", {}), "precision": 9}  # year, not day
+    occurrence.assertion_json = corrupted
+    session.flush()
+
+    with pytest.raises(ValueError):
+        resolve_wikidata_event(session)
+
+    assert session.scalar(select(func.count()).select_from(Event)) == 0
+    assert session.scalar(select(func.count()).select_from(ResolvedClaim)) == 0
