@@ -109,6 +109,9 @@ enrich-wikidata:
 resolve-wikidata:
 	cd services/api && DATABASE_URL='$(DATABASE_URL)' $(API_PYTHON) -m app.candidate_cli resolve
 
+publish-wikidata:
+	cd services/api && DATABASE_URL='$(DATABASE_URL)' PUBLISHED_PROFILE_ROOT='$(PROJECT_ROOT)/.local/published-profiles' $(API_PYTHON) -m app.candidate_cli publish $(ARGS)
+
 publish-context-year:
 	cd services/api && DATABASE_URL='$(DATABASE_URL)' PUBLISHED_PROFILE_ROOT='$(PROJECT_ROOT)/.local/published-profiles' $(API_PYTHON) -m app.publish_cli publish-context --year $(YEAR)
 
