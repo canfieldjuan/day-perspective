@@ -28,7 +28,6 @@ def _enrich(args: argparse.Namespace, settings: Any, session: Any) -> str:
     outcome = attempt_wikidata_enrichment(session)
     return (
         f"status={outcome.status} occurrence_date={outcome.occurrence_date} "
-        f"merge_review_task_id={outcome.merge_review_task_id} "
         f"colliding_manifest_id={outcome.colliding_manifest_id}"
     )
 

@@ -48,10 +48,6 @@ __all__ = [
 
 WIKIDATA_SOURCE_SLUG = "wikidata-candidates"
 ENTITY_ID = "Q749610"
-#: Sentinel that opens every merge-review task's rationale, so the enrichment
-#: pass can find its own deferrals (and stay idempotent) without a dedicated
-#: ReviewTask.kind column -- that column is a deferred follow-up.
-MERGE_REVIEW_SENTINEL = "MERGE-REVIEW:"
 REVISION_ID = 2497659168
 ENTITY_URL = (
     "https://www.wikidata.org/wiki/Special:EntityData/"
@@ -420,34 +416,31 @@ def ingest_wikidata_candidate(
 
 @dataclass(frozen=True)
 class WikidataEnrichmentOutcome:
-    """The result of one enrichment attempt.
+    """The result of one enrichment collision check.
 
-    ``no_collision`` means the candidate's date is clear to enrich (a later
-    slice publishes it). ``deferred_to_merge_review`` means the date already
-    holds a published recorded event, so the attempt recorded a merge-review
-    task and published nothing. ``merge_review_resolved`` means a human has
-    already decided the identity claim, so no new task is created.
+    ``no_collision`` means the candidate's date holds no published recorded event
+    and is clear to enrich (a later slice publishes it). ``deferred_to_merge_review``
+    means the date already publishes a recorded event, so enrichment defers -- a
+    later slice must not publish a competing one until a human decides
+    merge/supersede/distinct-event.
     """
 
     status: str
     occurrence_date: date
-    merge_review_task_id: UUID | None = None
     colliding_manifest_id: UUID | None = None
 
 
-def attempt_wikidata_enrichment(
-    session: Session, *, entity_id: str = ENTITY_ID
-) -> WikidataEnrichmentOutcome:
-    """Attempt to enrich from the ingested Wikidata candidate, deferring on collision.
+def attempt_wikidata_enrichment(session: Session) -> WikidataEnrichmentOutcome:
+    """Report whether the ingested Wikidata candidate collides with a recorded event.
 
-    This slice does exactly one thing: if the candidate's occurrence date already
-    publishes a recorded event, defer to a human merge review rather than
-    publishing a competing one. Per D038 an automated pass asks the human, it
-    never overrules one -- so this records a review task and makes no editorial
-    decision on the claim. It creates no Event, resolution, editorial selection,
-    derived value, manifest, or profile; publishing a Wikidata recorded event is
-    a later slice, which calls ``published_recorded_event_on`` first exactly as
-    this does. The caller commits (matching the ingest CLI).
+    A pure detector: it reads the candidate's occurrence date and reports whether
+    that date already publishes a recorded event, so a later slice never publishes
+    a competing one. It writes nothing -- no Event, resolution, review task,
+    editorial decision, manifest, or profile (D038: a pass never overrules a
+    human, and here it does not even record on their behalf). The durable,
+    resolvable merge-review record is a G2 concern, designed alongside the
+    merge/supersede/distinct-event lifecycle; the G2 publish path calls
+    ``published_recorded_event_on`` -- exactly as this does -- before publishing.
     """
     source = session.scalar(
         select(Source).where(Source.slug == WIKIDATA_SOURCE_SLUG)
@@ -464,16 +457,14 @@ def attempt_wikidata_enrichment(
     if release is None:
         raise ValueError("Wikidata candidate has not been ingested.")
 
-    claims = {
-        claim.claim_type: claim
-        for claim in session.scalars(
-            select(Claim).where(Claim.source_release_id == release.id)
+    occurrence = session.scalar(
+        select(Claim).where(
+            Claim.source_release_id == release.id,
+            Claim.claim_type == "candidate_occurrence_date",
         )
-    }
-    occurrence = claims.get("candidate_occurrence_date")
-    identity = claims.get("candidate_event_identity")
-    if occurrence is None or identity is None:
-        raise ValueError("Wikidata candidate is missing required predicates.")
+    )
+    if occurrence is None:
+        raise ValueError("Wikidata candidate is missing its occurrence date.")
     if occurrence.date_role is not DateRole.OCCURRED or occurrence.temporal_start is None:
         raise ValueError("Wikidata candidate has no resolved occurrence date.")
     occurrence_date = occurrence.temporal_start
@@ -483,57 +474,8 @@ def attempt_wikidata_enrichment(
         return WikidataEnrichmentOutcome(
             status="no_collision", occurrence_date=occurrence_date
         )
-
-    # A human may already have adjudicated the identity claim. `record_claim_review`
-    # makes an accepted/rejected claim terminal and closes its merge-review task,
-    # and a terminal claim can receive no further decision. So keying idempotency
-    # on open tasks alone would resurrect an unresolvable task on every rerun after
-    # review -- recognise the completed decision on the claim itself instead.
-    if identity.assertion_status not in {
-        ClaimAssertionStatus.CANDIDATE,
-        ClaimAssertionStatus.IN_REVIEW,
-    }:
-        return WikidataEnrichmentOutcome(
-            status="merge_review_resolved",
-            occurrence_date=occurrence_date,
-            colliding_manifest_id=manifest.id,
-        )
-
-    identity_value = (identity.assertion_json or {}).get("value") or {}
-    qid = identity_value.get("entity_id", entity_id)
-
-    existing = session.scalars(
-        select(ReviewTask).where(
-            ReviewTask.claim_id == identity.id,
-            ReviewTask.status == "open",
-            ReviewTask.rationale.like(f"{MERGE_REVIEW_SENTINEL}%"),
-        )
-    ).first()
-    if existing is not None:
-        return WikidataEnrichmentOutcome(
-            status="deferred_to_merge_review",
-            occurrence_date=occurrence_date,
-            merge_review_task_id=existing.id,
-            colliding_manifest_id=manifest.id,
-        )
-
-    task = ReviewTask(
-        claim_id=identity.id,
-        status="open",
-        priority="high",
-        rationale=(
-            f"{MERGE_REVIEW_SENTINEL} Wikidata candidate {qid} occurs on "
-            f"{occurrence_date.isoformat()}, which already publishes a recorded "
-            f"event (manifest {manifest.id}). Defer to a human: decide merge, "
-            "supersede, or distinct-event before any Wikidata recorded event "
-            "publishes on this date."
-        ),
-    )
-    session.add(task)
-    session.flush()
     return WikidataEnrichmentOutcome(
         status="deferred_to_merge_review",
         occurrence_date=occurrence_date,
-        merge_review_task_id=task.id,
         colliding_manifest_id=manifest.id,
     )
