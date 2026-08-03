@@ -425,7 +425,8 @@ class WikidataEnrichmentOutcome:
     ``no_collision`` means the candidate's date is clear to enrich (a later
     slice publishes it). ``deferred_to_merge_review`` means the date already
     holds a published recorded event, so the attempt recorded a merge-review
-    task and published nothing.
+    task and published nothing. ``merge_review_resolved`` means a human has
+    already decided the identity claim, so no new task is created.
     """
 
     status: str
@@ -481,6 +482,21 @@ def attempt_wikidata_enrichment(
     if manifest is None:
         return WikidataEnrichmentOutcome(
             status="no_collision", occurrence_date=occurrence_date
+        )
+
+    # A human may already have adjudicated the identity claim. `record_claim_review`
+    # makes an accepted/rejected claim terminal and closes its merge-review task,
+    # and a terminal claim can receive no further decision. So keying idempotency
+    # on open tasks alone would resurrect an unresolvable task on every rerun after
+    # review -- recognise the completed decision on the claim itself instead.
+    if identity.assertion_status not in {
+        ClaimAssertionStatus.CANDIDATE,
+        ClaimAssertionStatus.IN_REVIEW,
+    }:
+        return WikidataEnrichmentOutcome(
+            status="merge_review_resolved",
+            occurrence_date=occurrence_date,
+            colliding_manifest_id=manifest.id,
         )
 
     identity_value = (identity.assertion_json or {}).get("value") or {}

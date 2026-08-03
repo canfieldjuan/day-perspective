@@ -164,3 +164,45 @@ def test_wikidata_enrichment_no_collision_when_date_unpublished(
     assert outcome.merge_review_task_id is None
     assert outcome.colliding_manifest_id is None
     assert _merge_review_tasks(session) == []
+
+
+@pytest.mark.integration
+def test_wikidata_enrichment_does_not_resurrect_a_reviewed_task(
+    session: Session, tmp_path: Path
+) -> None:
+    # A human decision on the identity claim closes the merge-review task and
+    # makes the claim terminal (no further decision possible). Re-running
+    # enrichment must recognise that completed review, not create a fresh open
+    # task the claim-decision endpoint can never close.
+    from app.governance import ReviewDecisionValue, record_claim_review
+    from app.models import Claim
+
+    publish(session, tmp_path)
+    _ingest_candidate(session, tmp_path)
+    rebuild_coverage_index(session)
+    session.flush()
+
+    first = attempt_wikidata_enrichment(session)
+    assert first.status == "deferred_to_merge_review"
+
+    identity = session.scalars(
+        select(Claim).where(Claim.claim_type == "candidate_event_identity")
+    ).one()
+    record_claim_review(
+        session,
+        claim=identity,
+        decision=ReviewDecisionValue.ACCEPTED,
+        rationale="Same event as the published USGS golden; merge handled in a later slice.",
+        reviewed_by="test-human",
+    )
+    session.flush()
+
+    second = attempt_wikidata_enrichment(session)
+
+    assert second.status == "merge_review_resolved"
+    assert second.colliding_manifest_id == first.colliding_manifest_id
+    assert second.merge_review_task_id is None
+    # The reviewed task remains (now closed); no new open task was resurrected.
+    all_merge_tasks = _merge_review_tasks(session)
+    assert len(all_merge_tasks) == 1
+    assert [task for task in all_merge_tasks if task.status == "open"] == []
