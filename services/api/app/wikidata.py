@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
+from geoalchemy2.elements import WKTElement
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -23,10 +24,16 @@ from app.models import (
     ClaimAssertionStatus,
     DataStatus,
     DateRole,
+    Event,
+    EventLocation,
+    EventTime,
     LegalReviewStatus,
+    Methodology,
     PipelineRun,
     QualityCheck,
     RawSourceRecord,
+    ResolutionMethod,
+    ResolvedClaim,
     ReviewTask,
     Source,
     SourceRelease,
@@ -38,12 +45,14 @@ from app.services import (
     content_hash,
     create_claim,
     create_source_release,
+    resolve_claim,
 )
 
 __all__ = [
     "LocalFilesystemRawSourceStore",
     "WikidataEnrichmentOutcome",
     "attempt_wikidata_enrichment",
+    "resolve_wikidata_event",
 ]
 
 WIKIDATA_SOURCE_SLUG = "wikidata-candidates"
@@ -479,3 +488,201 @@ def attempt_wikidata_enrichment(session: Session) -> WikidataEnrichmentOutcome:
         occurrence_date=occurrence_date,
         colliding_manifest_id=manifest.id,
     )
+
+
+#: The candidate predicates a resolved Wikidata event requires: who/what it is,
+#: what kind, its name, and when. Coordinates are resolved too when present, but
+#: an event without a location is still a resolvable event.
+REQUIRED_EVENT_CLAIMS = (
+    "candidate_event_identity",
+    "candidate_event_type",
+    "candidate_name",
+    "candidate_occurrence_date",
+)
+
+
+def _wikidata_methodology(session: Session) -> Methodology:
+    existing = session.scalar(
+        select(Methodology).where(
+            Methodology.slug == "wikidata-single-candidate",
+            Methodology.version == "1",
+        )
+    )
+    if existing is not None:
+        return existing
+    definition = {
+        "authority": "Wikidata contributors (Wikimedia Foundation)",
+        "resolution": (
+            "Accept one reviewed Wikidata candidate per predicate; single-source "
+            "acceptance, not independent corroboration."
+        ),
+    }
+    row = Methodology(
+        slug="wikidata-single-candidate",
+        version="1",
+        name="Wikidata single-candidate resolution",
+        description=definition["resolution"],
+        method_kind="single_source_resolution",
+        formula=None,
+        code_version="0.1.0",
+        definition_hash=hashlib.sha256(canonical_json_bytes(definition)).hexdigest(),
+        legal_review_status=LegalReviewStatus.NOT_REQUIRED,
+    )
+    session.add(row)
+    session.flush()
+    return row
+
+
+def _candidate_value(claim: Claim) -> dict[str, Any]:
+    value = (claim.assertion_json or {}).get("value")
+    return value if isinstance(value, dict) else {}
+
+
+def _parse_occurrence_date(value: dict[str, Any]) -> date:
+    """The P585 day, or an error when the value is not day-precise.
+
+    Wikidata precision 11 is a day; anything coarser cannot place the event on a
+    specific date, and this arc is date-specific enrichment. The date is parsed
+    from the P585 value itself, not from a stamped column, so it is honest for
+    any entity.
+    """
+    time_text = value.get("time")
+    if not isinstance(time_text, str) or value.get("precision") != 11:
+        raise ValueError(
+            "Wikidata occurrence date is not day-precise (expected P585 precision 11)."
+        )
+    return date.fromisoformat(time_text.lstrip("+")[:10])
+
+
+def resolve_wikidata_event(session: Session) -> Event:
+    """Turn the reviewed Wikidata candidate into a canonical Event.
+
+    Requires the core candidate claims to be ACCEPTED first -- D019: Wikidata is
+    candidate discovery, not confirmation, so the resolver never accepts on a
+    human's behalf. It resolves identity/type/name/occurrence (and coordinates,
+    when present) into versioned resolved claims and builds the Event, its primary
+    EventTime (day-precision, occurred, and REPORTED -- a secondary source, not a
+    direct record), and, when coordinates are present, a bare-point EventLocation
+    with no invented named region. Idempotent: a second call returns the
+    already-resolved Event. It does not publish; publishing a Wikidata recorded
+    event is a later slice, gated by ``published_recorded_event_on``.
+    """
+    source = session.scalar(
+        select(Source).where(Source.slug == WIKIDATA_SOURCE_SLUG)
+    )
+    release = (
+        session.scalars(
+            select(SourceRelease)
+            .where(SourceRelease.source_id == source.id)
+            .order_by(SourceRelease.ingested_at.desc())
+        ).first()
+        if source is not None
+        else None
+    )
+    if release is None:
+        raise ValueError("Wikidata candidate has not been ingested.")
+
+    claims = {
+        claim.claim_type: claim
+        for claim in session.scalars(
+            select(Claim).where(Claim.source_release_id == release.id)
+        )
+    }
+    for claim_type in REQUIRED_EVENT_CLAIMS:
+        claim = claims.get(claim_type)
+        if claim is None:
+            raise ValueError(f"Wikidata candidate is missing {claim_type}.")
+        if claim.assertion_status is not ClaimAssertionStatus.ACCEPTED:
+            raise ValueError(
+                "Wikidata candidates must be human-reviewed and accepted before "
+                f"resolution ({claim_type} is {claim.assertion_status.value})."
+            )
+
+    qid = _candidate_value(claims["candidate_event_identity"]).get("entity_id")
+    if not isinstance(qid, str):
+        raise ValueError("Wikidata identity candidate has no entity id.")
+
+    # Idempotent: an already-resolved entity returns its existing event rather
+    # than minting a second version of every resolved claim.
+    existing_identity = session.scalar(
+        select(ResolvedClaim)
+        .where(
+            ResolvedClaim.canonical_key
+            == f"wikidata:{qid}:candidate_event_identity"
+        )
+        .order_by(ResolvedClaim.version.desc())
+    )
+    if existing_identity is not None:
+        event = session.scalar(
+            select(Event).where(Event.resolved_claim_id == existing_identity.id)
+        )
+        if event is not None:
+            return event
+
+    methodology = _wikidata_methodology(session)
+
+    def _resolve(claim: Claim) -> ResolvedClaim:
+        return resolve_claim(
+            session,
+            canonical_key=f"wikidata:{qid}:{claim.claim_type}",
+            resolved_value=claim.assertion_json or {"text": claim.assertion_text},
+            rationale=(
+                "Accepted one reviewed Wikidata candidate; single-source "
+                "discovery, not independent corroboration."
+            ),
+            supporting_claim_ids=[claim.id],
+            resolution_method=ResolutionMethod.SINGLE_SOURCE,
+            methodology_id=methodology.id,
+        )
+
+    resolved = {ct: _resolve(claims[ct]) for ct in REQUIRED_EVENT_CLAIMS}
+    occurrence_date = _parse_occurrence_date(
+        _candidate_value(claims["candidate_occurrence_date"])
+    )
+
+    event = Event(
+        resolved_claim_id=resolved["candidate_event_identity"].id,
+        event_type=str(_candidate_value(claims["candidate_event_type"]).get("id", "")),
+        canonical_title=str(_candidate_value(claims["candidate_name"]).get("label", "")),
+        summary=None,
+        data_status=DataStatus.REPORTED,
+    )
+    session.add(event)
+    session.flush()
+
+    session.add(
+        EventTime(
+            event_id=event.id,
+            provenance_resolved_claim_id=resolved["candidate_occurrence_date"].id,
+            start_date=occurrence_date,
+            end_date=occurrence_date,
+            temporal_precision=TemporalPrecision.DAY,
+            temporal_assignment=TemporalAssignment.REPORTED,
+            date_role=DateRole.OCCURRED,
+            is_primary=True,
+        )
+    )
+
+    coordinates = claims.get("candidate_coordinates")
+    if (
+        coordinates is not None
+        and coordinates.assertion_status is ClaimAssertionStatus.ACCEPTED
+    ):
+        coordinate_value = _candidate_value(coordinates)
+        latitude = coordinate_value.get("latitude")
+        longitude = coordinate_value.get("longitude")
+        if isinstance(latitude, int | float) and isinstance(longitude, int | float):
+            coordinate_resolved = _resolve(coordinates)
+            session.add(
+                EventLocation(
+                    event_id=event.id,
+                    geography_version_id=None,
+                    provenance_resolved_claim_id=coordinate_resolved.id,
+                    point_geometry=WKTElement(
+                        f"POINT({longitude} {latitude})", srid=4326
+                    ),
+                    location_role="primary",
+                )
+            )
+    session.flush()
+    return event

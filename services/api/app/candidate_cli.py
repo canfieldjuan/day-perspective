@@ -7,7 +7,11 @@ from typing import Any
 from app.adapters.base import LocalFilesystemRawSourceStore
 from app.config import get_settings
 from app.database import SessionLocal
-from app.wikidata import attempt_wikidata_enrichment, ingest_wikidata_candidate
+from app.wikidata import (
+    attempt_wikidata_enrichment,
+    ingest_wikidata_candidate,
+    resolve_wikidata_event,
+)
 
 
 def _ingest(args: argparse.Namespace, settings: Any, session: Any) -> str:
@@ -32,6 +36,14 @@ def _enrich(args: argparse.Namespace, settings: Any, session: Any) -> str:
     )
 
 
+def _resolve(args: argparse.Namespace, settings: Any, session: Any) -> str:
+    event = resolve_wikidata_event(session)
+    return (
+        f"event_id={event.id} event_type={event.event_type} "
+        f"title={event.canonical_title!r}"
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Offline candidate source pipelines.")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -48,6 +60,12 @@ def main() -> None:
         help="Attempt enrichment; defer to merge review on a recorded-event collision.",
     )
     enrich.set_defaults(handler=_enrich)
+
+    resolve = subparsers.add_parser(
+        "resolve",
+        help="Resolve the reviewed (accepted) Wikidata candidate into a canonical event.",
+    )
+    resolve.set_defaults(handler=_resolve)
 
     args = parser.parse_args()
     settings = get_settings()
