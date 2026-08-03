@@ -408,6 +408,24 @@ def coverage_entry(session: Session, profile_date: date) -> CoverageEntry | None
     )
 
 
+def published_recorded_event_on(
+    session: Session, profile_date: date
+) -> PublicationManifest | None:
+    """The manifest for a date that already publishes a recorded event, or None.
+
+    The source-agnostic dedup primitive: a second recorded event must never be
+    published on a date that already holds one without a human deciding to merge
+    or supersede. Keyed on ``has_recorded_event`` from the maintained coverage
+    index -- the same picture a reader is served, and the index is publication's
+    final step -- not on the publication tier, so a merely ``partially_enriched``
+    context date is never mistaken for an event collision.
+    """
+    entry = coverage_entry(session, profile_date)
+    if entry is None or not entry.has_recorded_event:
+        return None
+    return session.get(PublicationManifest, entry.publication_manifest_id)
+
+
 def _neighbour(
     session: Session,
     *,

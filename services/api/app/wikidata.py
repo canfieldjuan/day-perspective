@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,7 @@ from app.adapters.base import (
     LocalFilesystemRawSourceStore,
     RawSourceStore,
 )
+from app.coverage import published_recorded_event_on
 from app.governance import LicenseInput, register_release_license
 from app.models import (
     Claim,
@@ -38,7 +40,11 @@ from app.services import (
     create_source_release,
 )
 
-__all__ = ["LocalFilesystemRawSourceStore"]
+__all__ = [
+    "LocalFilesystemRawSourceStore",
+    "WikidataEnrichmentOutcome",
+    "attempt_wikidata_enrichment",
+]
 
 WIKIDATA_SOURCE_SLUG = "wikidata-candidates"
 ENTITY_ID = "Q749610"
@@ -406,3 +412,70 @@ def ingest_wikidata_candidate(
         )
         session.flush()
         raise
+
+
+@dataclass(frozen=True)
+class WikidataEnrichmentOutcome:
+    """The result of one enrichment collision check.
+
+    ``no_collision`` means the candidate's date holds no published recorded event
+    and is clear to enrich (a later slice publishes it). ``deferred_to_merge_review``
+    means the date already publishes a recorded event, so enrichment defers -- a
+    later slice must not publish a competing one until a human decides
+    merge/supersede/distinct-event.
+    """
+
+    status: str
+    occurrence_date: date
+    colliding_manifest_id: UUID | None = None
+
+
+def attempt_wikidata_enrichment(session: Session) -> WikidataEnrichmentOutcome:
+    """Report whether the ingested Wikidata candidate collides with a recorded event.
+
+    A pure detector: it reads the candidate's occurrence date and reports whether
+    that date already publishes a recorded event, so a later slice never publishes
+    a competing one. It writes nothing -- no Event, resolution, review task,
+    editorial decision, manifest, or profile (D038: a pass never overrules a
+    human, and here it does not even record on their behalf). The durable,
+    resolvable merge-review record is a G2 concern, designed alongside the
+    merge/supersede/distinct-event lifecycle; the G2 publish path calls
+    ``published_recorded_event_on`` -- exactly as this does -- before publishing.
+    """
+    source = session.scalar(
+        select(Source).where(Source.slug == WIKIDATA_SOURCE_SLUG)
+    )
+    release = (
+        session.scalars(
+            select(SourceRelease)
+            .where(SourceRelease.source_id == source.id)
+            .order_by(SourceRelease.ingested_at.desc())
+        ).first()
+        if source is not None
+        else None
+    )
+    if release is None:
+        raise ValueError("Wikidata candidate has not been ingested.")
+
+    occurrence = session.scalar(
+        select(Claim).where(
+            Claim.source_release_id == release.id,
+            Claim.claim_type == "candidate_occurrence_date",
+        )
+    )
+    if occurrence is None:
+        raise ValueError("Wikidata candidate is missing its occurrence date.")
+    if occurrence.date_role is not DateRole.OCCURRED or occurrence.temporal_start is None:
+        raise ValueError("Wikidata candidate has no resolved occurrence date.")
+    occurrence_date = occurrence.temporal_start
+
+    manifest = published_recorded_event_on(session, occurrence_date)
+    if manifest is None:
+        return WikidataEnrichmentOutcome(
+            status="no_collision", occurrence_date=occurrence_date
+        )
+    return WikidataEnrichmentOutcome(
+        status="deferred_to_merge_review",
+        occurrence_date=occurrence_date,
+        colliding_manifest_id=manifest.id,
+    )
