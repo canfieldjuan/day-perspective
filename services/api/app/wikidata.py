@@ -554,6 +554,76 @@ def _parse_occurrence_date(value: dict[str, Any]) -> date:
     return date.fromisoformat(time_text.lstrip("+")[:10])
 
 
+def _resolve_candidate(
+    session: Session, *, qid: str, claim: Claim, methodology: Methodology
+) -> ResolvedClaim:
+    return resolve_claim(
+        session,
+        canonical_key=f"wikidata:{qid}:{claim.claim_type}",
+        resolved_value=claim.assertion_json or {"text": claim.assertion_text},
+        rationale=(
+            "Accepted one reviewed Wikidata candidate; single-source discovery, "
+            "not independent corroboration."
+        ),
+        supporting_claim_ids=[claim.id],
+        resolution_method=ResolutionMethod.SINGLE_SOURCE,
+        methodology_id=methodology.id,
+    )
+
+
+def _ensure_event_location(
+    session: Session,
+    *,
+    event: Event,
+    coordinates: Claim | None,
+    qid: str,
+    methodology: Methodology,
+) -> None:
+    """Attach the P625 point when coordinates are accepted, at most once.
+
+    Runs on every resolve so coordinates accepted *after* the event was first
+    resolved still attach -- claims are reviewed independently. Idempotent: a
+    location already present is left untouched, and an existing resolved
+    coordinate claim is reused rather than re-resolved.
+    """
+    already = session.scalar(
+        select(EventLocation).where(EventLocation.event_id == event.id)
+    )
+    if already is not None:
+        return
+    if (
+        coordinates is None
+        or coordinates.assertion_status is not ClaimAssertionStatus.ACCEPTED
+    ):
+        return
+    value = _candidate_value(coordinates)
+    latitude = value.get("latitude")
+    longitude = value.get("longitude")
+    if not (isinstance(latitude, int | float) and isinstance(longitude, int | float)):
+        return
+    resolved = session.scalar(
+        select(ResolvedClaim)
+        .where(
+            ResolvedClaim.canonical_key == f"wikidata:{qid}:candidate_coordinates"
+        )
+        .order_by(ResolvedClaim.version.desc())
+    )
+    if resolved is None:
+        resolved = _resolve_candidate(
+            session, qid=qid, claim=coordinates, methodology=methodology
+        )
+    session.add(
+        EventLocation(
+            event_id=event.id,
+            geography_version_id=None,
+            provenance_resolved_claim_id=resolved.id,
+            point_geometry=WKTElement(f"POINT({longitude} {latitude})", srid=4326),
+            location_role="primary",
+        )
+    )
+    session.flush()
+
+
 def resolve_wikidata_event(session: Session) -> Event:
     """Turn the reviewed Wikidata candidate into a canonical Event.
 
@@ -602,8 +672,10 @@ def resolve_wikidata_event(session: Session) -> Event:
     if not isinstance(qid, str):
         raise ValueError("Wikidata identity candidate has no entity id.")
 
-    # Idempotent: an already-resolved entity returns its existing event rather
-    # than minting a second version of every resolved claim.
+    methodology = _wikidata_methodology(session)
+
+    # Idempotent on the required core: an already-resolved entity reuses its
+    # event rather than minting a second version of every resolved claim.
     existing_identity = session.scalar(
         select(ResolvedClaim)
         .where(
@@ -612,77 +684,58 @@ def resolve_wikidata_event(session: Session) -> Event:
         )
         .order_by(ResolvedClaim.version.desc())
     )
-    if existing_identity is not None:
-        event = session.scalar(
+    event = (
+        session.scalar(
             select(Event).where(Event.resolved_claim_id == existing_identity.id)
         )
-        if event is not None:
-            return event
-
-    methodology = _wikidata_methodology(session)
-
-    def _resolve(claim: Claim) -> ResolvedClaim:
-        return resolve_claim(
-            session,
-            canonical_key=f"wikidata:{qid}:{claim.claim_type}",
-            resolved_value=claim.assertion_json or {"text": claim.assertion_text},
-            rationale=(
-                "Accepted one reviewed Wikidata candidate; single-source "
-                "discovery, not independent corroboration."
-            ),
-            supporting_claim_ids=[claim.id],
-            resolution_method=ResolutionMethod.SINGLE_SOURCE,
-            methodology_id=methodology.id,
-        )
-
-    resolved = {ct: _resolve(claims[ct]) for ct in REQUIRED_EVENT_CLAIMS}
-    occurrence_date = _parse_occurrence_date(
-        _candidate_value(claims["candidate_occurrence_date"])
+        if existing_identity is not None
+        else None
     )
 
-    event = Event(
-        resolved_claim_id=resolved["candidate_event_identity"].id,
-        event_type=str(_candidate_value(claims["candidate_event_type"]).get("id", "")),
-        canonical_title=str(_candidate_value(claims["candidate_name"]).get("label", "")),
-        summary=None,
-        data_status=DataStatus.REPORTED,
-    )
-    session.add(event)
-    session.flush()
-
-    session.add(
-        EventTime(
-            event_id=event.id,
-            provenance_resolved_claim_id=resolved["candidate_occurrence_date"].id,
-            start_date=occurrence_date,
-            end_date=occurrence_date,
-            temporal_precision=TemporalPrecision.DAY,
-            temporal_assignment=TemporalAssignment.REPORTED,
-            date_role=DateRole.OCCURRED,
-            is_primary=True,
-        )
-    )
-
-    coordinates = claims.get("candidate_coordinates")
-    if (
-        coordinates is not None
-        and coordinates.assertion_status is ClaimAssertionStatus.ACCEPTED
-    ):
-        coordinate_value = _candidate_value(coordinates)
-        latitude = coordinate_value.get("latitude")
-        longitude = coordinate_value.get("longitude")
-        if isinstance(latitude, int | float) and isinstance(longitude, int | float):
-            coordinate_resolved = _resolve(coordinates)
-            session.add(
-                EventLocation(
-                    event_id=event.id,
-                    geography_version_id=None,
-                    provenance_resolved_claim_id=coordinate_resolved.id,
-                    point_geometry=WKTElement(
-                        f"POINT({longitude} {latitude})", srid=4326
-                    ),
-                    location_role="primary",
-                )
+    if event is None:
+        resolved = {
+            claim_type: _resolve_candidate(
+                session, qid=qid, claim=claims[claim_type], methodology=methodology
             )
+            for claim_type in REQUIRED_EVENT_CLAIMS
+        }
+        occurrence_date = _parse_occurrence_date(
+            _candidate_value(claims["candidate_occurrence_date"])
+        )
+        event = Event(
+            resolved_claim_id=resolved["candidate_event_identity"].id,
+            event_type=str(
+                _candidate_value(claims["candidate_event_type"]).get("id", "")
+            ),
+            canonical_title=str(
+                _candidate_value(claims["candidate_name"]).get("label", "")
+            ),
+            summary=None,
+            data_status=DataStatus.REPORTED,
+        )
+        session.add(event)
+        session.flush()
+        session.add(
+            EventTime(
+                event_id=event.id,
+                provenance_resolved_claim_id=resolved["candidate_occurrence_date"].id,
+                start_date=occurrence_date,
+                end_date=occurrence_date,
+                temporal_precision=TemporalPrecision.DAY,
+                temporal_assignment=TemporalAssignment.REPORTED,
+                date_role=DateRole.OCCURRED,
+                is_primary=True,
+            )
+        )
+
+    # Convergent: reconcile the (optional) location every call, so coordinates
+    # accepted after the event was first resolved still attach.
+    _ensure_event_location(
+        session,
+        event=event,
+        coordinates=claims.get("candidate_coordinates"),
+        qid=qid,
+        methodology=methodology,
+    )
     session.flush()
     return event

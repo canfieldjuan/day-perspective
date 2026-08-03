@@ -156,3 +156,52 @@ def test_resolve_is_idempotent(session: Session, tmp_path: Path) -> None:
 
     assert first.id == second.id
     assert session.scalar(select(func.count()).select_from(Event)) == 1
+
+
+@pytest.mark.integration
+def test_resolve_attaches_coordinates_accepted_after_first_resolve(
+    session: Session, tmp_path: Path
+) -> None:
+    # Claims are reviewed independently: the core is accepted and resolved while
+    # coordinates are still pending, so the first event has no location.
+    _ingest(session, tmp_path)
+    for claim_type in (
+        "candidate_event_identity",
+        "candidate_event_type",
+        "candidate_name",
+        "candidate_occurrence_date",
+    ):
+        record_claim_review(
+            session,
+            claim=_claim(session, claim_type),
+            decision=ReviewDecisionValue.ACCEPTED,
+            rationale="Reviewed core Wikidata candidate for this test.",
+            reviewed_by="test-human",
+        )
+    event = resolve_wikidata_event(session)
+    assert (
+        session.scalar(
+            select(func.count())
+            .select_from(EventLocation)
+            .where(EventLocation.event_id == event.id)
+        )
+        == 0
+    )
+
+    # Coordinates reviewed later; re-resolving reconciles the location onto the
+    # same event rather than leaving the accepted coordinates permanently absent.
+    record_claim_review(
+        session,
+        claim=_claim(session, "candidate_coordinates"),
+        decision=ReviewDecisionValue.ACCEPTED,
+        rationale="Reviewed coordinates candidate for this test.",
+        reviewed_by="test-human",
+    )
+    same = resolve_wikidata_event(session)
+
+    assert same.id == event.id
+    assert session.scalar(select(func.count()).select_from(Event)) == 1
+    location = session.scalars(
+        select(EventLocation).where(EventLocation.event_id == event.id)
+    ).one()
+    assert location.geography_version_id is None
