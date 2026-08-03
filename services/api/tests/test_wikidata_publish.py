@@ -22,6 +22,7 @@ collision.
 
 from __future__ import annotations
 
+import json
 from datetime import date
 from pathlib import Path
 
@@ -39,17 +40,23 @@ from app.governance import (
 )
 from app.models import (
     Claim,
+    ClaimAssertionStatus,
     DayProfile,
     Event,
+    LegalReviewStatus,
     ProfileType,
     PublicationManifest,
     PublicationTier,
     ResolvedClaim,
     ReviewTask,
+    Source,
+    SourceRelease,
 )
 from app.services import (
     LocalFilesystemPublishedProfileStore,
     PublicationStatementEvidenceInput,
+    create_claim,
+    create_source_release,
     publish_day_profile,
 )
 from app.wikidata import (
@@ -183,6 +190,67 @@ def _publish_prior_context(
             )
         ],
     )
+
+
+def _reingest_with_changed_name(session: Session, label: str) -> SourceRelease:
+    """A newer release for the same entity with a changed name, and no re-resolve.
+
+    Mirrors a live re-ingest that the pinned offline fixture cannot produce: the
+    candidate is accepted on the new release, but the resolution still rests on the
+    original one -- the case where publication must not cite the new record.
+    """
+    source = session.scalar(
+        select(Source).where(Source.slug == "wikidata-candidates")
+    )
+    assert source is not None
+    release = create_source_release(
+        session,
+        source_id=source.id,
+        release_label="wikidata-Q749610-reingest",
+        source_url="https://www.wikidata.org/wiki/Q749610?oldid=999",
+        raw_storage_uri="memory://reingest",
+        raw_record_count=1,
+        raw_bytes=b"reingest-fixture",
+        legal_review_status=LegalReviewStatus.NOT_REQUIRED,
+    )
+    session.flush()
+    values = {
+        "candidate_event_identity": {
+            "entity_id": ENTITY_ID,
+            "pageid": 1,
+            "revision_id": 999,
+        },
+        "candidate_event_type": {"id": "Q7944"},
+        "candidate_name": {"label": label, "aliases": []},
+        "candidate_occurrence_date": {
+            "time": "+1964-03-27T00:00:00Z",
+            "precision": 11,
+        },
+    }
+    for claim_type, value in values.items():
+        claim = create_claim(
+            session,
+            source_release_id=release.id,
+            source_record_locator="https://www.wikidata.org/wiki/Q749610?oldid=999",
+            source_record_hash_sha256="0" * 64,
+            claim_type=claim_type,
+            assertion_text=json.dumps(value, sort_keys=True),
+            assertion_json={
+                "value": value,
+                "wikidata_reference_count": 0,
+                "candidate_only": True,
+            },
+            assertion_status=ClaimAssertionStatus.CANDIDATE,
+        )
+        record_claim_review(
+            session,
+            claim=claim,
+            decision=ReviewDecisionValue.ACCEPTED,
+            rationale="Re-ingested candidate reviewed for this test.",
+            reviewed_by="test-human",
+        )
+    session.flush()
+    return release
 
 
 @pytest.mark.integration
@@ -425,3 +493,39 @@ def test_publish_orders_statements_by_editorial_rank(
         for predicate in reversed_predicates
     ]
     assert [item["statement_id"] for item in recorded] == expected_ids
+
+
+@pytest.mark.integration
+def test_publish_binds_provenance_to_the_resolution_not_the_latest_release(
+    session: Session, tmp_path: Path
+) -> None:
+    # A re-ingest adds a newer release with a changed name, but the resolution is
+    # not re-run. Published statement text and provenance must reflect the
+    # resolution the event rests on, never the newer, unrelated record.
+    _prepare_for_publication(session, tmp_path)
+    original_label = (_claim(session, "candidate_name").assertion_json or {})[
+        "value"
+    ]["label"]
+    original_release = session.scalars(
+        select(SourceRelease).order_by(SourceRelease.ingested_at)
+    ).first()
+    assert original_release is not None
+    _reingest_with_changed_name(session, "REINGESTED-CHANGED-NAME")
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+
+    outcome = publish_wikidata_event(session, store=store)
+
+    manifest = session.get(PublicationManifest, outcome.manifest_id)
+    assert manifest is not None
+    payload = store.read(manifest.storage_uri, manifest.content_hash)
+    name_statement = next(
+        item
+        for item in payload["sections"]["recorded_on_this_date"]
+        if item["statement_id"] == "wikidata-name"
+    )
+    assert "REINGESTED-CHANGED-NAME" not in name_statement["statement"]
+    assert original_label in name_statement["statement"]
+    assert (
+        name_statement["provenance"]["source_release"]["release"]
+        == original_release.release_label
+    )

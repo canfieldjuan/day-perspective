@@ -44,6 +44,7 @@ from app.models import (
     RawSourceRecord,
     ResolutionMethod,
     ResolvedClaim,
+    ResolvedClaimEvidence,
     ReviewTask,
     Source,
     SourceRelease,
@@ -922,21 +923,60 @@ def _wikidata_statement_provenance(
     }
 
 
-def _recorded_statement_text(
-    predicate: str, *, value: dict[str, Any], occurrence_date: date
-) -> str:
+def _resolved_value(resolved: ResolvedClaim) -> dict[str, Any]:
+    """The candidate value captured in a resolved claim at resolution time.
+
+    Read from the resolution snapshot, not the live claim, so published content
+    reflects what was actually resolved even if the source record later changes.
+    """
+    value = (resolved.resolved_value or {}).get("value")
+    return value if isinstance(value, dict) else {}
+
+
+def _resolution_lineage(
+    session: Session, *, resolved: ResolvedClaim
+) -> tuple[Claim, SourceRelease]:
+    """The claim and release a resolution actually rests on (its evidence lineage).
+
+    Provenance must cite the source record that supports the resolved value, not
+    whatever release is newest -- otherwise a re-ingest could make a published
+    statement claim a new record supports an old resolution.
+    """
+    claim = session.scalar(
+        select(Claim)
+        .join(ResolvedClaimEvidence, ResolvedClaimEvidence.claim_id == Claim.id)
+        .where(
+            ResolvedClaimEvidence.resolved_claim_id == resolved.id,
+            ResolvedClaimEvidence.stance == "supporting",
+        )
+        .order_by(Claim.id)
+    )
+    if claim is None:
+        raise ValueError(
+            f"Resolved claim {resolved.canonical_key} has no supporting claim lineage."
+        )
+    release = session.get(SourceRelease, claim.source_release_id)
+    if release is None:
+        raise ValueError(
+            f"Resolved claim {resolved.canonical_key} has no source release lineage."
+        )
+    return claim, release
+
+
+def _recorded_statement_text(predicate: str, *, value: dict[str, Any]) -> str:
     """Honest, data-derived statement text for one recorded predicate.
 
-    Every value is read from the reviewed candidate; nothing is invented (§12).
+    Every value is read from the resolved candidate; nothing is invented (§12).
     """
     if predicate == "candidate_name":
         return f'Wikidata records this event as "{value.get("label", "")}".'
     if predicate == "candidate_event_type":
         return f"Wikidata classifies the entity as type {value.get('id', '')}."
     if predicate == "candidate_occurrence_date":
+        occurrence = _parse_occurrence_date(value)
         return (
             "Wikidata records the occurrence on "
-            f"{occurrence_date:%B} {occurrence_date.day}, {occurrence_date.year}."
+            f"{occurrence:%B} {occurrence.day}, {occurrence.year}."
         )
     if predicate == "candidate_coordinates":
         return (
@@ -1063,18 +1103,14 @@ def publish_wikidata_event(
     qid = _candidate_value(claims["candidate_event_identity"]).get("entity_id")
     if not isinstance(qid, str):
         raise ValueError("Wikidata identity candidate has no entity id.")
-    occurrence_date = _parse_occurrence_date(
+    candidate_occurrence = _parse_occurrence_date(
         _candidate_value(claims["candidate_occurrence_date"])
     )
-    profile_type = profile_type_for_date(occurrence_date)
-    if profile_type is None:
-        raise ValueError(
-            "Wikidata occurrence date is outside the public archive band."
-        )
 
     # Dedup before minting a competing recorded event: a date that already
-    # publishes a different recorded event defers to human merge review.
-    collision = published_recorded_event_on(session, occurrence_date)
+    # publishes a different recorded event defers to human merge review. Detection
+    # runs pre-resolution, so it keys on the accepted candidate's occurrence.
+    collision = published_recorded_event_on(session, candidate_occurrence)
     if collision is not None and not _manifest_is_wikidata_event(
         session, manifest=collision, qid=qid
     ):
@@ -1082,12 +1118,12 @@ def publish_wikidata_event(
             session,
             identity_claim=claims["candidate_event_identity"],
             qid=qid,
-            occurrence_date=occurrence_date,
+            occurrence_date=candidate_occurrence,
             colliding_manifest_id=collision.id,
         )
         return WikidataPublishOutcome(
             status="deferred_to_merge_review",
-            occurrence_date=occurrence_date,
+            occurrence_date=candidate_occurrence,
             colliding_manifest_id=collision.id,
             merge_review_task_id=task.id,
         )
@@ -1103,11 +1139,27 @@ def publish_wikidata_event(
         if identity_resolved is not None
         else None
     )
-    if event is None:
+    if event is None or identity_resolved is None:
         raise ValueError(
             "The Wikidata candidate must be resolved into an event before publication."
         )
     methodology = _wikidata_methodology(session)
+
+    # Everything published binds to the selected resolution's lineage, not whatever
+    # release is newest: the occurrence date, statement values, provenance, and the
+    # eligibility gate all follow the resolved claims (provenance integrity).
+    _, resolution_release = _resolution_lineage(session, resolved=identity_resolved)
+    occurrence_resolved = _latest_resolved(
+        session, qid=qid, predicate="candidate_occurrence_date"
+    )
+    if occurrence_resolved is None:
+        raise ValueError("The resolved event has no occurrence resolution.")
+    occurrence_date = _parse_occurrence_date(_resolved_value(occurrence_resolved))
+    profile_type = profile_type_for_date(occurrence_date)
+    if profile_type is None:
+        raise ValueError(
+            "Wikidata occurrence date is outside the public archive band."
+        )
 
     # What to publish, and in what order, comes from the human editorial ranking
     # (P2) -- not the source predicate order. An unranked candidate yields nothing
@@ -1123,24 +1175,25 @@ def publish_wikidata_event(
     evidence: list[PublicationStatementEvidenceInput] = []
     selected_roots: set[UUID] = set()
     for index, (predicate, resolved) in enumerate(ranked):
+        lineage_claim, lineage_release = _resolution_lineage(
+            session, resolved=resolved
+        )
         statements.append(
             {
                 "statement_id": predicate.replace("candidate_", "wikidata-").replace(
                     "_", "-"
                 ),
                 "statement": _recorded_statement_text(
-                    predicate,
-                    value=_candidate_value(claims[predicate]),
-                    occurrence_date=occurrence_date,
+                    predicate, value=_resolved_value(resolved)
                 ),
                 "details": resolved.resolved_value,
                 "provenance_note": (
                     "Wikidata CC0 structured data; single reviewed candidate."
                 ),
                 "provenance": _wikidata_statement_provenance(
-                    claim=claims[predicate],
+                    claim=lineage_claim,
                     resolved=resolved,
-                    release=release,
+                    release=lineage_release,
                     source=source,
                     methodology=methodology,
                 ),
@@ -1155,10 +1208,10 @@ def publish_wikidata_event(
         selected_roots.add(resolved.id)
 
     # Publication consumes the human editorial-ranking stage; this also enforces
-    # licensing and the source pipeline's quality gate.
+    # licensing and the source pipeline's quality gate for the resolution's release.
     assert_release_publication_eligible(
         session,
-        source_release_id=release.id,
+        source_release_id=resolution_release.id,
         profile_date=occurrence_date,
         resolved_root_ids_by_section={"recorded_on_this_date": selected_roots},
     )
