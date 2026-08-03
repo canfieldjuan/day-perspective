@@ -19,6 +19,8 @@ from app.adapters.base import (
 )
 from app.coverage import published_recorded_event_on
 from app.governance import (
+    EditorialSelection,
+    EditorialSelectionStatus,
     LicenseInput,
     assert_release_publication_eligible,
     register_release_license,
@@ -944,6 +946,69 @@ def _recorded_statement_text(
     raise ValueError(f"No recorded-statement rendering for {predicate}.")
 
 
+def _ranked_recorded_predicates(
+    session: Session, *, qid: str, profile_date: date
+) -> list[tuple[str, ResolvedClaim]]:
+    """This entity's recorded predicates, in the human editorial-ranking order.
+
+    Drives *what* is published and *in what order* from the human editorial
+    selections, not the source predicate order -- so the editorial-ranking stage
+    the pass consumes actually decides the reader-visible order. Only resolved
+    predicates a human selected (latest decision ``SELECTED``) are returned;
+    unranked selections sort last, stably, behind ranked ones.
+    """
+    latest: dict[UUID, EditorialSelection] = {}
+    for selection in session.scalars(
+        select(EditorialSelection)
+        .where(
+            EditorialSelection.profile_date == profile_date,
+            EditorialSelection.section_key == "recorded_on_this_date",
+        )
+        .order_by(EditorialSelection.decision_version.desc())
+    ):
+        if selection.resolved_claim_id is not None:
+            latest.setdefault(selection.resolved_claim_id, selection)
+    ranked: list[tuple[int | None, str, ResolvedClaim]] = []
+    for predicate in _PUBLISHED_PREDICATES:
+        resolved = _latest_resolved(session, qid=qid, predicate=predicate)
+        if resolved is None:
+            continue
+        chosen = latest.get(resolved.id)
+        if chosen is None or chosen.status != EditorialSelectionStatus.SELECTED.value:
+            continue
+        ranked.append((chosen.display_rank, predicate, resolved))
+    ranked.sort(key=lambda item: (item[0] is None, item[0] if item[0] is not None else 0))
+    return [(predicate, resolved) for _, predicate, resolved in ranked]
+
+
+def _carried_forward_evidence(
+    session: Session, *, manifest_id: UUID
+) -> list[PublicationStatementEvidenceInput]:
+    """The prior profile's statement-evidence inputs, minus the recorded section.
+
+    Enrichment rebuilds ``recorded_on_this_date`` fresh but must preserve every
+    other section a prior profile published (annual context, comparisons), so the
+    new version enriches the date rather than replacing it. Only the evidence
+    *inputs* are carried; the spine re-snapshots them at publication.
+    """
+    carried: list[PublicationStatementEvidenceInput] = []
+    for row in session.scalars(
+        select(PublicationStatementEvidence).where(
+            PublicationStatementEvidence.publication_manifest_id == manifest_id
+        )
+    ):
+        if row.statement_path.startswith("/sections/recorded_on_this_date/"):
+            continue
+        carried.append(
+            PublicationStatementEvidenceInput(
+                statement_path=row.statement_path,
+                resolved_claim_id=row.resolved_claim_id,
+                derived_value_id=row.derived_value_id,
+            )
+        )
+    return carried
+
+
 def publish_wikidata_event(
     session: Session,
     *,
@@ -1044,17 +1109,20 @@ def publish_wikidata_event(
         )
     methodology = _wikidata_methodology(session)
 
+    # What to publish, and in what order, comes from the human editorial ranking
+    # (P2) -- not the source predicate order. An unranked candidate yields nothing
+    # and is refused: the pass consumes the ranking stage, it never invents it.
+    ranked = _ranked_recorded_predicates(
+        session, qid=qid, profile_date=occurrence_date
+    )
+    if not ranked:
+        raise ValueError(
+            "Publication requires a human editorial selection for the recorded event."
+        )
     statements: list[dict[str, Any]] = []
     evidence: list[PublicationStatementEvidenceInput] = []
     selected_roots: set[UUID] = set()
-    for predicate in _PUBLISHED_PREDICATES:
-        resolved = _latest_resolved(session, qid=qid, predicate=predicate)
-        if resolved is None:
-            # Only the optional coordinate predicate can be absent; a required
-            # predicate without a resolution means the event was not fully
-            # resolved, which the identity lookup above already guards.
-            continue
-        index = len(statements)
+    for index, (predicate, resolved) in enumerate(ranked):
         statements.append(
             {
                 "statement_id": predicate.replace("candidate_", "wikidata-").replace(
@@ -1086,28 +1154,14 @@ def publish_wikidata_event(
         )
         selected_roots.add(resolved.id)
 
-    # Publication consumes the human editorial-ranking stage; it is refused when a
-    # human has not selected these roots (this also enforces licensing and the
-    # source pipeline's quality gate).
+    # Publication consumes the human editorial-ranking stage; this also enforces
+    # licensing and the source pipeline's quality gate.
     assert_release_publication_eligible(
         session,
         source_release_id=release.id,
         profile_date=occurrence_date,
         resolved_root_ids_by_section={"recorded_on_this_date": selected_roots},
     )
-
-    payload = {
-        "schema_version": "1",
-        "date": occurrence_date.isoformat(),
-        "profile_type": profile_type.value,
-        "sections": {"recorded_on_this_date": statements},
-        "section_states": {"recorded_on_this_date": {"status": "available"}},
-        "source_attribution": {
-            "name": source.name,
-            "publisher": source.publisher,
-            "url": f"https://www.wikidata.org/wiki/{qid}",
-        },
-    }
 
     previous_manifest = session.scalar(
         select(PublicationManifest)
@@ -1127,6 +1181,48 @@ def publish_wikidata_event(
         if previous_manifest is not None
         else None
     )
+
+    source_attribution = {
+        "name": source.name,
+        "publisher": source.publisher,
+        "url": f"https://www.wikidata.org/wiki/{qid}",
+    }
+    if previous_manifest is None:
+        payload = {
+            "schema_version": "1",
+            "date": occurrence_date.isoformat(),
+            "profile_type": profile_type.value,
+            "sections": {"recorded_on_this_date": statements},
+            "section_states": {"recorded_on_this_date": {"status": "available"}},
+            "source_attribution": source_attribution,
+        }
+    else:
+        # Enrich the existing profile rather than replace it: carry every prior
+        # section and its evidence forward and add the recorded event, so
+        # publishing never drops the annual context a context profile holds (P1).
+        base = store.read(previous_manifest.storage_uri, previous_manifest.content_hash)
+        base_sections = base.get("sections")
+        base_states = base.get("section_states")
+        payload = {
+            "schema_version": "1",
+            "date": occurrence_date.isoformat(),
+            "profile_type": profile_type.value,
+            "sections": {
+                **(base_sections if isinstance(base_sections, dict) else {}),
+                "recorded_on_this_date": statements,
+            },
+            "section_states": {
+                **(base_states if isinstance(base_states, dict) else {}),
+                "recorded_on_this_date": {"status": "available"},
+            },
+            "source_attribution": source_attribution,
+        }
+        if isinstance(base.get("quality"), dict):
+            payload["quality"] = base["quality"]
+        evidence = _carried_forward_evidence(
+            session, manifest_id=previous_manifest.id
+        ) + evidence
+
     profile = publish_day_profile(
         session,
         store=store,

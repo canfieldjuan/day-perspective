@@ -47,7 +47,11 @@ from app.models import (
     ResolvedClaim,
     ReviewTask,
 )
-from app.services import LocalFilesystemPublishedProfileStore
+from app.services import (
+    LocalFilesystemPublishedProfileStore,
+    PublicationStatementEvidenceInput,
+    publish_day_profile,
+)
 from app.wikidata import (
     ENTITY_ID,
     ingest_wikidata_candidate,
@@ -141,6 +145,44 @@ def _prepare_for_publication(session: Session, tmp_path: Path) -> None:
     _accept_core(session)
     resolve_wikidata_event(session)
     _editorial_rank(session, GOLDEN_DATE)
+
+
+def _publish_prior_context(
+    session: Session, store: LocalFilesystemPublishedProfileStore
+) -> DayProfile:
+    """A minimal context-only profile already on the date, as archive activation
+    would have published it -- so enrichment must preserve it, not replace it."""
+    occurrence = _resolved(session, "candidate_occurrence_date")
+    assert occurrence is not None
+    payload = {
+        "schema_version": "1",
+        "date": GOLDEN_DATE.isoformat(),
+        "profile_type": ProfileType.STANDARD_STATISTICAL.value,
+        "sections": {
+            "typical_day_in_this_year": [
+                {
+                    "statement_id": "annual-context-fixture",
+                    "statement": "Annual context statement for this test.",
+                    "details": {"note": "annual context, not date-specific"},
+                    "provenance_note": "development fixture context",
+                }
+            ]
+        },
+        "section_states": {"typical_day_in_this_year": {"status": "available"}},
+    }
+    return publish_day_profile(
+        session,
+        store=store,
+        profile_date=GOLDEN_DATE,
+        profile_type=ProfileType.STANDARD_STATISTICAL,
+        payload=payload,
+        statement_evidence=[
+            PublicationStatementEvidenceInput(
+                statement_path="/sections/typical_day_in_this_year/0",
+                resolved_claim_id=occurrence.id,
+            )
+        ],
+    )
 
 
 @pytest.mark.integration
@@ -314,3 +356,72 @@ def test_publish_requires_human_editorial_ranking(
 
     assert session.scalar(select(func.count()).select_from(PublicationManifest)) == 0
     assert session.scalar(select(func.count()).select_from(DayProfile)) == 0
+
+
+@pytest.mark.integration
+def test_publish_enriches_without_dropping_existing_context(
+    session: Session, tmp_path: Path
+) -> None:
+    # A date that already carries annual context must be *enriched*, not replaced:
+    # adding the recorded event preserves the existing sections (P1).
+    _prepare_for_publication(session, tmp_path)
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+    context = _publish_prior_context(session, store)
+    before = coverage_entry(session, GOLDEN_DATE)
+    assert before is not None and before.has_recorded_event is False
+
+    outcome = publish_wikidata_event(session, store=store)
+
+    assert outcome.status == "published"
+    assert outcome.manifest_id != context.publication_manifest_id
+    manifest = session.get(PublicationManifest, outcome.manifest_id)
+    assert manifest is not None
+    payload = store.read(manifest.storage_uri, manifest.content_hash)
+    # The recorded event was added AND the prior annual context survived.
+    assert payload["sections"]["recorded_on_this_date"]
+    assert payload["sections"]["typical_day_in_this_year"]
+
+    entry = coverage_entry(session, GOLDEN_DATE)
+    assert entry is not None
+    assert entry.has_recorded_event is True
+    assert entry.publication_tier is PublicationTier.ENRICHED
+    # The enriched version supersedes the context profile as the served one.
+    assert entry.publication_manifest_id == outcome.manifest_id
+
+
+@pytest.mark.integration
+def test_publish_orders_statements_by_editorial_rank(
+    session: Session, tmp_path: Path
+) -> None:
+    # The reader-visible order follows the human editorial ranking, not the source
+    # predicate order (P2): rank the predicates in reverse and expect that order.
+    _ingest(session, tmp_path)
+    _accept_core(session)
+    resolve_wikidata_event(session)
+    reversed_predicates = list(reversed(PUBLISHED_PREDICATES))
+    for rank, predicate in enumerate(reversed_predicates, start=1):
+        resolved = _resolved(session, predicate)
+        assert resolved is not None
+        record_editorial_selection(
+            session,
+            profile_date=GOLDEN_DATE,
+            section_key="recorded_on_this_date",
+            resolved_claim_id=resolved.id,
+            status=EditorialSelectionStatus.SELECTED,
+            display_rank=rank,
+            rationale="Reverse-order editorial ranking for this test.",
+            reviewed_by="test-human",
+        )
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+
+    outcome = publish_wikidata_event(session, store=store)
+
+    manifest = session.get(PublicationManifest, outcome.manifest_id)
+    assert manifest is not None
+    payload = store.read(manifest.storage_uri, manifest.content_hash)
+    recorded = payload["sections"]["recorded_on_this_date"]
+    expected_ids = [
+        predicate.replace("candidate_", "wikidata-").replace("_", "-")
+        for predicate in reversed_predicates
+    ]
+    assert [item["statement_id"] for item in recorded] == expected_ids
