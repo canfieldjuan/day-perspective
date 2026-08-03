@@ -1201,11 +1201,17 @@ def publish_wikidata_event(
         lineage_claim, lineage_release = _resolution_lineage(
             session, resolved=resolved
         )
-        details: dict[str, Any] = (
-            dict(resolved.resolved_value)
-            if isinstance(resolved.resolved_value, dict)
-            else {}
-        )
+        # Published provenance discloses the claim's data state (reported vs
+        # estimated/modeled), as the recorded-event contract requires
+        # (docs/PRODUCT_CONTRACT.md); the web reads it from details.data_status.
+        details: dict[str, Any] = {
+            **(
+                dict(resolved.resolved_value)
+                if isinstance(resolved.resolved_value, dict)
+                else {}
+            ),
+            "data_status": lineage_claim.data_status.value,
+        }
         if predicate == "candidate_occurrence_date":
             details = {
                 **details,

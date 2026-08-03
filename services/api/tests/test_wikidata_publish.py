@@ -312,14 +312,16 @@ def test_publish_exposes_recorded_event_temporal_qualification(
     manifest = session.get(PublicationManifest, outcome.manifest_id)
     assert manifest is not None
     payload = store.read(manifest.storage_uri, manifest.content_hash)
+    recorded = payload["sections"]["recorded_on_this_date"]
     occurrence = next(
-        item
-        for item in payload["sections"]["recorded_on_this_date"]
-        if item["statement_id"] == "wikidata-occurrence-date"
+        item for item in recorded if item["statement_id"] == "wikidata-occurrence-date"
     )
     assert occurrence["details"]["temporal_precision"] == "day"
     assert occurrence["details"]["temporal_assignment"] == "reported"
     assert occurrence["details"]["date_role"] == "occurred"
+    # Every recorded statement discloses its claim's data state (contract §71-74).
+    for item in recorded:
+        assert item["details"]["data_status"] == "reported"
 
 
 @pytest.mark.integration
