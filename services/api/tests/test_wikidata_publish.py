@@ -458,6 +458,37 @@ def test_publish_requires_human_editorial_ranking(
 
 
 @pytest.mark.integration
+def test_publish_requires_the_occurrence_selection(
+    session: Session, tmp_path: Path
+) -> None:
+    # A recorded event must display its occurrence's temporal qualification
+    # (docs/PRODUCT_CONTRACT.md), so a selection that omits the occurrence root --
+    # even if other roots are selected -- cannot publish.
+    _ingest(session, tmp_path)
+    _accept_core(session)
+    resolve_wikidata_event(session)
+    name = _resolved(session, "candidate_name")
+    assert name is not None
+    record_editorial_selection(
+        session,
+        profile_date=GOLDEN_DATE,
+        section_key="recorded_on_this_date",
+        resolved_claim_id=name.id,
+        status=EditorialSelectionStatus.SELECTED,
+        display_rank=1,
+        rationale="Only the name is ranked, not the occurrence.",
+        reviewed_by="test-human",
+    )
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+
+    with pytest.raises(ValueError):
+        publish_wikidata_event(session, store=store)
+
+    assert session.scalar(select(func.count()).select_from(PublicationManifest)) == 0
+    assert session.scalar(select(func.count()).select_from(DayProfile)) == 0
+
+
+@pytest.mark.integration
 def test_publish_enriches_without_dropping_existing_context(
     session: Session, tmp_path: Path
 ) -> None:

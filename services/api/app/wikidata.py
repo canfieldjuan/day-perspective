@@ -1186,6 +1186,14 @@ def publish_wikidata_event(
         raise ValueError(
             "Publication requires a human editorial selection for the recorded event."
         )
+    # A recorded event must display its occurrence's temporal qualification
+    # (docs/PRODUCT_CONTRACT.md): the occurrence root is what carries precision,
+    # assignment, and date role, so a selection that omits it cannot publish.
+    if "candidate_occurrence_date" not in {predicate for predicate, _ in ranked}:
+        raise ValueError(
+            "Publishing a recorded event requires its occurrence selection, which "
+            "carries the temporal precision, assignment, and date role."
+        )
     statements: list[dict[str, Any]] = []
     evidence: list[PublicationStatementEvidenceInput] = []
     roots_by_release: dict[UUID, set[UUID]] = {}
