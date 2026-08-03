@@ -298,6 +298,31 @@ def test_publish_marks_the_date_enriched_from_the_resolved_candidate(
 
 
 @pytest.mark.integration
+def test_publish_exposes_recorded_event_temporal_qualification(
+    session: Session, tmp_path: Path
+) -> None:
+    # A directly recorded event must display its temporal precision, assignment,
+    # and date role (docs/PRODUCT_CONTRACT.md recorded-event rules) -- sourced from
+    # the resolved EventTime, not just the raw Wikidata time object.
+    _prepare_for_publication(session, tmp_path)
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+
+    outcome = publish_wikidata_event(session, store=store)
+
+    manifest = session.get(PublicationManifest, outcome.manifest_id)
+    assert manifest is not None
+    payload = store.read(manifest.storage_uri, manifest.content_hash)
+    occurrence = next(
+        item
+        for item in payload["sections"]["recorded_on_this_date"]
+        if item["statement_id"] == "wikidata-occurrence-date"
+    )
+    assert occurrence["details"]["temporal_precision"] == "day"
+    assert occurrence["details"]["temporal_assignment"] == "reported"
+    assert occurrence["details"]["date_role"] == "occurred"
+
+
+@pytest.mark.integration
 def test_publish_defers_on_recorded_event_collision(
     session: Session, tmp_path: Path
 ) -> None:

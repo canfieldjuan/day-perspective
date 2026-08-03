@@ -1160,14 +1160,21 @@ def publish_wikidata_event(
             "The Wikidata candidate must be resolved into an event before publication."
         )
     methodology = _wikidata_methodology(session)
-    # The eligibility gate runs against the release the resolution rests on, so it
-    # follows the resolved claims (provenance integrity), not the newest release.
-    _, resolution_release = _resolution_lineage(session, resolved=identity_resolved)
     profile_type = profile_type_for_date(occurrence_date)
     if profile_type is None:
         raise ValueError(
             "Wikidata occurrence date is outside the public archive band."
         )
+    # The recorded event displays its temporal precision, assignment, and date role
+    # from the resolved EventTime, as the recorded-event contract requires
+    # (docs/PRODUCT_CONTRACT.md).
+    event_time = session.scalar(
+        select(EventTime).where(
+            EventTime.event_id == event.id, EventTime.is_primary.is_(True)
+        )
+    )
+    if event_time is None:
+        raise ValueError("The resolved event has no primary occurrence time.")
 
     # What to publish, and in what order, comes from the human editorial ranking
     # (P2) -- not the source predicate order. An unranked candidate yields nothing
@@ -1181,11 +1188,23 @@ def publish_wikidata_event(
         )
     statements: list[dict[str, Any]] = []
     evidence: list[PublicationStatementEvidenceInput] = []
-    selected_roots: set[UUID] = set()
+    roots_by_release: dict[UUID, set[UUID]] = {}
     for index, (predicate, resolved) in enumerate(ranked):
         lineage_claim, lineage_release = _resolution_lineage(
             session, resolved=resolved
         )
+        details: dict[str, Any] = (
+            dict(resolved.resolved_value)
+            if isinstance(resolved.resolved_value, dict)
+            else {}
+        )
+        if predicate == "candidate_occurrence_date":
+            details = {
+                **details,
+                "temporal_precision": event_time.temporal_precision.value,
+                "temporal_assignment": event_time.temporal_assignment.value,
+                "date_role": event_time.date_role.value,
+            }
         statements.append(
             {
                 "statement_id": predicate.replace("candidate_", "wikidata-").replace(
@@ -1194,7 +1213,7 @@ def publish_wikidata_event(
                 "statement": _recorded_statement_text(
                     predicate, value=_resolved_value(resolved)
                 ),
-                "details": resolved.resolved_value,
+                "details": details,
                 "provenance_note": (
                     "Wikidata CC0 structured data; single reviewed candidate."
                 ),
@@ -1213,16 +1232,19 @@ def publish_wikidata_event(
                 resolved_claim_id=resolved.id,
             )
         )
-        selected_roots.add(resolved.id)
+        roots_by_release.setdefault(lineage_release.id, set()).add(resolved.id)
 
-    # Publication consumes the human editorial-ranking stage; this also enforces
-    # licensing and the source pipeline's quality gate for the resolution's release.
-    assert_release_publication_eligible(
-        session,
-        source_release_id=resolution_release.id,
-        profile_date=occurrence_date,
-        resolved_root_ids_by_section={"recorded_on_this_date": selected_roots},
-    )
+    # Publication consumes the human editorial-ranking stage. Each selected root is
+    # gated against its *own* source release -- licensing, pipeline, quality, and
+    # editorial -- so a root resolved from a newer release cannot bypass that
+    # release's gates (docs/PRODUCT_CONTRACT.md source-release gate).
+    for release_id, roots in roots_by_release.items():
+        assert_release_publication_eligible(
+            session,
+            source_release_id=release_id,
+            profile_date=occurrence_date,
+            resolved_root_ids_by_section={"recorded_on_this_date": roots},
+        )
 
     previous_manifest = session.scalar(
         select(PublicationManifest)
