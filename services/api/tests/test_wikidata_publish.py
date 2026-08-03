@@ -192,12 +192,18 @@ def _publish_prior_context(
     )
 
 
-def _reingest_with_changed_name(session: Session, label: str) -> SourceRelease:
-    """A newer release for the same entity with a changed name, and no re-resolve.
+def _reingest(
+    session: Session,
+    *,
+    label: str = "1964 event",
+    occurrence_time: str = "+1964-03-27T00:00:00Z",
+) -> SourceRelease:
+    """A newer release for the same entity, accepted but not re-resolved.
 
     Mirrors a live re-ingest that the pinned offline fixture cannot produce: the
     candidate is accepted on the new release, but the resolution still rests on the
-    original one -- the case where publication must not cite the new record.
+    original one -- the case where publication must bind to the resolution, not the
+    newest release.
     """
     source = session.scalar(
         select(Source).where(Source.slug == "wikidata-candidates")
@@ -223,7 +229,7 @@ def _reingest_with_changed_name(session: Session, label: str) -> SourceRelease:
         "candidate_event_type": {"id": "Q7944"},
         "candidate_name": {"label": label, "aliases": []},
         "candidate_occurrence_date": {
-            "time": "+1964-03-27T00:00:00Z",
+            "time": occurrence_time,
             "precision": 11,
         },
     }
@@ -510,7 +516,7 @@ def test_publish_binds_provenance_to_the_resolution_not_the_latest_release(
         select(SourceRelease).order_by(SourceRelease.ingested_at)
     ).first()
     assert original_release is not None
-    _reingest_with_changed_name(session, "REINGESTED-CHANGED-NAME")
+    _reingest(session, label="REINGESTED-CHANGED-NAME")
     store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
 
     outcome = publish_wikidata_event(session, store=store)
@@ -529,3 +535,40 @@ def test_publish_binds_provenance_to_the_resolution_not_the_latest_release(
         name_statement["provenance"]["source_release"]["release"]
         == original_release.release_label
     )
+
+
+@pytest.mark.integration
+def test_publish_checks_collision_on_the_resolved_date_not_the_reingested_candidate(
+    session: Session, tmp_path: Path
+) -> None:
+    # The collision guard must fire on the date publication actually targets -- the
+    # resolved occurrence -- not on a re-ingested candidate that moved P585. Here
+    # the resolved date holds the USGS golden recorded event; a re-ingest points the
+    # candidate at a different, collision-free date, but publication still targets
+    # the resolved date and must defer rather than overwrite the golden section.
+    _ingest(session, tmp_path)
+    _accept_core(session)
+    resolve_wikidata_event(session)
+    _, golden = publish_golden(session, tmp_path)
+    rebuild_coverage_index(session)
+    session.flush()
+    _reingest(session, occurrence_time="+1970-01-15T00:00:00Z")
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+
+    golden_manifest_before = session.get(
+        PublicationManifest, golden.publication_manifest_id
+    )
+    assert golden_manifest_before is not None
+    hash_before = golden_manifest_before.content_hash
+
+    outcome = publish_wikidata_event(session, store=store)
+
+    assert outcome.status == "deferred_to_merge_review"
+    assert outcome.occurrence_date == GOLDEN_DATE
+    assert outcome.colliding_manifest_id == golden.publication_manifest_id
+    # The golden recorded event is untouched -- no competing publish on its date.
+    golden_after = session.get(
+        PublicationManifest, golden.publication_manifest_id
+    )
+    assert golden_after is not None
+    assert golden_after.content_hash == hash_before

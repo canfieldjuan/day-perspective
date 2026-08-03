@@ -1103,32 +1103,11 @@ def publish_wikidata_event(
     qid = _candidate_value(claims["candidate_event_identity"]).get("entity_id")
     if not isinstance(qid, str):
         raise ValueError("Wikidata identity candidate has no entity id.")
-    candidate_occurrence = _parse_occurrence_date(
-        _candidate_value(claims["candidate_occurrence_date"])
-    )
 
-    # Dedup before minting a competing recorded event: a date that already
-    # publishes a different recorded event defers to human merge review. Detection
-    # runs pre-resolution, so it keys on the accepted candidate's occurrence.
-    collision = published_recorded_event_on(session, candidate_occurrence)
-    if collision is not None and not _manifest_is_wikidata_event(
-        session, manifest=collision, qid=qid
-    ):
-        task = _ensure_merge_review_task(
-            session,
-            identity_claim=claims["candidate_event_identity"],
-            qid=qid,
-            occurrence_date=candidate_occurrence,
-            colliding_manifest_id=collision.id,
-        )
-        return WikidataPublishOutcome(
-            status="deferred_to_merge_review",
-            occurrence_date=candidate_occurrence,
-            colliding_manifest_id=collision.id,
-            merge_review_task_id=task.id,
-        )
-
-    # The event must already be resolved (G2a) -- resolution is a prior stage.
+    # The event is resolved by a prior stage (G2a). Everything the publish path
+    # keys on -- the occurrence date, the collision guard, statements, and
+    # provenance -- binds to that resolution, not to whatever candidate the newest
+    # release carries.
     identity_resolved = _latest_resolved(
         session, qid=qid, predicate="candidate_event_identity"
     )
@@ -1139,22 +1118,51 @@ def publish_wikidata_event(
         if identity_resolved is not None
         else None
     )
-    if event is None or identity_resolved is None:
+    resolved_occurrence = _latest_resolved(
+        session, qid=qid, predicate="candidate_occurrence_date"
+    )
+
+    # The occurrence date is the resolution's once resolved, so the collision guard
+    # and the publish target are the same date -- a re-ingest that moves P585 cannot
+    # let the guard miss a recorded event on the date we actually publish on.
+    # Pre-resolution it falls back to the accepted candidate purely so a collision
+    # can still defer.
+    if event is not None and resolved_occurrence is not None:
+        occurrence_date = _parse_occurrence_date(_resolved_value(resolved_occurrence))
+    else:
+        occurrence_date = _parse_occurrence_date(
+            _candidate_value(claims["candidate_occurrence_date"])
+        )
+
+    # Dedup before minting a competing recorded event: a date that already
+    # publishes a different recorded event defers to human merge review.
+    collision = published_recorded_event_on(session, occurrence_date)
+    if collision is not None and not _manifest_is_wikidata_event(
+        session, manifest=collision, qid=qid
+    ):
+        task = _ensure_merge_review_task(
+            session,
+            identity_claim=claims["candidate_event_identity"],
+            qid=qid,
+            occurrence_date=occurrence_date,
+            colliding_manifest_id=collision.id,
+        )
+        return WikidataPublishOutcome(
+            status="deferred_to_merge_review",
+            occurrence_date=occurrence_date,
+            colliding_manifest_id=collision.id,
+            merge_review_task_id=task.id,
+        )
+
+    # Publication requires the resolved event (G2a).
+    if event is None or identity_resolved is None or resolved_occurrence is None:
         raise ValueError(
             "The Wikidata candidate must be resolved into an event before publication."
         )
     methodology = _wikidata_methodology(session)
-
-    # Everything published binds to the selected resolution's lineage, not whatever
-    # release is newest: the occurrence date, statement values, provenance, and the
-    # eligibility gate all follow the resolved claims (provenance integrity).
+    # The eligibility gate runs against the release the resolution rests on, so it
+    # follows the resolved claims (provenance integrity), not the newest release.
     _, resolution_release = _resolution_lineage(session, resolved=identity_resolved)
-    occurrence_resolved = _latest_resolved(
-        session, qid=qid, predicate="candidate_occurrence_date"
-    )
-    if occurrence_resolved is None:
-        raise ValueError("The resolved event has no occurrence resolution.")
-    occurrence_date = _parse_occurrence_date(_resolved_value(occurrence_resolved))
     profile_type = profile_type_for_date(occurrence_date)
     if profile_type is None:
         raise ValueError(
