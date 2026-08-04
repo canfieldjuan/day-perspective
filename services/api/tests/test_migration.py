@@ -320,6 +320,18 @@ def test_the_identity_adjudication_migration_enforces_its_invariants(
         for foreign_key in foreign_keys:
             assert (foreign_key["options"] or {}).get("ondelete") == "RESTRICT"
 
+        # The featured-event decision namespace is admitted by the editorial
+        # vocabulary, and the existing published sections still are.
+        with engine.connect() as connection:
+            editorial = _constraint_definitions(connection, "editorial_selections")
+        section_key = next(
+            definition
+            for definition in editorial.values()
+            if "section_key" in definition
+        )
+        assert "'featured_event'" in section_key
+        assert "'recorded_on_this_date'" in section_key
+
         # Append-only history: one row per (pair, version).
         indexes = {
             index["name"]: index

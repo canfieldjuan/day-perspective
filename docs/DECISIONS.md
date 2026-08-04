@@ -1307,3 +1307,66 @@ The single-choice featured-event writer this needs -- `record_editorial_selectio
 versions per `(date, section, root)`, so two roots can each read as selected on
 independent counters -- is the immediately following slice, split out to keep this
 PR's review surface inside the repo's scope rule.
+
+## D043: Featuring one of a date's events is a single choice, not several independent ones
+
+**Context:** Once a human `distinct_event` decision (D042) lets two events
+legitimately share a date, one of them has to be the `recorded_on_this_date`
+headline. The obvious mechanism was already there — `record_editorial_selection`
+— and it is the wrong shape for this question.
+
+It versions decisions per `(date, section, root)`, which is exactly right for
+"should this statement be published": each root is an independent yes/no, and a
+decision about one says nothing about another. "Which of these events is the
+headline" is the opposite: choosing B has to un-choose A. Recorded through the
+per-root writer, a human `SELECTED` on event B's identity root does not supersede
+a standing rule's `SELECTED` on event A's. Both stay selected, on independent
+counters, and comparing `decision_version` between them is meaningless because
+the counters never shared a scale. The date would then have two headlines and
+publish whichever the query happened to order first.
+
+**Decision:** The featured-event writer takes the **complete eligible candidate
+set** for a date, under one advisory lock on `(profile_date, "featured_event")`,
+and leaves exactly one root selected. The resolver requires exactly one current
+selection and **fails closed** on zero or several rather than let query order
+decide what a reader sees.
+
+**Mechanism:** `record_featured_event_selection` (`services/api/app/governance.py`)
+validates that every candidate root is the identity of a distinct canonical event
+occurring on that date, rejects a chosen root outside the candidate set, then in
+one transaction records the winner `SELECTED` and every other candidate
+`REJECTED`. A root that was selected but has dropped out of the eligible set is
+rejected too — silently leaving it selected would let a withdrawn event keep the
+headline. It delegates each write to `record_editorial_selection`, so there is
+still exactly one writer for editorial history and one version counter per root;
+what this adds is the cross-candidate invariant that writer cannot express.
+
+D038 holds in both directions: a standing rule may choose where no person has,
+and may never displace one who did. `resolve_featured_event` returns `None` for
+zero candidates, returns the only candidate for one **without writing a
+governance row** — one event is not a choice, and manufacturing an editorial
+decision for it would be inventing a human judgement — and otherwise requires
+exactly one current selection.
+
+`featured_event` is admitted to the `editorial_selections` section vocabulary
+(migration `20260803_0018`) rather than given a table of its own. It is a
+decision namespace, not a rendered section: no published payload carries a
+`featured_event` section, and the published-section vocabularies elsewhere are
+deliberately untouched.
+
+**Alternatives considered:** A `featured_event_selections` table of its own —
+rejected because it forks editorial history into two writers that can disagree,
+the structural defect MD1 (#45) was cut for after seven review rounds. Recording
+only the winner and reading "latest selected wins" — that is the defect above,
+and it fails silently rather than loudly. Comparing `decision_version` across
+roots to break the tie — invalid, for the reason in the context above; it would
+have looked like it worked on the first date that had two events and been wrong
+on the second.
+
+**Consequences:** A date can carry several legitimately co-occurring events and
+still have one unambiguous headline, with the choice recorded as accountable
+editorial provenance. G3b (#79) supplies the deterministic default that fills the
+gap where no human has chosen — the SHA-256 tiebreak — and binds the chosen
+identity to the published manifest so `derive_review_status` can see it. This
+slice deliberately stops short of that: nothing yet calls the writer in
+production, and G4 does not begin until G3b lands.

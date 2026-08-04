@@ -3,6 +3,7 @@ from __future__ import annotations
 import enum
 import hashlib
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from typing import Any
@@ -587,6 +588,15 @@ def assert_release_publication_eligible(
 #: absent from a list somebody forgot to extend.
 AUTOMATED_REVIEWER_PREFIX = "standing-rule:"
 
+#: The deterministic featured-event default (G3b) records through this module's
+#: writer under this identity. Named here so the adjudication writer can refuse
+#: it: a rule may pick a default, but it may never adjudicate identity.
+STANDING_FEATURED_EVENT_RULE = "standing-rule:featured-event-v1"
+
+#: Featuring one event among several is a single choice across candidates, not a
+#: set of independent per-root yes/no decisions, so it gets its own section key.
+FEATURED_EVENT_SECTION = "featured_event"
+
 #: The published section a recorded event occupies.
 RECORDED_EVENT_SECTION = "recorded_on_this_date"
 
@@ -625,6 +635,10 @@ _DIRECTIONAL_DECISIONS = frozenset(
 
 class IdentityAdjudicationError(ValueError):
     """A refused identity adjudication."""
+
+
+class FeaturedEventUnresolved(ValueError):
+    """The date's featured event is not exactly one, so nothing may be featured."""
 
 
 class EventIdentityAdjudication(Base):
@@ -915,3 +929,192 @@ def events_behind_manifest(
         )
     )
     return found
+
+
+def _latest_featured_selections(
+    session: Session, *, profile_date: date
+) -> dict[UUID, EditorialSelection]:
+    """Each featured-event root's current decision for a date.
+
+    Per-root latest, never a comparison of ``decision_version`` between roots:
+    the counters are independent, so "B is version 2 and A is version 1" says
+    nothing about which one is featured.
+    """
+    latest: dict[UUID, EditorialSelection] = {}
+    for selection in session.scalars(
+        select(EditorialSelection)
+        .where(
+            EditorialSelection.profile_date == profile_date,
+            EditorialSelection.section_key == FEATURED_EVENT_SECTION,
+        )
+        .order_by(EditorialSelection.decision_version.desc())
+    ):
+        if selection.resolved_claim_id is not None:
+            latest.setdefault(selection.resolved_claim_id, selection)
+    return latest
+
+
+def _validated_candidates(
+    session: Session, *, profile_date: date, candidate_root_ids: Sequence[UUID]
+) -> list[UUID]:
+    """The candidate identity roots, checked to be distinct events on this date."""
+    ordered: list[UUID] = []
+    for root_id in candidate_root_ids:
+        if root_id not in ordered:
+            ordered.append(root_id)
+    seen_events: set[UUID] = set()
+    for root_id in ordered:
+        event = session.scalar(
+            select(Event).where(Event.resolved_claim_id == root_id)
+        )
+        if event is None:
+            raise FeaturedEventUnresolved(
+                f"Featured-event candidate {root_id} is not an event identity root."
+            )
+        if event.id in seen_events:
+            raise FeaturedEventUnresolved(
+                "Featured-event candidates must be distinct events."
+            )
+        seen_events.add(event.id)
+        event_time = session.scalar(
+            select(EventTime).where(
+                EventTime.event_id == event.id, EventTime.is_primary.is_(True)
+            )
+        )
+        if event_time is None or event_time.start_date != profile_date:
+            raise FeaturedEventUnresolved(
+                f"Featured-event candidate {root_id} does not occur on "
+                f"{profile_date.isoformat()}."
+            )
+    return ordered
+
+
+def record_featured_event_selection(
+    session: Session,
+    *,
+    profile_date: date,
+    candidate_root_ids: Sequence[UUID],
+    chosen_root_id: UUID,
+    reviewer: str,
+    rationale: str,
+) -> EditorialSelection:
+    """Feature exactly one of a date's events, in one transaction, under one lock.
+
+    Takes the *complete* eligible candidate set rather than a single root, because
+    featuring is a choice among candidates: recording only the winner would leave
+    the previous winner selected on its own version counter, and both would read
+    as featured. Every candidate that is not chosen is rejected here, and a root
+    that was selected but has dropped out of the eligible set is rejected too --
+    silently leaving it selected would let a withdrawn event keep the headline.
+
+    Idempotent, and D038-safe: a standing rule cannot displace a human's choice.
+    """
+    lock_key = f"featured-event:{profile_date.isoformat()}"
+    session.execute(
+        select(func.pg_advisory_xact_lock(func.hashtextextended(lock_key, 0)))
+    )
+    candidates = _validated_candidates(
+        session, profile_date=profile_date, candidate_root_ids=candidate_root_ids
+    )
+    if chosen_root_id not in candidates:
+        raise FeaturedEventUnresolved(
+            "The featured event must be one of the eligible candidates."
+        )
+
+    current = _latest_featured_selections(session, profile_date=profile_date)
+    # Only a choice that is still on the ballot binds. D038 protects the decision
+    # a person made among the events they were choosing between; once their pick
+    # is no longer eligible they chose from a set that no longer exists, and
+    # treating it as binding would leave the withdrawn event selected, lock the
+    # rule out of the current candidates, and fail the resolver closed on a date
+    # with perfectly good events to feature.
+    human_choice = next(
+        (
+            root_id
+            for root_id in candidates
+            if (selection := current.get(root_id)) is not None
+            and selection.status == EditorialSelectionStatus.SELECTED.value
+            and is_human_reviewer(selection.reviewed_by)
+        ),
+        None,
+    )
+    if human_choice is not None and not is_human_reviewer(reviewer):
+        # D038: a pass never overrules a human. The rule's default only applies
+        # where no person has chosen.
+        return current[human_choice]
+
+    chosen_row: EditorialSelection | None = None
+    for root_id in candidates:
+        selection = record_editorial_selection(
+            session,
+            profile_date=profile_date,
+            section_key=FEATURED_EVENT_SECTION,
+            resolved_claim_id=root_id,
+            status=(
+                EditorialSelectionStatus.SELECTED
+                if root_id == chosen_root_id
+                else EditorialSelectionStatus.REJECTED
+            ),
+            display_rank=None,
+            rationale=rationale,
+            reviewed_by=reviewer,
+        )
+        if root_id == chosen_root_id:
+            chosen_row = selection
+    for root_id, selection in current.items():
+        if (
+            root_id not in candidates
+            and selection.status == EditorialSelectionStatus.SELECTED.value
+        ):
+            record_editorial_selection(
+                session,
+                profile_date=profile_date,
+                section_key=FEATURED_EVENT_SECTION,
+                resolved_claim_id=root_id,
+                status=EditorialSelectionStatus.REJECTED,
+                display_rank=None,
+                rationale=(
+                    "No longer an eligible featured-event candidate for this date."
+                ),
+                reviewed_by=reviewer,
+            )
+    if chosen_row is None:  # pragma: no cover - guarded by the membership check
+        raise FeaturedEventUnresolved("The featured event was not recorded.")
+    return chosen_row
+
+
+def resolve_featured_event(
+    session: Session,
+    *,
+    profile_date: date,
+    candidate_root_ids: Sequence[UUID],
+) -> UUID | None:
+    """The one event identity root featured on a date, or None when there is none.
+
+    Zero candidates means the date has no recorded event to feature and the
+    caller handles the absence. One candidate is not a choice, so it is returned
+    without requiring -- or manufacturing -- an editorial decision. Beyond that,
+    exactly one current selection is required: zero or several fail closed rather
+    than let query order pick the headline.
+    """
+    candidates: list[UUID] = []
+    for root_id in candidate_root_ids:
+        if root_id not in candidates:
+            candidates.append(root_id)
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        return candidates[0]
+    current = _latest_featured_selections(session, profile_date=profile_date)
+    selected = [
+        root_id
+        for root_id in candidates
+        if (selection := current.get(root_id)) is not None
+        and selection.status == EditorialSelectionStatus.SELECTED.value
+    ]
+    if len(selected) != 1:
+        raise FeaturedEventUnresolved(
+            f"{profile_date.isoformat()} has {len(selected)} featured-event "
+            f"selections among {len(candidates)} candidates; exactly one is required."
+        )
+    return selected[0]
