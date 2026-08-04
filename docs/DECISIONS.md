@@ -1258,8 +1258,13 @@ in place; a governance record that skipped this would be the only mutable one.
 
 A merge-review task records the collision it asked about
 (`review_tasks.context_manifest_id`) rather than naming it only in its rationale
-prose, and `resolve_merge_review` refuses when the date now publishes a
-different recorded event. The comparison is on *events*, not manifest identity:
+prose, and one predicate -- `_task_concerns` -- decides whether a task is about
+the collision at hand. Every path that touches a task routes through it: opening
+reuses only a task about this collision and retires one whose collision has
+moved (otherwise refusing a stale task would leave the candidate in a
+publish/reject loop), and resolving requires a task about this collision,
+counting resolved ones so a *retry* is checked against the same subject rather
+than sailing past the guard because nothing is open. The comparison is on *events*, not manifest identity:
 republishing the same recorded event mints a new manifest, and refusing that
 would strand a reviewer on any date republished for an unrelated reason, while
 comparing events catches the case that matters -- an answer landing on a pair

@@ -39,6 +39,7 @@ from app.governance import (
     IdentityAdjudicationDecision,
     IdentityAdjudicationError,
     ReviewDecisionValue,
+    adjudicated_distinct,
     events_behind_manifest,
     record_claim_review,
     record_editorial_selection,
@@ -167,6 +168,58 @@ def _wikidata_event(session: Session) -> Event:
     )
     assert event is not None
     return event
+
+
+def _republish_with_a_different_event(
+    session: Session,
+    store: LocalFilesystemPublishedProfileStore,
+    *,
+    key: str,
+) -> Event:
+    """Replace the date's recorded event with an unrelated one.
+
+    The situation every merge-review staleness rule is about: the collision a
+    reviewer was asked to judge is no longer the collision the date holds.
+    """
+    stranger = _make_event(session, key=key)
+    occurrence = session.scalar(
+        select(EventTime.provenance_resolved_claim_id).where(
+            EventTime.event_id == stranger.id, EventTime.is_primary.is_(True)
+        )
+    )
+    assert occurrence is not None
+    publish_day_profile(
+        session,
+        store=store,
+        profile_date=GOLDEN_DATE,
+        profile_type=ProfileType.STANDARD_STATISTICAL,
+        payload={
+            "schema_version": "1",
+            "date": GOLDEN_DATE.isoformat(),
+            "profile_type": ProfileType.STANDARD_STATISTICAL.value,
+            "sections": {
+                "recorded_on_this_date": [
+                    {
+                        "statement_id": key,
+                        "statement": "A different recorded event now holds this date.",
+                        "details": {},
+                        "provenance_note": "development fixture",
+                    }
+                ]
+            },
+            "section_states": {"recorded_on_this_date": {"status": "available"}},
+        },
+        statement_evidence=[
+            PublicationStatementEvidenceInput(
+                statement_path="/sections/recorded_on_this_date/0",
+                resolved_claim_id=occurrence,
+            )
+        ],
+        force_new_version=True,
+    )
+    rebuild_coverage_index(session)
+    session.flush()
+    return stranger
 
 
 def _prepare_for_publication(session: Session, tmp_path: Path) -> None:
@@ -945,44 +998,7 @@ def test_adjudication_refuses_when_the_date_now_publishes_a_different_event(
 
     # The date's recorded event is replaced by an unrelated one while the task
     # waits, so the collision the reviewer was asked about is no longer current.
-    stranger = _make_event(session, key="stranger-on-the-golden-date")
-    stranger_occurrence = session.scalar(
-        select(EventTime.provenance_resolved_claim_id).where(
-            EventTime.event_id == stranger.id, EventTime.is_primary.is_(True)
-        )
-    )
-    assert stranger_occurrence is not None
-    publish_day_profile(
-        session,
-        store=store,
-        profile_date=GOLDEN_DATE,
-        profile_type=ProfileType.STANDARD_STATISTICAL,
-        payload={
-            "schema_version": "1",
-            "date": GOLDEN_DATE.isoformat(),
-            "profile_type": ProfileType.STANDARD_STATISTICAL.value,
-            "sections": {
-                "recorded_on_this_date": [
-                    {
-                        "statement_id": "stranger",
-                        "statement": "A different recorded event now holds this date.",
-                        "details": {},
-                        "provenance_note": "development fixture",
-                    }
-                ]
-            },
-            "section_states": {"recorded_on_this_date": {"status": "available"}},
-        },
-        statement_evidence=[
-            PublicationStatementEvidenceInput(
-                statement_path="/sections/recorded_on_this_date/0",
-                resolved_claim_id=stranger_occurrence,
-            )
-        ],
-        force_new_version=True,
-    )
-    rebuild_coverage_index(session)
-    session.flush()
+    _republish_with_a_different_event(session, store, key="stranger")
 
     with pytest.raises(ValueError, match="no longer"):
         resolve_merge_review(
@@ -995,6 +1011,121 @@ def test_adjudication_refuses_when_the_date_now_publishes_a_different_event(
     assert (
         session.scalar(select(func.count()).select_from(EventIdentityAdjudication))
         == 0
+    )
+
+
+@pytest.mark.integration
+def test_a_retry_after_the_collision_changed_is_refused(
+    session: Session, tmp_path: Path
+) -> None:
+    """The retry path must check the subject too, not only the first call.
+
+    Once the first answer closes the task, a later call finds no active task. If
+    that path skips the staleness check, repeating the command after the date
+    has been republished records the same ``distinct_event`` against the *new*
+    pair -- a durable bypass for events nobody evaluated, reached by pressing up
+    and enter.
+    """
+    publish_golden(session, tmp_path)
+    _prepare_for_publication(session, tmp_path)
+    rebuild_coverage_index(session)
+    session.flush()
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+    publish_wikidata_event(session, store=store)
+    resolve_merge_review(
+        session,
+        decision=IdentityAdjudicationDecision.DISTINCT_EVENT,
+        reviewer="test-human",
+        rationale="Two different events that share 1964-03-27.",
+    )
+    session.flush()
+    before = session.scalar(
+        select(func.count()).select_from(EventIdentityAdjudication)
+    )
+
+    stranger = _republish_with_a_different_event(session, store, key="stranger")
+
+    with pytest.raises(ValueError, match="no longer"):
+        resolve_merge_review(
+            session,
+            decision=IdentityAdjudicationDecision.DISTINCT_EVENT,
+            reviewer="test-human",
+            rationale="Two different events that share 1964-03-27.",
+        )
+    assert (
+        session.scalar(select(func.count()).select_from(EventIdentityAdjudication))
+        == before
+    )
+    assert (
+        adjudicated_distinct(
+            session,
+            event_a_id=_wikidata_event(session).id,
+            event_b_id=stranger.id,
+        )
+        is False
+    )
+
+
+@pytest.mark.integration
+def test_a_stale_active_task_is_retired_and_replaced_not_reused(
+    session: Session, tmp_path: Path
+) -> None:
+    """Refusing a stale task must not strand the candidate.
+
+    Reusing an active task whose collision has moved, while resolution refuses
+    it as stale, is a publish/reject loop with no way out but editing the
+    database. The stale task is retired and one for the current collision opened.
+    """
+    publish_golden(session, tmp_path)
+    _prepare_for_publication(session, tmp_path)
+    rebuild_coverage_index(session)
+    session.flush()
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+    first = publish_wikidata_event(session, store=store)
+    assert first.merge_review_task_id is not None
+    # Captured before the stranger exists: it mints its own identity claim, and
+    # the test helper matches claim type across every release.
+    identity = _claim(session, "candidate_event_identity")
+
+    stranger = _republish_with_a_different_event(session, store, key="stranger")
+
+    second = publish_wikidata_event(session, store=store)
+
+    assert second.status == "deferred_to_merge_review"
+    assert second.merge_review_task_id != first.merge_review_task_id
+    stale = session.get(ReviewTask, first.merge_review_task_id)
+    assert stale is not None
+    assert stale.status == "dismissed"
+    assert stale.completed_at is not None
+    fresh = session.get(ReviewTask, second.merge_review_task_id)
+    assert fresh is not None
+    assert fresh.context_manifest_id == second.colliding_manifest_id
+    # Exactly one active task, and the reviewer can now actually answer it.
+    assert (
+        session.scalar(
+            select(func.count())
+            .select_from(ReviewTask)
+            .where(
+                ReviewTask.claim_id == identity.id,
+                ReviewTask.status.in_(("open", "in_progress")),
+            )
+        )
+        == 1
+    )
+    recorded = resolve_merge_review(
+        session,
+        decision=IdentityAdjudicationDecision.DISTINCT_EVENT,
+        reviewer="test-human",
+        rationale="Distinct from the event that now holds the date.",
+    )
+    assert recorded
+    assert (
+        adjudicated_distinct(
+            session,
+            event_a_id=_wikidata_event(session).id,
+            event_b_id=stranger.id,
+        )
+        is True
     )
 
 

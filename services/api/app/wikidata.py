@@ -848,6 +848,45 @@ def _manifest_is_wikidata_event(
     return any(isinstance(key, str) and key.startswith(prefix) for key in keys)
 
 
+def _merge_review_tasks(
+    session: Session, *, identity_claim: Claim, active_only: bool
+) -> list[ReviewTask]:
+    """This candidate's merge-review tasks, newest last."""
+    statement = select(ReviewTask).where(
+        ReviewTask.claim_id == identity_claim.id,
+        ReviewTask.rationale.like("MERGE-REVIEW:%"),
+    )
+    if active_only:
+        # A reviewer who has claimed the task moved it to ``in_progress``;
+        # treating only ``open`` as active would open a second task behind their
+        # back, which is how a queue grows duplicates of the same question.
+        # Every other review-task consumer treats both as active.
+        statement = statement.where(ReviewTask.status.in_(("open", "in_progress")))
+    return list(session.scalars(statement.order_by(ReviewTask.created_at.asc())))
+
+
+def _task_concerns(
+    session: Session, *, task: ReviewTask, colliding_events: set[UUID]
+) -> bool:
+    """Whether a merge-review task is about this exact collision.
+
+    The one rule every path that opens, reuses, or acts on a merge-review task
+    has to agree on: a task asks about one collision, identified by the events
+    behind it. Compared on events rather than manifest identity because
+    republishing the same recorded event mints a new manifest, and treating that
+    as a different question would strand the reviewer.
+
+    A task with no recorded subject cannot be shown to concern anything, so it
+    answers False -- absence is not permission.
+    """
+    if task.context_manifest_id is None:
+        return False
+    asked_about = session.get(PublicationManifest, task.context_manifest_id)
+    if asked_about is None:
+        return False
+    return events_behind_manifest(session, manifest=asked_about) == colliding_events
+
+
 def _ensure_merge_review_task(
     session: Session,
     *,
@@ -855,29 +894,35 @@ def _ensure_merge_review_task(
     qid: str,
     occurrence_date: date,
     colliding_manifest_id: UUID,
+    colliding_events: set[UUID],
 ) -> ReviewTask:
     """Open (or reuse) the durable merge-review task for a recorded-event collision.
 
-    Idempotent via a ``MERGE-REVIEW:`` sentinel on the identity claim, so repeated
-    publish attempts never stack duplicate tasks. The pass records no decision on a
-    human's behalf (D038): the task asks a human to choose merge, supersede, or
-    distinct-event before any competing recorded event is published.
+    Idempotent for the *same* collision, so repeated publish attempts never stack
+    duplicate tasks. A task whose collision has moved on is retired rather than
+    reused: resolution refuses a stale subject, so handing one back on every
+    attempt would leave the candidate in a publish/reject loop with no way out
+    but editing the database.
+
+    The pass records no decision on a human's behalf (D038): the task asks a
+    human to choose merge, supersede, or distinct-event before any competing
+    recorded event is published.
     """
-    existing = session.scalar(
-        select(ReviewTask)
-        .where(
-            ReviewTask.claim_id == identity_claim.id,
-            # A reviewer who has claimed the task moved it to ``in_progress``;
-            # treating only ``open`` as active would open a second task behind
-            # their back, which is how a queue grows duplicates of the same
-            # question. Every other review-task consumer treats both as active.
-            ReviewTask.status.in_(("open", "in_progress")),
-            ReviewTask.rationale.like("MERGE-REVIEW:%"),
+    for existing in _merge_review_tasks(
+        session, identity_claim=identity_claim, active_only=True
+    ):
+        if _task_concerns(
+            session, task=existing, colliding_events=colliding_events
+        ):
+            return existing
+        existing.status = "dismissed"
+        existing.completed_at = datetime.now(UTC)
+        existing.rationale = (
+            f"{existing.rationale} SUPERSEDED: the date now publishes a "
+            "different recorded event, so this question no longer describes the "
+            "collision; a task for the current collision replaces it."
         )
-        .order_by(ReviewTask.created_at.asc())
-    )
-    if existing is not None:
-        return existing
+    session.flush()
     task = ReviewTask(
         claim_id=identity_claim.id,
         # Bind the question to the publication it is about, structurally rather
@@ -999,16 +1044,6 @@ def _collision_adjudication(
     return False, blocking
 
 
-def _linked_review_task_id(
-    session: Session, *, event_a_id: UUID, event_b_id: UUID
-) -> UUID | None:
-    """The review task the current decision for this pair is already linked to."""
-    current = latest_identity_adjudication(
-        session, event_a_id=event_a_id, event_b_id=event_b_id
-    )
-    return None if current is None else current.review_task_id
-
-
 def resolve_merge_review(
     session: Session,
     *,
@@ -1053,43 +1088,38 @@ def resolve_merge_review(
             "canonical event, so the pair cannot be adjudicated."
         )
     identity_claim = _identity_claim(session)
-    task = session.scalar(
-        select(ReviewTask)
-        .where(
-            ReviewTask.claim_id == identity_claim.id,
-            ReviewTask.status.in_(("open", "in_progress")),
-            ReviewTask.rationale.like("MERGE-REVIEW:%"),
+    # The reviewer answers about the pair a task showed them, so a task about
+    # this exact collision has to exist. Resolved tasks count: the first answer
+    # closes the task, and a retry of the same command must be checked against
+    # the same subject rather than sail past the guard because nothing is open.
+    # Otherwise repeating the command after the date was republished records the
+    # same answer against the new pair -- a durable bypass for events nobody
+    # evaluated, reached by pressing up and enter.
+    concerning = [
+        candidate
+        for candidate in _merge_review_tasks(
+            session, identity_claim=identity_claim, active_only=False
         )
-        .order_by(ReviewTask.created_at.asc())
+        if _task_concerns(session, task=candidate, colliding_events=others)
+    ]
+    if not concerning:
+        raise ValueError(
+            "The recorded-event collision on "
+            f"{event_time.start_date.isoformat()} is no longer the one any "
+            "merge-review task was opened for; the date publishes a different "
+            "event, or no review was raised for this collision. Re-run the "
+            "publish attempt to raise the review against the current collision "
+            "rather than record a decision about a pair nobody evaluated."
+        )
+    # Prefer an active task so the answer closes the question that is still open.
+    task = next(
+        (
+            candidate
+            for candidate in concerning
+            if candidate.status in ("open", "in_progress")
+        ),
+        concerning[-1],
     )
-    # The reviewer answers about the pair the task showed them. If the date has
-    # been republished with a *different* recorded event since, resolving against
-    # whatever the coverage index points at now would record a durable identity
-    # decision -- and later a publication bypass -- for events nobody evaluated.
-    #
-    # Compared on events rather than manifest identity: republishing the same
-    # recorded event mints a new manifest, and refusing that would strand the
-    # reviewer on any date that had been republished for an unrelated reason.
-    if task is not None:
-        # An unbound merge-review task is anomalous, not permission: every task
-        # this module opens records what it asked about, so one without that
-        # binding cannot be shown to be about the collision being answered.
-        asked_about = (
-            session.get(PublicationManifest, task.context_manifest_id)
-            if task.context_manifest_id is not None
-            else None
-        )
-        if asked_about is None or events_behind_manifest(
-            session, manifest=asked_about
-        ) != others:
-            raise ValueError(
-                "The recorded-event collision this merge-review task was opened "
-                "for is no longer the one published on "
-                f"{event_time.start_date.isoformat()}; the date now publishes a "
-                "different event. Re-open the review against the current "
-                "collision rather than record a decision about a pair that was "
-                "never evaluated."
-            )
 
     recorded = tuple(
         record_identity_adjudication(
@@ -1100,21 +1130,14 @@ def resolve_merge_review(
             reviewer=reviewer,
             rationale=rationale,
             survivor_event_id=survivor_event_id,
-            # A retry after the first call closed the task finds no active task.
-            # Passing None then would differ from the linkage already recorded
-            # and append a spurious version of an identical decision, so the
-            # existing link is carried forward instead.
-            review_task_id=(
-                task.id
-                if task is not None
-                else _linked_review_task_id(
-                    session, event_a_id=event.id, event_b_id=other_id
-                )
-            ),
+            # Resolving the same collision twice reuses the task that asked, so
+            # a retry reconstructs identical arguments and the writer returns the
+            # existing row instead of appending a version of the same decision.
+            review_task_id=task.id,
         )
         for other_id in sorted(others, key=str)
     )
-    if task is not None:
+    if task.status in ("open", "in_progress"):
         task.status = "resolved"
         task.completed_at = datetime.now(UTC)
     session.flush()
@@ -1402,6 +1425,9 @@ def publish_wikidata_event(
                 qid=qid,
                 occurrence_date=occurrence_date,
                 colliding_manifest_id=collision.id,
+                colliding_events=events_behind_manifest(
+                    session, manifest=collision
+                ),
             )
             return WikidataPublishOutcome(
                 status="deferred_to_merge_review",
