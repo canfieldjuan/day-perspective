@@ -117,9 +117,26 @@ def upgrade() -> None:
         ["event_a_id", "event_b_id", "decision_version"],
         unique=True,
     )
+    # Append-only in the database, not merely in the writer. The unique history
+    # index stops two rows sharing a (pair, version); it does nothing about an
+    # UPDATE that rewrites the latest decision or reviewer in place, or a DELETE
+    # that removes it — and both would silently change what the publication
+    # guard consumes. `prevent_governance_record_mutation` is the same function
+    # already guarding source_release_licenses, claim_review_decisions and
+    # editorial_selections (migration 0008); a governance record that this one
+    # did not use would be the only mutable one.
+    op.execute(
+        "CREATE TRIGGER event_identity_adjudications_append_only "
+        "BEFORE UPDATE OR DELETE ON event_identity_adjudications "
+        "FOR EACH ROW EXECUTE FUNCTION prevent_governance_record_mutation()"
+    )
 
 
 def downgrade() -> None:
+    op.execute(
+        "DROP TRIGGER IF EXISTS event_identity_adjudications_append_only "
+        "ON event_identity_adjudications"
+    )
     op.drop_index(
         "event_identity_adjudication_history",
         table_name="event_identity_adjudications",

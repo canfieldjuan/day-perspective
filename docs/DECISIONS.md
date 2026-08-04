@@ -1248,6 +1248,19 @@ bypass the guard precisely when the collision is least understood. A recorded
 non-permitting decision returns `blocked_by_adjudication` rather than opening
 another review task, ending the duplicate-task treadmill.
 
+The table is append-only *in the database*, not merely in the writer: the
+`event_identity_adjudications_append_only` trigger reuses
+`prevent_governance_record_mutation` (migration 0008), the same function already
+guarding `source_release_licenses`, `claim_review_decisions` and
+`editorial_selections`. The unique history index stops two rows sharing a
+(pair, version) and says nothing about an `UPDATE` rewriting the latest decision
+in place; a governance record that skipped this would be the only mutable one.
+
+`candidate_cli adjudicate` is the operator's half of the workflow. `publish`
+opens the task that asks whether two events are the same event, and without a
+command that answers it the collision defers forever whatever a reviewer decides
+-- the decision would be reachable only from a test.
+
 `is_human_reviewer` moves into `governance` as the one classification rule, by
 prefix rather than by an enumerated identity; `derive_review_status` delegates to
 it. The previous copy named a single rule identity, so each new standing rule

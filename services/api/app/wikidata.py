@@ -867,7 +867,11 @@ def _ensure_merge_review_task(
         select(ReviewTask)
         .where(
             ReviewTask.claim_id == identity_claim.id,
-            ReviewTask.status == "open",
+            # A reviewer who has claimed the task moved it to ``in_progress``;
+            # treating only ``open`` as active would open a second task behind
+            # their back, which is how a queue grows duplicates of the same
+            # question. Every other review-task consumer treats both as active.
+            ReviewTask.status.in_(("open", "in_progress")),
             ReviewTask.rationale.like("MERGE-REVIEW:%"),
         )
         .order_by(ReviewTask.created_at.asc())
@@ -1040,7 +1044,7 @@ def resolve_merge_review(
         select(ReviewTask)
         .where(
             ReviewTask.claim_id == identity_claim.id,
-            ReviewTask.status == "open",
+            ReviewTask.status.in_(("open", "in_progress")),
             ReviewTask.rationale.like("MERGE-REVIEW:%"),
         )
         .order_by(ReviewTask.created_at.asc())

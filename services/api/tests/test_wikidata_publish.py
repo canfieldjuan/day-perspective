@@ -23,6 +23,7 @@ collision.
 from __future__ import annotations
 
 import json
+import sys
 from datetime import date
 from pathlib import Path
 
@@ -35,6 +36,7 @@ from app.coverage import coverage_entry, rebuild_coverage_index
 from app.governance import (
     EditorialSelectionStatus,
     IdentityAdjudicationDecision,
+    IdentityAdjudicationError,
     ReviewDecisionValue,
     events_behind_manifest,
     record_claim_review,
@@ -721,6 +723,160 @@ def test_a_decision_about_another_pair_does_not_unlock_this_collision(
     outcome = publish_wikidata_event(session, store=store)
 
     assert outcome.status == "deferred_to_merge_review"
+
+
+@pytest.mark.integration
+def test_a_claimed_merge_review_task_is_resolved_not_duplicated(
+    session: Session, tmp_path: Path
+) -> None:
+    """A reviewer claiming the task must not fork the workflow.
+
+    Moving a task to ``in_progress`` is how a reviewer says "I am on this". If
+    only ``open`` counts as active, the next publish attempt opens a *second*
+    task asking the same question, and the answer records against neither.
+    """
+    publish_golden(session, tmp_path)
+    _prepare_for_publication(session, tmp_path)
+    rebuild_coverage_index(session)
+    session.flush()
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+    first = publish_wikidata_event(session, store=store)
+    assert first.merge_review_task_id is not None
+
+    claimed = session.get(ReviewTask, first.merge_review_task_id)
+    assert claimed is not None
+    claimed.status = "in_progress"
+    claimed.assigned_to = "test-human"
+    session.flush()
+
+    # A retry while the task is claimed reuses it rather than stacking another.
+    again = publish_wikidata_event(session, store=store)
+    assert again.merge_review_task_id == claimed.id
+    identity = _claim(session, "candidate_event_identity")
+    assert (
+        session.scalar(
+            select(func.count())
+            .select_from(ReviewTask)
+            .where(
+                ReviewTask.claim_id == identity.id,
+                ReviewTask.status.in_(("open", "in_progress")),
+            )
+        )
+        == 1
+    )
+
+    recorded = resolve_merge_review(
+        session,
+        decision=IdentityAdjudicationDecision.DISTINCT_EVENT,
+        reviewer="test-human",
+        rationale="Resolved by the reviewer who claimed the task.",
+    )
+    session.flush()
+
+    # The claimed task is linked to the decision and completed, not orphaned.
+    assert recorded[0].review_task_id == claimed.id
+    session.refresh(claimed)
+    assert claimed.status == "resolved"
+    assert claimed.completed_at is not None
+
+
+@pytest.mark.integration
+def test_the_adjudicate_command_records_the_decision_and_unblocks_publication(
+    session: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The operator-facing half of the workflow.
+
+    `publish` opens a task asking whether two events are the same event; without
+    a command that answers it, the collision defers forever no matter what a
+    reviewer decides, and the decision is reachable only from a test.
+    """
+    from contextlib import nullcontext
+
+    from app import candidate_cli
+
+    publish_golden(session, tmp_path)
+    _prepare_for_publication(session, tmp_path)
+    rebuild_coverage_index(session)
+    session.flush()
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+    assert publish_wikidata_event(session, store=store).status == (
+        "deferred_to_merge_review"
+    )
+
+    class _Settings:
+        published_profile_root = tmp_path / "published"
+        raw_source_root = tmp_path / "raw"
+
+    monkeypatch.setattr(candidate_cli, "SessionLocal", lambda: nullcontext(session))
+    monkeypatch.setattr(candidate_cli, "get_settings", lambda: _Settings())
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "candidate_cli",
+            "adjudicate",
+            "--decision",
+            "distinct_event",
+            "--reviewer",
+            "test-human",
+            "--rationale",
+            "Two different events that share 1964-03-27.",
+        ],
+    )
+
+    candidate_cli.main()
+
+    reported = capsys.readouterr().out
+    assert "decision=distinct_event" in reported
+    assert "adjudication_id=" in reported
+    # And the guard now lets the second event through.
+    assert publish_wikidata_event(session, store=store).status == "published"
+
+
+@pytest.mark.integration
+def test_the_adjudicate_command_refuses_a_standing_rule_reviewer(
+    session: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D038 holds at the operator boundary too, not only inside the writer."""
+    from contextlib import nullcontext
+
+    from app import candidate_cli
+
+    publish_golden(session, tmp_path)
+    _prepare_for_publication(session, tmp_path)
+    rebuild_coverage_index(session)
+    session.flush()
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+    publish_wikidata_event(session, store=store)
+
+    class _Settings:
+        published_profile_root = tmp_path / "published"
+        raw_source_root = tmp_path / "raw"
+
+    monkeypatch.setattr(candidate_cli, "SessionLocal", lambda: nullcontext(session))
+    monkeypatch.setattr(candidate_cli, "get_settings", lambda: _Settings())
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "candidate_cli",
+            "adjudicate",
+            "--decision",
+            "distinct_event",
+            "--reviewer",
+            "standing-rule:featured-event-v1",
+            "--rationale",
+            "A pass must not adjudicate identity.",
+        ],
+    )
+
+    with pytest.raises(IdentityAdjudicationError):
+        candidate_cli.main()
 
 
 @pytest.mark.integration

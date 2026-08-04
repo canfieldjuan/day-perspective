@@ -18,7 +18,8 @@ from datetime import date
 from pathlib import Path
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
+from sqlalchemy.exc import DatabaseError
 from sqlalchemy.orm import Session
 
 from app.governance import (
@@ -274,6 +275,45 @@ def test_a_changed_decision_appends_a_version_and_leaves_history_intact(
     assert first.decision == IdentityAdjudicationDecision.DISTINCT_EVENT.value
     latest = latest_identity_adjudication(session, event_a_id=a.id, event_b_id=b.id)
     assert latest is not None and latest.id == second.id
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    ("label", "statement"),
+    [
+        (
+            "update",
+            "UPDATE event_identity_adjudications SET decision = 'deferred' "
+            "WHERE id = :id",
+        ),
+        ("delete", "DELETE FROM event_identity_adjudications WHERE id = :id"),
+    ],
+)
+def test_a_recorded_adjudication_cannot_be_rewritten_or_removed(
+    session: Session, label: str, statement: str
+) -> None:
+    """Append-only in the database, not merely in the writer.
+
+    The unique history index stops two rows sharing a (pair, version); it says
+    nothing about an UPDATE that rewrites the latest decision in place or a
+    DELETE that removes it, and either would silently change what the
+    publication guard consumes. Both sides are probed because a trigger that
+    catches one and not the other reads exactly like one that catches both.
+    """
+    a = _make_event(session, key="A")
+    b = _make_event(session, key="B")
+    row = _distinct(session, a, b)
+    session.flush()
+
+    with pytest.raises(DatabaseError), session.begin_nested():
+        session.execute(text(statement), {"id": row.id})
+
+    session.refresh(row)
+    assert row.decision == IdentityAdjudicationDecision.DISTINCT_EVENT.value
+    assert (
+        session.scalar(select(func.count()).select_from(EventIdentityAdjudication))
+        == 1
+    )
 
 
 # --------------------------------------------------------------------------
