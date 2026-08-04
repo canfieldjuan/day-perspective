@@ -220,6 +220,54 @@ def test_a_standing_rule_may_choose_where_no_human_has(session: Session) -> None
 
 
 @pytest.mark.integration
+def test_a_withdrawn_human_choice_does_not_block_the_standing_rule(
+    session: Session,
+) -> None:
+    """D038 protects a human's choice among the events they were choosing between.
+
+    Once the event a person picked is no longer eligible, deferring to that pick
+    is not honouring their decision -- they chose from a set that no longer
+    exists. Treating it as binding leaves the withdrawn event selected, so the
+    rule can never choose among the current candidates and the resolver fails
+    closed on a date that has perfectly good events to feature.
+    """
+    a = _make_event(session, key="A")
+    b = _make_event(session, key="B")
+    c = _make_event(session, key="C")
+    root_a, root_b, root_c = (_identity_root(event) for event in (a, b, c))
+    record_featured_event_selection(
+        session,
+        profile_date=PROFILE_DATE,
+        candidate_root_ids=[root_a, root_b],
+        chosen_root_id=root_a,
+        reviewer=HUMAN,
+        rationale="A human featured event A.",
+    )
+
+    # A is withdrawn; the rule runs against the events the date now holds.
+    record_featured_event_selection(
+        session,
+        profile_date=PROFILE_DATE,
+        candidate_root_ids=[root_b, root_c],
+        chosen_root_id=root_b,
+        reviewer=STANDING_FEATURED_EVENT_RULE,
+        rationale="Deterministic default among the current candidates.",
+    )
+
+    stale = _latest_featured(session, root_a)
+    assert stale is not None
+    assert stale.status == EditorialSelectionStatus.REJECTED.value
+    assert (
+        resolve_featured_event(
+            session,
+            profile_date=PROFILE_DATE,
+            candidate_root_ids=[root_b, root_c],
+        )
+        == root_b
+    )
+
+
+@pytest.mark.integration
 def test_a_human_may_override_a_standing_rule_choice(session: Session) -> None:
     a = _make_event(session, key="A")
     b = _make_event(session, key="B")

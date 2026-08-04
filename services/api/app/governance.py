@@ -1022,11 +1022,18 @@ def record_featured_event_selection(
         )
 
     current = _latest_featured_selections(session, profile_date=profile_date)
+    # Only a choice that is still on the ballot binds. D038 protects the decision
+    # a person made among the events they were choosing between; once their pick
+    # is no longer eligible they chose from a set that no longer exists, and
+    # treating it as binding would leave the withdrawn event selected, lock the
+    # rule out of the current candidates, and fail the resolver closed on a date
+    # with perfectly good events to feature.
     human_choice = next(
         (
             root_id
-            for root_id, selection in current.items()
-            if selection.status == EditorialSelectionStatus.SELECTED.value
+            for root_id in candidates
+            if (selection := current.get(root_id)) is not None
+            and selection.status == EditorialSelectionStatus.SELECTED.value
             and is_human_reviewer(selection.reviewed_by)
         ),
         None,
