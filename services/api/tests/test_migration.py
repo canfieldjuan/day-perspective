@@ -268,3 +268,69 @@ def test_the_coverage_index_migration_backfills_an_existing_archive(
     finally:
         command.upgrade(alembic_config, "head")
         engine.dispose()
+
+
+def _constraint_definitions(connection: object, table: str) -> dict[str, str]:
+    return {
+        name: definition
+        for name, definition in connection.execute(  # type: ignore[attr-defined]
+            text(
+                "SELECT conname, pg_get_constraintdef(oid) FROM pg_constraint "
+                "WHERE conrelid = :table ::regclass"
+            ),
+            {"table": table},
+        )
+    }
+
+
+@pytest.mark.integration
+def test_the_identity_adjudication_migration_enforces_its_invariants(
+    migrated_database: str,
+) -> None:
+    """The adjudication's rules are enforced by the database, not only the writer.
+
+    A rule that lives only in the Python writer is one direct INSERT away from
+    being untrue, and this table's entire value is that what it records actually
+    happened and has not been rewritten since.
+    """
+    engine = create_engine(migrated_database)
+    try:
+        inspector = inspect(engine)
+        assert "event_identity_adjudications" in set(inspector.get_table_names())
+        with engine.connect() as connection:
+            definitions = _constraint_definitions(
+                connection, "event_identity_adjudications"
+            )
+
+        # Canonical ordering and the self-pair rejection are the same constraint.
+        assert (
+            "event_a_id < event_b_id"
+            in definitions["event_identity_adjudication_canonical_pair"]
+        )
+        # A survivor is required exactly for the directional outcomes, and must
+        # be a member of the pair.
+        assert "event_identity_adjudication_survivor_required" in definitions
+        assert "event_identity_adjudication_survivor_in_pair" in definitions
+        assert "event_identity_adjudication_reviewer_present" in definitions
+
+        # RESTRICT everywhere: the audit trail behind a decision cannot be
+        # deleted out from under it.
+        foreign_keys = inspector.get_foreign_keys("event_identity_adjudications")
+        assert foreign_keys
+        for foreign_key in foreign_keys:
+            assert (foreign_key["options"] or {}).get("ondelete") == "RESTRICT"
+
+        # Append-only history: one row per (pair, version).
+        indexes = {
+            index["name"]: index
+            for index in inspector.get_indexes("event_identity_adjudications")
+        }
+        history = indexes["event_identity_adjudication_history"]
+        assert history["unique"] is True
+        assert history["column_names"] == [
+            "event_a_id",
+            "event_b_id",
+            "decision_version",
+        ]
+    finally:
+        engine.dispose()

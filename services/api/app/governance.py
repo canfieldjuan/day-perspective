@@ -30,8 +30,13 @@ from app.models import (
     Base,
     Claim,
     ClaimAssertionStatus,
+    Event,
+    EventLocation,
+    EventTime,
     LegalReviewStatus,
     PipelineRun,
+    PublicationManifest,
+    PublicationStatementEvidence,
     QualityCheck,
     ResolvedClaim,
     ResolvedClaimEvidence,
@@ -568,3 +573,345 @@ def assert_release_publication_eligible(
         required_derived <= derived_selections
     ):
         raise ValueError("Publication requires explicit editorial selection for every root.")
+
+
+# ---------------------------------------------------------------------------
+# Event-identity adjudication (Golden 100 / G3a)
+# ---------------------------------------------------------------------------
+
+#: Automated editorial identities share this prefix. A standing rule selects
+#: content by an accountable, recorded policy (D032) -- it is real editorial
+#: provenance, but it is not a person having looked at this date, and must never
+#: be reported as one. Classifying by prefix rather than by an enumerated list
+#: means a standing rule added later cannot pass as a person merely by being
+#: absent from a list somebody forgot to extend.
+AUTOMATED_REVIEWER_PREFIX = "standing-rule:"
+
+#: The published section a recorded event occupies.
+RECORDED_EVENT_SECTION = "recorded_on_this_date"
+
+
+def is_human_reviewer(reviewer: str | None) -> bool:
+    """Whether a decision was recorded by a person.
+
+    The single classification rule, shared by this module and review status.
+    ``derive_review_status`` used to carry its own copy, and two copies of "who
+    counts as a person" is one too many: the flattering direction of drift --
+    reporting a rule's decision as a human's -- is invisible to a reader.
+
+    A blank or whitespace-only identity is not a person.
+    """
+    if reviewer is None:
+        return False
+    identity = reviewer.strip()
+    return bool(identity) and not identity.startswith(AUTOMATED_REVIEWER_PREFIX)
+
+
+class IdentityAdjudicationDecision(str, enum.Enum):
+    """A human's answer to "are these two events the same event?"."""
+
+    DISTINCT_EVENT = "distinct_event"
+    MERGE = "merge"
+    SUPERSEDE = "supersede"
+    DEFERRED = "deferred"
+
+
+#: The decisions that name a surviving event. ``distinct_event`` and ``deferred``
+#: leave both events standing, so a survivor on either is a contradiction.
+_DIRECTIONAL_DECISIONS = frozenset(
+    {IdentityAdjudicationDecision.MERGE, IdentityAdjudicationDecision.SUPERSEDE}
+)
+
+
+class IdentityAdjudicationError(ValueError):
+    """A refused identity adjudication."""
+
+
+class EventIdentityAdjudication(Base):
+    """One versioned human decision about whether two events are the same event.
+
+    Identifies canonical events, never publication manifests: a manifest is a
+    versioned publication artifact, so a decision keyed on one would silently stop
+    applying the moment the date was republished. The pair is stored canonically
+    ordered, which makes the unordered pair unique and rejects self-pairs in the
+    same constraint.
+
+    History is append-only. A reviewer who changes their mind adds a version that
+    supersedes the previous one; nothing rewrites what was decided before, and the
+    foreign keys are ``RESTRICT`` so the audit trail cannot be deleted out from
+    under a published decision.
+    """
+
+    __tablename__ = "event_identity_adjudications"
+
+    id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    event_a_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("events.id", ondelete="RESTRICT")
+    )
+    event_b_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("events.id", ondelete="RESTRICT")
+    )
+    profile_date: Mapped[date] = mapped_column(Date)
+    decision: Mapped[str] = mapped_column(String(16))
+    survivor_event_id: Mapped[UUID | None] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("events.id", ondelete="RESTRICT")
+    )
+    decision_version: Mapped[int] = mapped_column(Integer)
+    supersedes_adjudication_id: Mapped[UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("event_identity_adjudications.id", ondelete="RESTRICT"),
+    )
+    reviewer: Mapped[str] = mapped_column(Text)
+    rationale: Mapped[str] = mapped_column(Text)
+    review_task_id: Mapped[UUID | None] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("review_tasks.id", ondelete="RESTRICT")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow
+    )
+
+    __table_args__ = (
+        # Canonical ordering and the self-pair rejection are the same rule: a pair
+        # is unordered, and an event is not a pair with itself.
+        CheckConstraint(
+            "event_a_id < event_b_id",
+            name="event_identity_adjudication_canonical_pair",
+        ),
+        CheckConstraint(
+            "decision IN ('distinct_event','merge','supersede','deferred')",
+            name="event_identity_adjudication_decision",
+        ),
+        CheckConstraint(
+            "(decision IN ('merge','supersede')) = (survivor_event_id IS NOT NULL)",
+            name="event_identity_adjudication_survivor_required",
+        ),
+        CheckConstraint(
+            "survivor_event_id IS NULL "
+            "OR survivor_event_id IN (event_a_id, event_b_id)",
+            name="event_identity_adjudication_survivor_in_pair",
+        ),
+        CheckConstraint(
+            "btrim(reviewer) <> ''",
+            name="event_identity_adjudication_reviewer_present",
+        ),
+        CheckConstraint(
+            "decision_version >= 1",
+            name="event_identity_adjudication_version",
+        ),
+        Index(
+            "event_identity_adjudication_history",
+            "event_a_id",
+            "event_b_id",
+            "decision_version",
+            unique=True,
+        ),
+    )
+
+
+def _canonical_pair(event_a_id: UUID, event_b_id: UUID) -> tuple[UUID, UUID]:
+    """The pair in the stored order, matching PostgreSQL's uuid comparison.
+
+    Ordering on the raw bytes rather than the rendered string keeps Python and
+    the ``event_a_id < event_b_id`` constraint in agreement.
+    """
+    first, second = sorted((event_a_id, event_b_id), key=lambda value: value.bytes)
+    return first, second
+
+
+def _primary_occurrence_date(session: Session, event_id: UUID) -> date:
+    if session.get(Event, event_id) is None:
+        raise IdentityAdjudicationError(
+            f"Event {event_id} does not exist, so it cannot be adjudicated."
+        )
+    event_time = session.scalar(
+        select(EventTime).where(
+            EventTime.event_id == event_id, EventTime.is_primary.is_(True)
+        )
+    )
+    if event_time is None:
+        raise IdentityAdjudicationError(
+            f"Event {event_id} has no primary occurrence to adjudicate on."
+        )
+    return event_time.start_date
+
+
+def latest_identity_adjudication(
+    session: Session, *, event_a_id: UUID, event_b_id: UUID
+) -> EventIdentityAdjudication | None:
+    """The current decision for a pair, in either argument order."""
+    if event_a_id == event_b_id:
+        return None
+    first, second = _canonical_pair(event_a_id, event_b_id)
+    return session.scalars(
+        select(EventIdentityAdjudication)
+        .where(
+            EventIdentityAdjudication.event_a_id == first,
+            EventIdentityAdjudication.event_b_id == second,
+        )
+        .order_by(EventIdentityAdjudication.decision_version.desc())
+    ).first()
+
+
+def record_identity_adjudication(
+    session: Session,
+    *,
+    event_a_id: UUID,
+    event_b_id: UUID,
+    decision: IdentityAdjudicationDecision,
+    reviewer: str,
+    rationale: str,
+    survivor_event_id: UUID | None = None,
+    review_task_id: UUID | None = None,
+) -> EventIdentityAdjudication:
+    """Record one human decision about whether two events are the same event.
+
+    Human-authored and fail-closed. The date is derived from the two events'
+    own primary occurrences rather than taken from the caller, so an adjudication
+    cannot claim a date neither event happened on. An identical repeated write
+    returns the existing current row; a changed decision appends a version.
+    """
+    if event_a_id == event_b_id:
+        raise IdentityAdjudicationError(
+            "An event cannot be adjudicated against itself."
+        )
+    if not is_human_reviewer(reviewer):
+        raise IdentityAdjudicationError(
+            "Identity adjudication requires a human reviewer; a pass never "
+            "adjudicates on a human's behalf (D038)."
+        )
+    if decision in _DIRECTIONAL_DECISIONS:
+        if survivor_event_id is None:
+            raise IdentityAdjudicationError(
+                f"A {decision.value} decision requires the surviving event."
+            )
+        if survivor_event_id not in {event_a_id, event_b_id}:
+            raise IdentityAdjudicationError(
+                "The surviving event must be one of the adjudicated pair."
+            )
+    elif survivor_event_id is not None:
+        raise IdentityAdjudicationError(
+            f"A {decision.value} decision leaves both events standing and "
+            "cannot name a survivor."
+        )
+
+    first, second = _canonical_pair(event_a_id, event_b_id)
+    first_date = _primary_occurrence_date(session, first)
+    second_date = _primary_occurrence_date(session, second)
+    if first_date != second_date:
+        raise IdentityAdjudicationError(
+            "Only events that occur on the same date can be adjudicated "
+            f"({first_date.isoformat()} vs {second_date.isoformat()})."
+        )
+
+    # Serialize per pair so two reviewers cannot mint the same decision_version
+    # (the writer pattern the rest of this module uses).
+    lock_key = f"identity-adjudication:{first}:{second}"
+    session.execute(
+        select(func.pg_advisory_xact_lock(func.hashtextextended(lock_key, 0)))
+    )
+    current = session.scalars(
+        select(EventIdentityAdjudication)
+        .where(
+            EventIdentityAdjudication.event_a_id == first,
+            EventIdentityAdjudication.event_b_id == second,
+        )
+        .order_by(EventIdentityAdjudication.decision_version.desc())
+    ).first()
+    if current is not None and (
+        current.decision == decision.value
+        and current.survivor_event_id == survivor_event_id
+        and current.reviewer == reviewer
+        and current.rationale == rationale
+        and current.review_task_id == review_task_id
+    ):
+        return current
+    row = EventIdentityAdjudication(
+        event_a_id=first,
+        event_b_id=second,
+        profile_date=first_date,
+        decision=decision.value,
+        survivor_event_id=survivor_event_id,
+        decision_version=1 if current is None else current.decision_version + 1,
+        supersedes_adjudication_id=None if current is None else current.id,
+        reviewer=reviewer,
+        rationale=rationale,
+        review_task_id=review_task_id,
+    )
+    session.add(row)
+    session.flush()
+    return row
+
+
+def adjudicated_distinct(
+    session: Session, *, event_a_id: UUID, event_b_id: UUID
+) -> bool:
+    """Whether a human has ruled this exact pair to be two different events.
+
+    The only condition under which the recorded-event collision guard lets a
+    second event publish on a date. Everything else fails closed: no record, a
+    superseded ``distinct_event``, a ``merge``/``supersede``/``deferred``
+    outcome, a non-human author, or a decision about a different pair.
+    """
+    current = latest_identity_adjudication(
+        session, event_a_id=event_a_id, event_b_id=event_b_id
+    )
+    return (
+        current is not None
+        and current.decision == IdentityAdjudicationDecision.DISTINCT_EVENT.value
+        and is_human_reviewer(current.reviewer)
+    )
+
+
+def events_behind_manifest(
+    session: Session, *, manifest: PublicationManifest
+) -> set[UUID]:
+    """The canonical events a manifest's recorded section actually rests on.
+
+    Derived from the evidence graph rather than a stored manifest-to-event
+    pointer, because an adjudication is about events and a manifest is a
+    versioned artifact: republishing the same event must resolve to the same
+    event, and it does, since the new version carries the same roots.
+
+    Both publishers root a recorded statement on the occurrence resolution that
+    is also the event's primary ``EventTime`` provenance, and the Wikidata
+    publisher refuses to publish without that selection. Identity and location
+    provenance are matched too, so a publisher that roots its statements
+    differently still resolves.
+    """
+    roots = set(
+        session.scalars(
+            select(PublicationStatementEvidence.resolved_claim_id).where(
+                PublicationStatementEvidence.publication_manifest_id == manifest.id,
+                # autoescape, because every underscore in a LIKE pattern is a
+                # single-character wildcard: without it `recorded_on_this_date`
+                # also matches a section named `recordedXonYthisZdate`, and a
+                # lookalike section would resolve to a recorded event.
+                PublicationStatementEvidence.statement_path.startswith(
+                    f"/sections/{RECORDED_EVENT_SECTION}/", autoescape=True
+                ),
+                PublicationStatementEvidence.resolved_claim_id.is_not(None),
+            )
+        )
+    )
+    if not roots:
+        return set()
+    found: set[UUID] = set(
+        session.scalars(select(Event.id).where(Event.resolved_claim_id.in_(roots)))
+    )
+    found |= set(
+        session.scalars(
+            select(EventTime.event_id).where(
+                EventTime.provenance_resolved_claim_id.in_(roots)
+            )
+        )
+    )
+    found |= set(
+        session.scalars(
+            select(EventLocation.event_id).where(
+                EventLocation.provenance_resolved_claim_id.in_(roots)
+            )
+        )
+    )
+    return found

@@ -21,8 +21,14 @@ from app.coverage import published_recorded_event_on
 from app.governance import (
     EditorialSelection,
     EditorialSelectionStatus,
+    EventIdentityAdjudication,
+    IdentityAdjudicationDecision,
     LicenseInput,
     assert_release_publication_eligible,
+    events_behind_manifest,
+    is_human_reviewer,
+    latest_identity_adjudication,
+    record_identity_adjudication,
     register_release_license,
 )
 from app.models import (
@@ -780,10 +786,14 @@ class WikidataPublishOutcome:
 
     ``published`` means the resolved candidate was published as the date's recorded
     event (``manifest_id`` / ``day_profile_id`` set). ``deferred_to_merge_review``
-    means the occurrence date already publishes a recorded event, so the pass
-    published nothing and opened (or reused) a durable merge-review task
-    (``merge_review_task_id`` / ``colliding_manifest_id`` set) for a human to decide
-    merge, supersede, or distinct-event.
+    means the occurrence date already publishes a recorded event and nobody has
+    adjudicated the pair yet, so the pass published nothing and opened (or reused)
+    a durable merge-review task (``merge_review_task_id`` /
+    ``colliding_manifest_id`` set) for a human to decide merge, supersede, or
+    distinct-event. ``blocked_by_adjudication`` means a human has already decided,
+    and their decision was not ``distinct_event``: the collision stands, and
+    ``adjudication_id`` points at the decision that says so rather than asking the
+    same question again with a fresh review task.
     """
 
     status: str
@@ -792,6 +802,7 @@ class WikidataPublishOutcome:
     day_profile_id: UUID | None = None
     colliding_manifest_id: UUID | None = None
     merge_review_task_id: UUID | None = None
+    adjudication_id: UUID | None = None
 
 
 #: The reviewed predicates that become recorded-event statements, each paired with
@@ -877,6 +888,181 @@ def _ensure_merge_review_task(
     session.add(task)
     session.flush()
     return task
+
+
+def _latest_release(session: Session) -> SourceRelease:
+    source = session.scalar(
+        select(Source).where(Source.slug == WIKIDATA_SOURCE_SLUG)
+    )
+    release = (
+        session.scalars(
+            select(SourceRelease)
+            .where(SourceRelease.source_id == source.id)
+            .order_by(SourceRelease.ingested_at.desc())
+        ).first()
+        if source is not None
+        else None
+    )
+    if release is None:
+        raise ValueError("Wikidata candidate has not been ingested.")
+    return release
+
+
+def _identity_claim(session: Session) -> Claim:
+    release = _latest_release(session)
+    claim = session.scalar(
+        select(Claim).where(
+            Claim.source_release_id == release.id,
+            Claim.claim_type == "candidate_event_identity",
+        )
+    )
+    if claim is None:
+        raise ValueError("Wikidata candidate is missing candidate_event_identity.")
+    return claim
+
+
+def _resolved_entity(session: Session) -> tuple[str, Event | None]:
+    """The candidate's entity id and its resolved Event, when one exists yet."""
+    qid = _candidate_value(_identity_claim(session)).get("entity_id")
+    if not isinstance(qid, str):
+        raise ValueError("Wikidata identity candidate has no entity id.")
+    identity_resolved = _latest_resolved(
+        session, qid=qid, predicate="candidate_event_identity"
+    )
+    event = (
+        session.scalar(
+            select(Event).where(Event.resolved_claim_id == identity_resolved.id)
+        )
+        if identity_resolved is not None
+        else None
+    )
+    return qid, event
+
+
+def _collision_adjudication(
+    session: Session, *, event: Event | None, manifest: PublicationManifest
+) -> tuple[bool, EventIdentityAdjudication | None]:
+    """Whether this event may publish past a colliding manifest, and what says so.
+
+    Returns ``(bypass, blocking_decision)``. A bypass requires a *current human*
+    ``distinct_event`` decision against every event the colliding manifest
+    publishes: one unadjudicated event on that manifest is enough to keep
+    deferring, so a decision about one pair never becomes blanket permission for
+    the date.
+
+    Fail-closed in both directions that matter. An unresolved candidate has no
+    event to adjudicate, and a manifest whose events cannot be resolved from its
+    evidence yields no decisions at all -- which would make "every event is
+    adjudicated distinct" vacuously true over an empty set, and bypass the guard
+    precisely when the collision is least understood.
+    """
+    if event is None:
+        return False, None
+    others = events_behind_manifest(session, manifest=manifest)
+    if not others:
+        return False, None
+    decisions = [
+        latest_identity_adjudication(
+            session, event_a_id=event.id, event_b_id=other_id
+        )
+        for other_id in sorted(others, key=str)
+    ]
+
+    def _permits(decision: EventIdentityAdjudication | None) -> bool:
+        return (
+            decision is not None
+            and decision.decision
+            == IdentityAdjudicationDecision.DISTINCT_EVENT.value
+            and is_human_reviewer(decision.reviewer)
+        )
+
+    if all(_permits(decision) for decision in decisions):
+        return True, None
+    # A recorded decision that does not permit publication is an answer, not an
+    # open question: surface it instead of opening another review task asking a
+    # human what they already told us.
+    blocking = next(
+        (
+            decision
+            for decision in decisions
+            if decision is not None and not _permits(decision)
+        ),
+        None,
+    )
+    return False, blocking
+
+
+def resolve_merge_review(
+    session: Session,
+    *,
+    decision: IdentityAdjudicationDecision,
+    reviewer: str,
+    rationale: str,
+    survivor_event_id: UUID | None = None,
+) -> tuple[EventIdentityAdjudication, ...]:
+    """Record a human's merge-review answer as the durable decision, and close it.
+
+    This is what the ``MERGE-REVIEW:`` review task is *for*. Closing that task
+    used to be the whole workflow, which meant the answer went nowhere: the guard
+    could not read it, so the next publish attempt collided and opened the task
+    again. Resolving through here writes the pair-specific adjudication the guard
+    consumes, links it to the task that asked, and then marks the task resolved.
+    """
+    qid, event = _resolved_entity(session)
+    if event is None:
+        raise ValueError(
+            "The Wikidata candidate must be resolved into an event before its "
+            "identity can be adjudicated."
+        )
+    event_time = session.scalar(
+        select(EventTime).where(
+            EventTime.event_id == event.id, EventTime.is_primary.is_(True)
+        )
+    )
+    if event_time is None:
+        raise ValueError("The resolved event has no primary occurrence time.")
+    collision = published_recorded_event_on(session, event_time.start_date)
+    if collision is None or _manifest_is_wikidata_event(
+        session, manifest=collision, qid=qid
+    ):
+        raise ValueError(
+            "There is no recorded-event collision on "
+            f"{event_time.start_date.isoformat()} to adjudicate."
+        )
+    others = events_behind_manifest(session, manifest=collision)
+    if not others:
+        raise ValueError(
+            "The colliding manifest's recorded event cannot be resolved to a "
+            "canonical event, so the pair cannot be adjudicated."
+        )
+    identity_claim = _identity_claim(session)
+    task = session.scalar(
+        select(ReviewTask)
+        .where(
+            ReviewTask.claim_id == identity_claim.id,
+            ReviewTask.status == "open",
+            ReviewTask.rationale.like("MERGE-REVIEW:%"),
+        )
+        .order_by(ReviewTask.created_at.asc())
+    )
+    recorded = tuple(
+        record_identity_adjudication(
+            session,
+            event_a_id=event.id,
+            event_b_id=other_id,
+            decision=decision,
+            reviewer=reviewer,
+            rationale=rationale,
+            survivor_event_id=survivor_event_id,
+            review_task_id=None if task is None else task.id,
+        )
+        for other_id in sorted(others, key=str)
+    )
+    if task is not None:
+        task.status = "resolved"
+        task.completed_at = datetime.now(UTC)
+    session.flush()
+    return recorded
 
 
 def _wikidata_statement_provenance(
@@ -1140,19 +1326,33 @@ def publish_wikidata_event(
     if collision is not None and not _manifest_is_wikidata_event(
         session, manifest=collision, qid=qid
     ):
-        task = _ensure_merge_review_task(
-            session,
-            identity_claim=claims["candidate_event_identity"],
-            qid=qid,
-            occurrence_date=occurrence_date,
-            colliding_manifest_id=collision.id,
+        # A human may have already ruled that these are two different events that
+        # happen to share a date. That decision -- pair-specific, current, and
+        # theirs -- is the only thing that lets a second recorded event publish.
+        bypass, blocking = _collision_adjudication(
+            session, event=event, manifest=collision
         )
-        return WikidataPublishOutcome(
-            status="deferred_to_merge_review",
-            occurrence_date=occurrence_date,
-            colliding_manifest_id=collision.id,
-            merge_review_task_id=task.id,
-        )
+        if not bypass:
+            if blocking is not None:
+                return WikidataPublishOutcome(
+                    status="blocked_by_adjudication",
+                    occurrence_date=occurrence_date,
+                    colliding_manifest_id=collision.id,
+                    adjudication_id=blocking.id,
+                )
+            task = _ensure_merge_review_task(
+                session,
+                identity_claim=claims["candidate_event_identity"],
+                qid=qid,
+                occurrence_date=occurrence_date,
+                colliding_manifest_id=collision.id,
+            )
+            return WikidataPublishOutcome(
+                status="deferred_to_merge_review",
+                occurrence_date=occurrence_date,
+                colliding_manifest_id=collision.id,
+                merge_review_task_id=task.id,
+            )
 
     # Publication requires the resolved event (G2a).
     if event is None or identity_resolved is None or resolved_occurrence is None:

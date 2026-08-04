@@ -34,9 +34,12 @@ from app.adapters.base import LocalFilesystemRawSourceStore
 from app.coverage import coverage_entry, rebuild_coverage_index
 from app.governance import (
     EditorialSelectionStatus,
+    IdentityAdjudicationDecision,
     ReviewDecisionValue,
+    events_behind_manifest,
     record_claim_review,
     record_editorial_selection,
+    record_identity_adjudication,
 )
 from app.models import (
     Claim,
@@ -61,11 +64,14 @@ from app.services import (
 )
 from app.wikidata import (
     ENTITY_ID,
+    _collision_adjudication,
     ingest_wikidata_candidate,
     publish_wikidata_event,
+    resolve_merge_review,
     resolve_wikidata_event,
 )
 
+from .test_identity_adjudication import _make_event
 from .test_usgs_vertical_slice import publish as publish_golden
 
 GOLDEN_DATE = date(1964, 3, 27)
@@ -145,6 +151,17 @@ def _editorial_rank(session: Session, profile_date: date) -> None:
             rationale="Human editorial ranking of the reviewed Wikidata candidate.",
             reviewed_by="test-human",
         )
+
+
+def _wikidata_event(session: Session) -> Event:
+    """The canonical Event the Wikidata candidate resolved into."""
+    identity = _resolved(session, "candidate_event_identity")
+    assert identity is not None
+    event = session.scalar(
+        select(Event).where(Event.resolved_claim_id == identity.id)
+    )
+    assert event is not None
+    return event
 
 
 def _prepare_for_publication(session: Session, tmp_path: Path) -> None:
@@ -630,3 +647,145 @@ def test_publish_checks_collision_on_the_resolved_date_not_the_reingested_candid
     )
     assert golden_after is not None
     assert golden_after.content_hash == hash_before
+
+
+@pytest.mark.integration
+def test_a_human_distinct_event_decision_lets_publication_pass_the_collision(
+    session: Session, tmp_path: Path
+) -> None:
+    """The whole point of the adjudication: the human's answer reaches the guard.
+
+    Before this slice the merge-review task could be closed and nothing changed --
+    the next attempt collided and deferred again, because the guard had no record
+    to read.
+    """
+    publish_golden(session, tmp_path)
+    _prepare_for_publication(session, tmp_path)
+    rebuild_coverage_index(session)
+    session.flush()
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+
+    deferred = publish_wikidata_event(session, store=store)
+    assert deferred.status == "deferred_to_merge_review"
+
+    resolve_merge_review(
+        session,
+        decision=IdentityAdjudicationDecision.DISTINCT_EVENT,
+        reviewer="test-human",
+        rationale="Two different events that share 1964-03-27.",
+    )
+    session.flush()
+
+    published = publish_wikidata_event(session, store=store)
+
+    assert published.status == "published"
+    assert published.occurrence_date == GOLDEN_DATE
+    assert published.manifest_id is not None
+    # The task that asked the question is closed, and the answer is durable.
+    identity = _claim(session, "candidate_event_identity")
+    assert (
+        session.scalar(
+            select(func.count())
+            .select_from(ReviewTask)
+            .where(
+                ReviewTask.claim_id == identity.id,
+                ReviewTask.status == "open",
+            )
+        )
+        == 0
+    )
+
+
+@pytest.mark.integration
+def test_a_decision_about_another_pair_does_not_unlock_this_collision(
+    session: Session, tmp_path: Path
+) -> None:
+    """Pair-specific: adjudicating against some other event is not permission."""
+    publish_golden(session, tmp_path)
+    _prepare_for_publication(session, tmp_path)
+    rebuild_coverage_index(session)
+    session.flush()
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+    unrelated = _make_event(session, key="unrelated-on-the-golden-date")
+
+    record_identity_adjudication(
+        session,
+        event_a_id=_wikidata_event(session).id,
+        event_b_id=unrelated.id,
+        decision=IdentityAdjudicationDecision.DISTINCT_EVENT,
+        reviewer="test-human",
+        rationale="Distinct from an event that is not the one colliding.",
+    )
+    session.flush()
+
+    outcome = publish_wikidata_event(session, store=store)
+
+    assert outcome.status == "deferred_to_merge_review"
+
+
+@pytest.mark.integration
+def test_a_collision_with_no_resolvable_event_does_not_bypass(
+    session: Session, tmp_path: Path
+) -> None:
+    """Fail closed when the colliding manifest resolves to no canonical event.
+
+    ``all()`` over an empty set is True, so an unresolvable collision would
+    otherwise read as "every colliding event was adjudicated distinct" and bypass
+    the guard exactly where the collision is least understood.
+
+    The fixture also pins the section filter: this manifest *does* cite the
+    occurrence root as evidence, but in the annual-context section, and a context
+    statement is not a recorded event.
+    """
+    _prepare_for_publication(session, tmp_path)
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+    context = _publish_prior_context(session, store)
+    manifest = session.get(PublicationManifest, context.publication_manifest_id)
+    assert manifest is not None
+
+    assert events_behind_manifest(session, manifest=manifest) == set()
+    assert _collision_adjudication(
+        session, event=_wikidata_event(session), manifest=manifest
+    ) == (False, None)
+
+
+@pytest.mark.integration
+def test_a_non_distinct_decision_blocks_without_reopening_the_task(
+    session: Session, tmp_path: Path
+) -> None:
+    """A recorded answer is an answer, not a reason to ask again.
+
+    Reopening the task on every retry is the duplicate-task treadmill the durable
+    record exists to end.
+    """
+    publish_golden(session, tmp_path)
+    _prepare_for_publication(session, tmp_path)
+    rebuild_coverage_index(session)
+    session.flush()
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+    publish_wikidata_event(session, store=store)
+
+    recorded = resolve_merge_review(
+        session,
+        decision=IdentityAdjudicationDecision.DEFERRED,
+        reviewer="test-human",
+        rationale="Not settled yet; needs more evidence.",
+    )
+    session.flush()
+
+    outcome = publish_wikidata_event(session, store=store)
+
+    assert outcome.status == "blocked_by_adjudication"
+    assert outcome.adjudication_id == recorded[0].id
+    identity = _claim(session, "candidate_event_identity")
+    assert (
+        session.scalar(
+            select(func.count())
+            .select_from(ReviewTask)
+            .where(
+                ReviewTask.claim_id == identity.id,
+                ReviewTask.status == "open",
+            )
+        )
+        == 0
+    )

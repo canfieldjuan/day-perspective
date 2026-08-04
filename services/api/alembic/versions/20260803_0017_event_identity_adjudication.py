@@ -1,0 +1,127 @@
+"""Durable event-identity adjudication (epic #71, G3a).
+
+A recorded-event collision opened a review task asking a human to choose merge,
+supersede, or distinct-event, and had nowhere to put the answer. The collision
+guard could not read "these two are distinct", so closing the task changed
+nothing: the next publish attempt collided and deferred again.
+
+This table is that answer. It identifies canonical events rather than publication
+manifests, because a manifest is a versioned artifact — a decision keyed on one
+would stop applying the moment the date was republished, which is precisely when
+it still needs to hold.
+
+The pair is stored canonically ordered (`event_a_id < event_b_id`), so the
+unordered pair is unique and a self-pair is rejected by the same constraint.
+History is append-only: a changed decision adds a version that supersedes the
+previous one, and every foreign key is RESTRICT so the audit trail behind a
+published decision cannot be deleted.
+"""
+
+from __future__ import annotations
+
+import sqlalchemy as sa
+
+from alembic import op
+
+revision = "20260803_0017"
+down_revision = "20260727_0016"
+branch_labels = None
+depends_on = None
+
+
+def upgrade() -> None:
+    op.create_table(
+        "event_identity_adjudications",
+        sa.Column(
+            "id",
+            sa.dialects.postgresql.UUID(as_uuid=True),
+            primary_key=True,
+            nullable=False,
+        ),
+        sa.Column(
+            "event_a_id",
+            sa.dialects.postgresql.UUID(as_uuid=True),
+            sa.ForeignKey("events.id", ondelete="RESTRICT"),
+            nullable=False,
+        ),
+        sa.Column(
+            "event_b_id",
+            sa.dialects.postgresql.UUID(as_uuid=True),
+            sa.ForeignKey("events.id", ondelete="RESTRICT"),
+            nullable=False,
+        ),
+        sa.Column("profile_date", sa.Date(), nullable=False),
+        sa.Column("decision", sa.String(length=16), nullable=False),
+        sa.Column(
+            "survivor_event_id",
+            sa.dialects.postgresql.UUID(as_uuid=True),
+            sa.ForeignKey("events.id", ondelete="RESTRICT"),
+            nullable=True,
+        ),
+        sa.Column("decision_version", sa.Integer(), nullable=False),
+        sa.Column(
+            "supersedes_adjudication_id",
+            sa.dialects.postgresql.UUID(as_uuid=True),
+            sa.ForeignKey("event_identity_adjudications.id", ondelete="RESTRICT"),
+            nullable=True,
+        ),
+        sa.Column("reviewer", sa.Text(), nullable=False),
+        sa.Column("rationale", sa.Text(), nullable=False),
+        sa.Column(
+            "review_task_id",
+            sa.dialects.postgresql.UUID(as_uuid=True),
+            sa.ForeignKey("review_tasks.id", ondelete="RESTRICT"),
+            nullable=True,
+        ),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.func.now(),
+            nullable=False,
+        ),
+        # Canonical ordering and the self-pair rejection are the same rule: a
+        # pair is unordered, and an event is not a pair with itself.
+        sa.CheckConstraint(
+            "event_a_id < event_b_id",
+            name="event_identity_adjudication_canonical_pair",
+        ),
+        sa.CheckConstraint(
+            "decision IN ('distinct_event','merge','supersede','deferred')",
+            name="event_identity_adjudication_decision",
+        ),
+        # merge and supersede name a survivor; distinct_event and deferred leave
+        # both events standing, so a survivor on either is a contradiction.
+        sa.CheckConstraint(
+            "(decision IN ('merge','supersede')) = (survivor_event_id IS NOT NULL)",
+            name="event_identity_adjudication_survivor_required",
+        ),
+        sa.CheckConstraint(
+            "survivor_event_id IS NULL "
+            "OR survivor_event_id IN (event_a_id, event_b_id)",
+            name="event_identity_adjudication_survivor_in_pair",
+        ),
+        # A blank reviewer is not a person, and this record's whole value is that
+        # a person decided.
+        sa.CheckConstraint(
+            "btrim(reviewer) <> ''",
+            name="event_identity_adjudication_reviewer_present",
+        ),
+        sa.CheckConstraint(
+            "decision_version >= 1",
+            name="event_identity_adjudication_version",
+        ),
+    )
+    op.create_index(
+        "event_identity_adjudication_history",
+        "event_identity_adjudications",
+        ["event_a_id", "event_b_id", "decision_version"],
+        unique=True,
+    )
+
+
+def downgrade() -> None:
+    op.drop_index(
+        "event_identity_adjudication_history",
+        table_name="event_identity_adjudications",
+    )
+    op.drop_table("event_identity_adjudications")
