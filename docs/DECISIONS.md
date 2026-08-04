@@ -1256,6 +1256,16 @@ guarding `source_release_licenses`, `claim_review_decisions` and
 (pair, version) and says nothing about an `UPDATE` rewriting the latest decision
 in place; a governance record that skipped this would be the only mutable one.
 
+A merge-review task records the collision it asked about
+(`review_tasks.context_manifest_id`) rather than naming it only in its rationale
+prose, and `resolve_merge_review` refuses when the date now publishes a
+different recorded event. The comparison is on *events*, not manifest identity:
+republishing the same recorded event mints a new manifest, and refusing that
+would strand a reviewer on any date republished for an unrelated reason, while
+comparing events catches the case that matters -- an answer landing on a pair
+nobody evaluated. A task with no recorded subject is refused rather than
+defaulted to the current collision.
+
 `candidate_cli adjudicate` is the operator's half of the workflow. `publish`
 opens the task that asks whether two events are the same event, and without a
 command that answers it the collision defers forever whatever a reviewer decides

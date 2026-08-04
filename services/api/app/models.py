@@ -845,6 +845,13 @@ class ReviewTask(Base):
     resolved_claim_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("resolved_claims.id", ondelete="RESTRICT")
     )
+    #: The publication this task was opened about, when it is about one. A
+    #: merge-review task asks a human about a specific collision; without this
+    #: the subject lives only in the rationale prose, so a republication would
+    #: silently move the question the reviewer is answering.
+    context_manifest_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("publication_manifests.id", ondelete="RESTRICT")
+    )
     status: Mapped[str] = mapped_column(String(32))
     priority: Mapped[str] = mapped_column(String(32))
     rationale: Mapped[str] = mapped_column(Text)

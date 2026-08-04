@@ -131,8 +131,24 @@ def upgrade() -> None:
         "FOR EACH ROW EXECUTE FUNCTION prevent_governance_record_mutation()"
     )
 
+    # A merge-review task asks a human about one specific collision. Until now
+    # that subject existed only inside the task's rationale prose, so if the
+    # date were republished while the task waited, the answer would be recorded
+    # against whatever the coverage index pointed at by then — a durable
+    # identity decision about events the reviewer never evaluated.
+    op.add_column(
+        "review_tasks",
+        sa.Column(
+            "context_manifest_id",
+            sa.dialects.postgresql.UUID(as_uuid=True),
+            sa.ForeignKey("publication_manifests.id", ondelete="RESTRICT"),
+            nullable=True,
+        ),
+    )
+
 
 def downgrade() -> None:
+    op.drop_column("review_tasks", "context_manifest_id")
     op.execute(
         "DROP TRIGGER IF EXISTS event_identity_adjudications_append_only "
         "ON event_identity_adjudications"

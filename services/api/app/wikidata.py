@@ -880,6 +880,9 @@ def _ensure_merge_review_task(
         return existing
     task = ReviewTask(
         claim_id=identity_claim.id,
+        # Bind the question to the publication it is about, structurally rather
+        # than in prose, so the answer cannot land on a different collision.
+        context_manifest_id=colliding_manifest_id,
         status="open",
         priority="high",
         rationale=(
@@ -996,6 +999,16 @@ def _collision_adjudication(
     return False, blocking
 
 
+def _linked_review_task_id(
+    session: Session, *, event_a_id: UUID, event_b_id: UUID
+) -> UUID | None:
+    """The review task the current decision for this pair is already linked to."""
+    current = latest_identity_adjudication(
+        session, event_a_id=event_a_id, event_b_id=event_b_id
+    )
+    return None if current is None else current.review_task_id
+
+
 def resolve_merge_review(
     session: Session,
     *,
@@ -1049,6 +1062,35 @@ def resolve_merge_review(
         )
         .order_by(ReviewTask.created_at.asc())
     )
+    # The reviewer answers about the pair the task showed them. If the date has
+    # been republished with a *different* recorded event since, resolving against
+    # whatever the coverage index points at now would record a durable identity
+    # decision -- and later a publication bypass -- for events nobody evaluated.
+    #
+    # Compared on events rather than manifest identity: republishing the same
+    # recorded event mints a new manifest, and refusing that would strand the
+    # reviewer on any date that had been republished for an unrelated reason.
+    if task is not None:
+        # An unbound merge-review task is anomalous, not permission: every task
+        # this module opens records what it asked about, so one without that
+        # binding cannot be shown to be about the collision being answered.
+        asked_about = (
+            session.get(PublicationManifest, task.context_manifest_id)
+            if task.context_manifest_id is not None
+            else None
+        )
+        if asked_about is None or events_behind_manifest(
+            session, manifest=asked_about
+        ) != others:
+            raise ValueError(
+                "The recorded-event collision this merge-review task was opened "
+                "for is no longer the one published on "
+                f"{event_time.start_date.isoformat()}; the date now publishes a "
+                "different event. Re-open the review against the current "
+                "collision rather than record a decision about a pair that was "
+                "never evaluated."
+            )
+
     recorded = tuple(
         record_identity_adjudication(
             session,
@@ -1058,7 +1100,17 @@ def resolve_merge_review(
             reviewer=reviewer,
             rationale=rationale,
             survivor_event_id=survivor_event_id,
-            review_task_id=None if task is None else task.id,
+            # A retry after the first call closed the task finds no active task.
+            # Passing None then would differ from the linkage already recorded
+            # and append a spurious version of an identical decision, so the
+            # existing link is carried forward instead.
+            review_task_id=(
+                task.id
+                if task is not None
+                else _linked_review_task_id(
+                    session, event_a_id=event.id, event_b_id=other_id
+                )
+            ),
         )
         for other_id in sorted(others, key=str)
     )
