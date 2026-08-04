@@ -21,7 +21,11 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.adapters.base import LocalFilesystemRawSourceStore
-from app.governance import EditorialSelectionStatus, record_editorial_selection
+from app.governance import (
+    EditorialSelectionStatus,
+    is_human_reviewer,
+    record_editorial_selection,
+)
 from app.models import (
     PublicationManifest,
     PublicationStatementEvidence,
@@ -29,7 +33,6 @@ from app.models import (
     ReviewStatus,
 )
 from app.profile_metadata import (
-    STANDING_RULE_REVIEWER,
     derive_profile_metadata,
     derive_quality_floor,
     derive_review_status,
@@ -153,7 +156,11 @@ def test_the_standing_rule_is_not_a_human_review(
     status = derive_review_status(session, manifest=published)
 
     assert status is ReviewStatus.AUTOMATED_ONLY
-    assert STANDING_RULE_REVIEWER == "standing-rule:annual-context-v1"
+    # Behaviour, not a literal compared against itself: the classification is
+    # by prefix, so a standing rule added later is non-human by construction
+    # rather than by somebody remembering to list it.
+    assert is_human_reviewer("standing-rule:annual-context-v1") is False
+    assert is_human_reviewer("standing-rule:featured-event-v1") is False
 
 
 @pytest.mark.integration

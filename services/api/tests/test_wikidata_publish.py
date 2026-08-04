@@ -23,6 +23,7 @@ collision.
 from __future__ import annotations
 
 import json
+import sys
 from datetime import date
 from pathlib import Path
 
@@ -34,18 +35,26 @@ from app.adapters.base import LocalFilesystemRawSourceStore
 from app.coverage import coverage_entry, rebuild_coverage_index
 from app.governance import (
     EditorialSelectionStatus,
+    EventIdentityAdjudication,
+    IdentityAdjudicationDecision,
+    IdentityAdjudicationError,
     ReviewDecisionValue,
+    adjudicated_distinct,
+    events_behind_manifest,
     record_claim_review,
     record_editorial_selection,
+    record_identity_adjudication,
 )
 from app.models import (
     Claim,
     ClaimAssertionStatus,
     DayProfile,
     Event,
+    EventTime,
     LegalReviewStatus,
     ProfileType,
     PublicationManifest,
+    PublicationStatementEvidence,
     PublicationTier,
     ResolvedClaim,
     ReviewTask,
@@ -61,11 +70,14 @@ from app.services import (
 )
 from app.wikidata import (
     ENTITY_ID,
+    _collision_adjudication,
     ingest_wikidata_candidate,
     publish_wikidata_event,
+    resolve_merge_review,
     resolve_wikidata_event,
 )
 
+from .test_identity_adjudication import _make_event
 from .test_usgs_vertical_slice import publish as publish_golden
 
 GOLDEN_DATE = date(1964, 3, 27)
@@ -145,6 +157,69 @@ def _editorial_rank(session: Session, profile_date: date) -> None:
             rationale="Human editorial ranking of the reviewed Wikidata candidate.",
             reviewed_by="test-human",
         )
+
+
+def _wikidata_event(session: Session) -> Event:
+    """The canonical Event the Wikidata candidate resolved into."""
+    identity = _resolved(session, "candidate_event_identity")
+    assert identity is not None
+    event = session.scalar(
+        select(Event).where(Event.resolved_claim_id == identity.id)
+    )
+    assert event is not None
+    return event
+
+
+def _republish_with_a_different_event(
+    session: Session,
+    store: LocalFilesystemPublishedProfileStore,
+    *,
+    key: str,
+) -> Event:
+    """Replace the date's recorded event with an unrelated one.
+
+    The situation every merge-review staleness rule is about: the collision a
+    reviewer was asked to judge is no longer the collision the date holds.
+    """
+    stranger = _make_event(session, key=key)
+    occurrence = session.scalar(
+        select(EventTime.provenance_resolved_claim_id).where(
+            EventTime.event_id == stranger.id, EventTime.is_primary.is_(True)
+        )
+    )
+    assert occurrence is not None
+    publish_day_profile(
+        session,
+        store=store,
+        profile_date=GOLDEN_DATE,
+        profile_type=ProfileType.STANDARD_STATISTICAL,
+        payload={
+            "schema_version": "1",
+            "date": GOLDEN_DATE.isoformat(),
+            "profile_type": ProfileType.STANDARD_STATISTICAL.value,
+            "sections": {
+                "recorded_on_this_date": [
+                    {
+                        "statement_id": key,
+                        "statement": "A different recorded event now holds this date.",
+                        "details": {},
+                        "provenance_note": "development fixture",
+                    }
+                ]
+            },
+            "section_states": {"recorded_on_this_date": {"status": "available"}},
+        },
+        statement_evidence=[
+            PublicationStatementEvidenceInput(
+                statement_path="/sections/recorded_on_this_date/0",
+                resolved_claim_id=occurrence,
+            )
+        ],
+        force_new_version=True,
+    )
+    rebuild_coverage_index(session)
+    session.flush()
+    return stranger
 
 
 def _prepare_for_publication(session: Session, tmp_path: Path) -> None:
@@ -630,3 +705,615 @@ def test_publish_checks_collision_on_the_resolved_date_not_the_reingested_candid
     )
     assert golden_after is not None
     assert golden_after.content_hash == hash_before
+
+
+@pytest.mark.integration
+def test_a_human_distinct_event_decision_lets_publication_pass_the_collision(
+    session: Session, tmp_path: Path
+) -> None:
+    """The whole point of the adjudication: the human's answer reaches the guard.
+
+    Before this slice the merge-review task could be closed and nothing changed --
+    the next attempt collided and deferred again, because the guard had no record
+    to read.
+    """
+    publish_golden(session, tmp_path)
+    _prepare_for_publication(session, tmp_path)
+    rebuild_coverage_index(session)
+    session.flush()
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+
+    deferred = publish_wikidata_event(session, store=store)
+    assert deferred.status == "deferred_to_merge_review"
+
+    resolve_merge_review(
+        session,
+        decision=IdentityAdjudicationDecision.DISTINCT_EVENT,
+        reviewer="test-human",
+        rationale="Two different events that share 1964-03-27.",
+    )
+    session.flush()
+
+    published = publish_wikidata_event(session, store=store)
+
+    assert published.status == "published"
+    assert published.occurrence_date == GOLDEN_DATE
+    assert published.manifest_id is not None
+    # The task that asked the question is closed, and the answer is durable.
+    identity = _claim(session, "candidate_event_identity")
+    assert (
+        session.scalar(
+            select(func.count())
+            .select_from(ReviewTask)
+            .where(
+                ReviewTask.claim_id == identity.id,
+                ReviewTask.status == "open",
+            )
+        )
+        == 0
+    )
+
+
+@pytest.mark.integration
+def test_a_decision_about_another_pair_does_not_unlock_this_collision(
+    session: Session, tmp_path: Path
+) -> None:
+    """Pair-specific: adjudicating against some other event is not permission."""
+    publish_golden(session, tmp_path)
+    _prepare_for_publication(session, tmp_path)
+    rebuild_coverage_index(session)
+    session.flush()
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+    unrelated = _make_event(session, key="unrelated-on-the-golden-date")
+
+    record_identity_adjudication(
+        session,
+        event_a_id=_wikidata_event(session).id,
+        event_b_id=unrelated.id,
+        decision=IdentityAdjudicationDecision.DISTINCT_EVENT,
+        reviewer="test-human",
+        rationale="Distinct from an event that is not the one colliding.",
+    )
+    session.flush()
+
+    outcome = publish_wikidata_event(session, store=store)
+
+    assert outcome.status == "deferred_to_merge_review"
+
+
+@pytest.mark.integration
+def test_a_claimed_merge_review_task_is_resolved_not_duplicated(
+    session: Session, tmp_path: Path
+) -> None:
+    """A reviewer claiming the task must not fork the workflow.
+
+    Moving a task to ``in_progress`` is how a reviewer says "I am on this". If
+    only ``open`` counts as active, the next publish attempt opens a *second*
+    task asking the same question, and the answer records against neither.
+    """
+    publish_golden(session, tmp_path)
+    _prepare_for_publication(session, tmp_path)
+    rebuild_coverage_index(session)
+    session.flush()
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+    first = publish_wikidata_event(session, store=store)
+    assert first.merge_review_task_id is not None
+
+    claimed = session.get(ReviewTask, first.merge_review_task_id)
+    assert claimed is not None
+    claimed.status = "in_progress"
+    claimed.assigned_to = "test-human"
+    session.flush()
+
+    # A retry while the task is claimed reuses it rather than stacking another.
+    again = publish_wikidata_event(session, store=store)
+    assert again.merge_review_task_id == claimed.id
+    identity = _claim(session, "candidate_event_identity")
+    assert (
+        session.scalar(
+            select(func.count())
+            .select_from(ReviewTask)
+            .where(
+                ReviewTask.claim_id == identity.id,
+                ReviewTask.status.in_(("open", "in_progress")),
+            )
+        )
+        == 1
+    )
+
+    recorded = resolve_merge_review(
+        session,
+        decision=IdentityAdjudicationDecision.DISTINCT_EVENT,
+        reviewer="test-human",
+        rationale="Resolved by the reviewer who claimed the task.",
+    )
+    session.flush()
+
+    # The claimed task is linked to the decision and completed, not orphaned.
+    assert recorded[0].review_task_id == claimed.id
+    session.refresh(claimed)
+    assert claimed.status == "resolved"
+    assert claimed.completed_at is not None
+
+
+@pytest.mark.integration
+def test_the_adjudicate_command_records_the_decision_and_unblocks_publication(
+    session: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The operator-facing half of the workflow.
+
+    `publish` opens a task asking whether two events are the same event; without
+    a command that answers it, the collision defers forever no matter what a
+    reviewer decides, and the decision is reachable only from a test.
+    """
+    from contextlib import nullcontext
+
+    from app import candidate_cli
+
+    publish_golden(session, tmp_path)
+    _prepare_for_publication(session, tmp_path)
+    rebuild_coverage_index(session)
+    session.flush()
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+    assert publish_wikidata_event(session, store=store).status == (
+        "deferred_to_merge_review"
+    )
+
+    class _Settings:
+        published_profile_root = tmp_path / "published"
+        raw_source_root = tmp_path / "raw"
+
+    monkeypatch.setattr(candidate_cli, "SessionLocal", lambda: nullcontext(session))
+    monkeypatch.setattr(candidate_cli, "get_settings", lambda: _Settings())
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "candidate_cli",
+            "adjudicate",
+            "--decision",
+            "distinct_event",
+            "--reviewer",
+            "test-human",
+            "--rationale",
+            "Two different events that share 1964-03-27.",
+        ],
+    )
+
+    candidate_cli.main()
+
+    reported = capsys.readouterr().out
+    assert "decision=distinct_event" in reported
+    assert "adjudication_id=" in reported
+    # And the guard now lets the second event through.
+    assert publish_wikidata_event(session, store=store).status == "published"
+
+
+@pytest.mark.integration
+def test_the_adjudicate_command_refuses_a_standing_rule_reviewer(
+    session: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D038 holds at the operator boundary too, not only inside the writer."""
+    from contextlib import nullcontext
+
+    from app import candidate_cli
+
+    publish_golden(session, tmp_path)
+    _prepare_for_publication(session, tmp_path)
+    rebuild_coverage_index(session)
+    session.flush()
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+    publish_wikidata_event(session, store=store)
+
+    class _Settings:
+        published_profile_root = tmp_path / "published"
+        raw_source_root = tmp_path / "raw"
+
+    monkeypatch.setattr(candidate_cli, "SessionLocal", lambda: nullcontext(session))
+    monkeypatch.setattr(candidate_cli, "get_settings", lambda: _Settings())
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "candidate_cli",
+            "adjudicate",
+            "--decision",
+            "distinct_event",
+            "--reviewer",
+            "standing-rule:featured-event-v1",
+            "--rationale",
+            "A pass must not adjudicate identity.",
+        ],
+    )
+
+    with pytest.raises(IdentityAdjudicationError):
+        candidate_cli.main()
+
+
+@pytest.mark.integration
+def test_resolving_the_same_merge_review_twice_is_idempotent(
+    session: Session, tmp_path: Path
+) -> None:
+    """A retried answer is the same answer, not a second version of it.
+
+    The first call closes the task, so a naive retry finds no active task,
+    records ``review_task_id=None``, and that difference alone appends a
+    spurious version 2 -- the reviewer, decision and rationale being identical.
+    """
+    publish_golden(session, tmp_path)
+    _prepare_for_publication(session, tmp_path)
+    rebuild_coverage_index(session)
+    session.flush()
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+    publish_wikidata_event(session, store=store)
+
+    first = resolve_merge_review(
+        session,
+        decision=IdentityAdjudicationDecision.DISTINCT_EVENT,
+        reviewer="test-human",
+        rationale="Two different events that share 1964-03-27.",
+    )
+    session.flush()
+    second = resolve_merge_review(
+        session,
+        decision=IdentityAdjudicationDecision.DISTINCT_EVENT,
+        reviewer="test-human",
+        rationale="Two different events that share 1964-03-27.",
+    )
+    session.flush()
+
+    assert [row.id for row in second] == [row.id for row in first]
+    assert all(row.decision_version == 1 for row in second)
+    assert (
+        session.scalar(select(func.count()).select_from(EventIdentityAdjudication))
+        == len(first)
+    )
+    # The linkage to the task that asked is not dropped by the retry.
+    assert all(row.review_task_id is not None for row in second)
+
+
+@pytest.mark.integration
+def test_adjudication_refuses_when_the_date_now_publishes_a_different_event(
+    session: Session, tmp_path: Path
+) -> None:
+    """The reviewer's answer must land on the pair the task actually asked about.
+
+    A merge-review task names one collision. If the date is republished with a
+    *different* recorded event while the task waits, resolving against whatever
+    the coverage index now points at would record a durable identity decision --
+    and later a publication bypass -- for events the reviewer never evaluated.
+    """
+    publish_golden(session, tmp_path)
+    _prepare_for_publication(session, tmp_path)
+    rebuild_coverage_index(session)
+    session.flush()
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+    deferred = publish_wikidata_event(session, store=store)
+    assert deferred.status == "deferred_to_merge_review"
+
+    # The date's recorded event is replaced by an unrelated one while the task
+    # waits, so the collision the reviewer was asked about is no longer current.
+    _republish_with_a_different_event(session, store, key="stranger")
+
+    with pytest.raises(ValueError, match="no longer"):
+        resolve_merge_review(
+            session,
+            decision=IdentityAdjudicationDecision.DISTINCT_EVENT,
+            reviewer="test-human",
+            rationale="Answering a question about a collision that has moved.",
+        )
+    # And nothing durable was recorded for the pair the reviewer never saw.
+    assert (
+        session.scalar(select(func.count()).select_from(EventIdentityAdjudication))
+        == 0
+    )
+
+
+@pytest.mark.integration
+def test_a_retry_after_the_collision_changed_is_refused(
+    session: Session, tmp_path: Path
+) -> None:
+    """The retry path must check the subject too, not only the first call.
+
+    Once the first answer closes the task, a later call finds no active task. If
+    that path skips the staleness check, repeating the command after the date
+    has been republished records the same ``distinct_event`` against the *new*
+    pair -- a durable bypass for events nobody evaluated, reached by pressing up
+    and enter.
+    """
+    publish_golden(session, tmp_path)
+    _prepare_for_publication(session, tmp_path)
+    rebuild_coverage_index(session)
+    session.flush()
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+    publish_wikidata_event(session, store=store)
+    resolve_merge_review(
+        session,
+        decision=IdentityAdjudicationDecision.DISTINCT_EVENT,
+        reviewer="test-human",
+        rationale="Two different events that share 1964-03-27.",
+    )
+    session.flush()
+    before = session.scalar(
+        select(func.count()).select_from(EventIdentityAdjudication)
+    )
+
+    stranger = _republish_with_a_different_event(session, store, key="stranger")
+
+    with pytest.raises(ValueError, match="no longer"):
+        resolve_merge_review(
+            session,
+            decision=IdentityAdjudicationDecision.DISTINCT_EVENT,
+            reviewer="test-human",
+            rationale="Two different events that share 1964-03-27.",
+        )
+    assert (
+        session.scalar(select(func.count()).select_from(EventIdentityAdjudication))
+        == before
+    )
+    assert (
+        adjudicated_distinct(
+            session,
+            event_a_id=_wikidata_event(session).id,
+            event_b_id=stranger.id,
+        )
+        is False
+    )
+
+
+@pytest.mark.integration
+def test_a_stale_active_task_is_retired_and_replaced_not_reused(
+    session: Session, tmp_path: Path
+) -> None:
+    """Refusing a stale task must not strand the candidate.
+
+    Reusing an active task whose collision has moved, while resolution refuses
+    it as stale, is a publish/reject loop with no way out but editing the
+    database. The stale task is retired and one for the current collision opened.
+    """
+    publish_golden(session, tmp_path)
+    _prepare_for_publication(session, tmp_path)
+    rebuild_coverage_index(session)
+    session.flush()
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+    first = publish_wikidata_event(session, store=store)
+    assert first.merge_review_task_id is not None
+    # Captured before the stranger exists: it mints its own identity claim, and
+    # the test helper matches claim type across every release.
+    identity = _claim(session, "candidate_event_identity")
+
+    stranger = _republish_with_a_different_event(session, store, key="stranger")
+
+    second = publish_wikidata_event(session, store=store)
+
+    assert second.status == "deferred_to_merge_review"
+    assert second.merge_review_task_id != first.merge_review_task_id
+    stale = session.get(ReviewTask, first.merge_review_task_id)
+    assert stale is not None
+    assert stale.status == "dismissed"
+    assert stale.completed_at is not None
+    fresh = session.get(ReviewTask, second.merge_review_task_id)
+    assert fresh is not None
+    assert fresh.context_manifest_id == second.colliding_manifest_id
+    # Exactly one active task, and the reviewer can now actually answer it.
+    assert (
+        session.scalar(
+            select(func.count())
+            .select_from(ReviewTask)
+            .where(
+                ReviewTask.claim_id == identity.id,
+                ReviewTask.status.in_(("open", "in_progress")),
+            )
+        )
+        == 1
+    )
+    recorded = resolve_merge_review(
+        session,
+        decision=IdentityAdjudicationDecision.DISTINCT_EVENT,
+        reviewer="test-human",
+        rationale="Distinct from the event that now holds the date.",
+    )
+    assert recorded
+    assert (
+        adjudicated_distinct(
+            session,
+            event_a_id=_wikidata_event(session).id,
+            event_b_id=stranger.id,
+        )
+        is True
+    )
+
+
+@pytest.mark.integration
+def test_a_merge_review_task_with_no_recorded_subject_is_refused(
+    session: Session, tmp_path: Path
+) -> None:
+    """The other side of the staleness guard: absence is not permission.
+
+    Every merge-review task this module opens records the collision it asked
+    about. One without that binding cannot be shown to concern the pair being
+    answered, so it fails closed rather than defaulting to the current
+    collision.
+    """
+    publish_golden(session, tmp_path)
+    _prepare_for_publication(session, tmp_path)
+    rebuild_coverage_index(session)
+    session.flush()
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+    deferred = publish_wikidata_event(session, store=store)
+    assert deferred.merge_review_task_id is not None
+
+    task = session.get(ReviewTask, deferred.merge_review_task_id)
+    assert task is not None
+    assert task.context_manifest_id == deferred.colliding_manifest_id
+    task.context_manifest_id = None
+    session.flush()
+
+    with pytest.raises(ValueError, match="no longer"):
+        resolve_merge_review(
+            session,
+            decision=IdentityAdjudicationDecision.DISTINCT_EVENT,
+            reviewer="test-human",
+            rationale="A task with no recorded subject.",
+        )
+
+
+@pytest.mark.integration
+def test_a_republication_of_the_same_event_still_allows_adjudication(
+    session: Session, tmp_path: Path
+) -> None:
+    """Staleness is about the events, not the manifest version.
+
+    Republishing the same recorded event mints a new manifest. Refusing on
+    manifest identity alone would block a reviewer from ever answering a date
+    that had been republished for an unrelated reason.
+    """
+    _, golden = publish_golden(session, tmp_path)
+    _prepare_for_publication(session, tmp_path)
+    rebuild_coverage_index(session)
+    session.flush()
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+    publish_wikidata_event(session, store=store)
+
+    # Republish the date on the same recorded-event evidence: a new manifest
+    # version, the same canonical event behind it.
+    golden_manifest = session.get(
+        PublicationManifest, golden.publication_manifest_id
+    )
+    assert golden_manifest is not None
+    same_roots = list(
+        session.scalars(
+            select(PublicationStatementEvidence.resolved_claim_id)
+            .where(
+                PublicationStatementEvidence.publication_manifest_id
+                == golden_manifest.id,
+                PublicationStatementEvidence.statement_path.startswith(
+                    "/sections/recorded_on_this_date/", autoescape=True
+                ),
+                PublicationStatementEvidence.resolved_claim_id.is_not(None),
+            )
+            .order_by(PublicationStatementEvidence.statement_path)
+        )
+    )
+    assert same_roots
+    # The whole recorded section is carried, as a real republication would: the
+    # event resolves through the occurrence root, which is not the first one.
+    assert events_behind_manifest(session, manifest=golden_manifest)
+    publish_day_profile(
+        session,
+        store=store,
+        profile_date=GOLDEN_DATE,
+        profile_type=golden_manifest.profile_type,
+        payload={
+            "schema_version": "1",
+            "date": GOLDEN_DATE.isoformat(),
+            "profile_type": golden_manifest.profile_type.value,
+            "sections": {
+                "recorded_on_this_date": [
+                    {
+                        "statement_id": f"golden-republished-{index}",
+                        "statement": "The same recorded event, republished.",
+                        "details": {},
+                        "provenance_note": "development fixture",
+                    }
+                    for index in range(len(same_roots))
+                ]
+            },
+            "section_states": {"recorded_on_this_date": {"status": "available"}},
+        },
+        statement_evidence=[
+            PublicationStatementEvidenceInput(
+                statement_path=f"/sections/recorded_on_this_date/{index}",
+                resolved_claim_id=root,
+            )
+            for index, root in enumerate(same_roots)
+        ],
+        supersedes_manifest_id=golden_manifest.id,
+        supersedes_day_profile_id=golden.id,
+        editorial_revision=golden_manifest.editorial_revision + 1,
+    )
+    rebuild_coverage_index(session)
+    session.flush()
+
+    recorded = resolve_merge_review(
+        session,
+        decision=IdentityAdjudicationDecision.DISTINCT_EVENT,
+        reviewer="test-human",
+        rationale="Same two events; the date was merely republished.",
+    )
+
+    assert recorded
+    assert publish_wikidata_event(session, store=store).status == "published"
+
+
+@pytest.mark.integration
+def test_a_collision_with_no_resolvable_event_does_not_bypass(
+    session: Session, tmp_path: Path
+) -> None:
+    """Fail closed when the colliding manifest resolves to no canonical event.
+
+    ``all()`` over an empty set is True, so an unresolvable collision would
+    otherwise read as "every colliding event was adjudicated distinct" and bypass
+    the guard exactly where the collision is least understood.
+
+    The fixture also pins the section filter: this manifest *does* cite the
+    occurrence root as evidence, but in the annual-context section, and a context
+    statement is not a recorded event.
+    """
+    _prepare_for_publication(session, tmp_path)
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+    context = _publish_prior_context(session, store)
+    manifest = session.get(PublicationManifest, context.publication_manifest_id)
+    assert manifest is not None
+
+    assert events_behind_manifest(session, manifest=manifest) == set()
+    assert _collision_adjudication(
+        session, event=_wikidata_event(session), manifest=manifest
+    ) == (False, None)
+
+
+@pytest.mark.integration
+def test_a_non_distinct_decision_blocks_without_reopening_the_task(
+    session: Session, tmp_path: Path
+) -> None:
+    """A recorded answer is an answer, not a reason to ask again.
+
+    Reopening the task on every retry is the duplicate-task treadmill the durable
+    record exists to end.
+    """
+    publish_golden(session, tmp_path)
+    _prepare_for_publication(session, tmp_path)
+    rebuild_coverage_index(session)
+    session.flush()
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+    publish_wikidata_event(session, store=store)
+
+    recorded = resolve_merge_review(
+        session,
+        decision=IdentityAdjudicationDecision.DEFERRED,
+        reviewer="test-human",
+        rationale="Not settled yet; needs more evidence.",
+    )
+    session.flush()
+
+    outcome = publish_wikidata_event(session, store=store)
+
+    assert outcome.status == "blocked_by_adjudication"
+    assert outcome.adjudication_id == recorded[0].id
+    identity = _claim(session, "candidate_event_identity")
+    assert (
+        session.scalar(
+            select(func.count())
+            .select_from(ReviewTask)
+            .where(
+                ReviewTask.claim_id == identity.id,
+                ReviewTask.status == "open",
+            )
+        )
+        == 0
+    )

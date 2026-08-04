@@ -1207,3 +1207,103 @@ Proven offline against the committed `Q749610` fixture by
 (`services/api/tests/test_wikidata_publish.py`). The real 99-date enrichment
 -- live Wikidata ingest, review, publish, canary -- remains an operator arc
 (G4, epic #71), like the UCDP/MD4 passes.
+
+## D042: A human's answer to a collision is a durable record about events, not a closed task
+
+**Context:** G2b's publish path defers on a recorded-event collision by opening
+a `MERGE-REVIEW:` `ReviewTask` asking a human to choose merge, supersede, or
+distinct-event (D041). The task had nowhere to put the answer. The collision
+guard reads `published_recorded_event_on` and nothing else, so a human closing
+the task changed nothing observable: the next publish attempt collided, opened
+the task again, and deferred again. The workflow asked a question it could not
+consume.
+
+**Decision:** A collision answer is a **versioned, pair-specific, human-authored
+record about two canonical events**, and it is the only thing that lets a second
+recorded event publish on a date.
+
+The adjudication identifies **events, never publication manifests**. A manifest
+is a versioned publication artifact, so a decision keyed on one would stop
+applying the moment the date was republished -- which is exactly when it still
+has to hold, since republication is what an enrichment does.
+
+**Mechanism:** `event_identity_adjudications`
+(`services/api/app/governance.py`, migration `20260803_0017`) stores the pair
+canonically ordered, so `event_a_id < event_b_id` makes the unordered pair
+unique and rejects self-pairs in one constraint. History is append-only: a
+changed decision appends a version carrying `supersedes_adjudication_id`, and
+every foreign key is `RESTRICT`. `merge`/`supersede` require a surviving event
+that is a member of the pair; `distinct_event`/`deferred` refuse one. The
+profile date is derived from both events' own primary occurrences, never taken
+from the caller.
+
+`adjudicated_distinct` is what the guard consumes, and it fails closed on every
+other input: no record, a superseded `distinct_event`, a non-`distinct_event`
+outcome, a non-human author, or a decision about a different pair.
+`_collision_adjudication` (`wikidata.py`) requires a current human
+`distinct_event` against **every** event behind the colliding manifest, and
+treats a manifest whose events cannot be resolved as a deferral -- otherwise
+"every event is adjudicated" would be vacuously true over an empty set and
+bypass the guard precisely when the collision is least understood. A recorded
+non-permitting decision returns `blocked_by_adjudication` rather than opening
+another review task, ending the duplicate-task treadmill.
+
+The table is append-only *in the database*, not merely in the writer: the
+`event_identity_adjudications_append_only` trigger reuses
+`prevent_governance_record_mutation` (migration 0008), the same function already
+guarding `source_release_licenses`, `claim_review_decisions` and
+`editorial_selections`. The unique history index stops two rows sharing a
+(pair, version) and says nothing about an `UPDATE` rewriting the latest decision
+in place; a governance record that skipped this would be the only mutable one.
+
+A merge-review task records the collision it asked about
+(`review_tasks.context_manifest_id`) rather than naming it only in its rationale
+prose, and one predicate -- `_task_concerns` -- decides whether a task is about
+the collision at hand. Every path that touches a task routes through it: opening
+reuses only a task about this collision and retires one whose collision has
+moved (otherwise refusing a stale task would leave the candidate in a
+publish/reject loop), and resolving requires a task about this collision,
+counting resolved ones so a *retry* is checked against the same subject rather
+than sailing past the guard because nothing is open. The comparison is on *events*, not manifest identity:
+republishing the same recorded event mints a new manifest, and refusing that
+would strand a reviewer on any date republished for an unrelated reason, while
+comparing events catches the case that matters -- an answer landing on a pair
+nobody evaluated. A task with no recorded subject is refused rather than
+defaulted to the current collision.
+
+`candidate_cli adjudicate` is the operator's half of the workflow. `publish`
+opens the task that asks whether two events are the same event, and without a
+command that answers it the collision defers forever whatever a reviewer decides
+-- the decision would be reachable only from a test.
+
+`is_human_reviewer` moves into `governance` as the one classification rule, by
+prefix rather than by an enumerated identity; `derive_review_status` delegates to
+it. The previous copy named a single rule identity, so each new standing rule
+would have counted as a person until somebody remembered to add it -- and that
+drift reports unreviewed content as reviewed.
+
+**Alternatives considered:** Keying the adjudication on the colliding manifest
+-- simpler to look up, but it silently expires on republication. Letting a
+`distinct_event` decision clear the date rather than the pair -- that is exactly
+the blanket permission the guard exists to withhold.
+
+**Consequences:** A human `distinct_event(A, B)` now lets B publish past A's
+collision, and an unrelated C on the same date still defers. Proven by
+`test_a_human_distinct_event_decision_lets_publication_pass_the_collision` and
+`test_a_decision_about_another_pair_does_not_unlock_this_collision`
+(`services/api/tests/test_wikidata_publish.py`) plus
+`services/api/tests/test_identity_adjudication.py`.
+
+Publishing past a collision currently **replaces** the date's
+`recorded_on_this_date` section with the newly published event's statements, so
+the superseded event stops being the headline. That is G3b's job (#79): the
+publisher resolves the featured event, builds the section from that event's
+predicates, and binds the featured identity decision to the manifest so
+`derive_review_status` can see it. Until G3b lands, the bypass only activates
+when a human explicitly records a `distinct_event` decision, and G4 does not
+begin until both slices merge.
+
+The single-choice featured-event writer this needs -- `record_editorial_selection`
+versions per `(date, section, root)`, so two roots can each read as selected on
+independent counters -- is the immediately following slice, split out to keep this
+PR's review surface inside the repo's scope rule.

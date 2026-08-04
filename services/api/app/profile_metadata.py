@@ -27,7 +27,11 @@ from uuid import UUID
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
-from app.governance import EditorialSelection, EditorialSelectionStatus
+from app.governance import (
+    EditorialSelection,
+    EditorialSelectionStatus,
+    is_human_reviewer,
+)
 from app.models import (
     Claim,
     DerivedValue,
@@ -41,11 +45,6 @@ from app.models import (
     ReviewStatus,
     ReviewTask,
 )
-
-#: The standing rule selects a year's reviewed context for every date in it
-#: (D032). It is accountable editorial provenance, but it is not a person
-#: having looked at this date, and must never be reported as one.
-STANDING_RULE_REVIEWER = "standing-rule:annual-context-v1"
 
 #: Weakest first. Ordering by rank rather than alphabetically, because a
 #: lexicographic max reports "A+" as weaker than "A" — the kind of defect
@@ -90,14 +89,14 @@ def _statement_roots(
 def _is_human(reviewer: str | None) -> bool:
     """Whether a decision was recorded by a person.
 
-    A blank or whitespace-only identity is not a person. Treating it as one
-    reported unreviewed content as reviewed, which is the single most
-    flattering thing this field could get wrong.
+    Delegates to the one classification rule in `governance`, which every
+    standing rule and every governance writer also uses. This module used to
+    carry its own copy naming a single rule identity, so each new standing rule
+    would have counted as a person until somebody remembered to add it here —
+    and the resulting drift reports unreviewed content as reviewed, the single
+    most flattering thing this field could get wrong.
     """
-    if reviewer is None:
-        return False
-    identity = reviewer.strip()
-    return bool(identity) and identity != STANDING_RULE_REVIEWER
+    return is_human_reviewer(reviewer)
 
 
 def derive_review_status(

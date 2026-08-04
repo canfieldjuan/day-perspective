@@ -3,15 +3,18 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 from app.adapters.base import LocalFilesystemRawSourceStore
 from app.config import get_settings
 from app.database import SessionLocal
+from app.governance import IdentityAdjudicationDecision
 from app.services import LocalFilesystemPublishedProfileStore
 from app.wikidata import (
     attempt_wikidata_enrichment,
     ingest_wikidata_candidate,
     publish_wikidata_event,
+    resolve_merge_review,
     resolve_wikidata_event,
 )
 
@@ -60,6 +63,32 @@ def _publish(args: argparse.Namespace, settings: Any, session: Any) -> str:
     )
 
 
+def _adjudicate(args: argparse.Namespace, settings: Any, session: Any) -> str:
+    """Record the human's answer to a merge-review collision.
+
+    The command the whole merge-review workflow was missing: ``publish`` opens
+    a task asking whether two events are the same event, and until this existed
+    there was no way outside a test to answer it, so the collision deferred
+    forever no matter what a reviewer decided.
+    """
+    recorded = resolve_merge_review(
+        session,
+        decision=IdentityAdjudicationDecision(args.decision),
+        reviewer=args.reviewer,
+        rationale=args.rationale,
+        survivor_event_id=(
+            UUID(args.survivor_event_id)
+            if args.survivor_event_id is not None
+            else None
+        ),
+    )
+    return " ".join(
+        f"adjudication_id={row.id} pair=({row.event_a_id},{row.event_b_id}) "
+        f"decision={row.decision} version={row.decision_version}"
+        for row in recorded
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Offline candidate source pipelines.")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -93,6 +122,31 @@ def main() -> None:
     )
     publish.add_argument("--force-new-version", action="store_true")
     publish.set_defaults(handler=_publish, commit_on_error=False)
+
+    adjudicate = subparsers.add_parser(
+        "adjudicate",
+        help=(
+            "Record a human's merge-review decision for the recorded-event "
+            "collision on the candidate's date, and close the review task."
+        ),
+    )
+    adjudicate.add_argument(
+        "--decision",
+        required=True,
+        choices=[member.value for member in IdentityAdjudicationDecision],
+    )
+    adjudicate.add_argument(
+        "--reviewer",
+        required=True,
+        help="The person recording this decision; a standing rule is refused.",
+    )
+    adjudicate.add_argument("--rationale", required=True)
+    adjudicate.add_argument(
+        "--survivor-event-id",
+        default=None,
+        help="The surviving event; required for merge and supersede only.",
+    )
+    adjudicate.set_defaults(handler=_adjudicate, commit_on_error=False)
 
     args = parser.parse_args()
     settings = get_settings()
