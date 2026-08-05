@@ -1451,82 +1451,6 @@ class RecordedEventBinding:
     statement_count: int
 
 
-def _validate_recorded_event_bindings(
-    session: Session,
-    *,
-    profile_date: date,
-    profile_type: ProfileType,
-    payload: dict[str, Any],
-    recorded_events: Sequence[RecordedEventBinding],
-    recorded_evidence: Sequence[PublicationStatementEvidenceInput],
-) -> None:
-    """A version that publishes recorded events must say which events they are.
-
-    The invariant is *never forget*, not *always declare*. A recorded section
-    does not always stand for canonical events -- context profiles publish an
-    empty one, and synthetic sections carry statements with no `Event` behind
-    them -- so demanding a binding everywhere would force callers to invent
-    identities to satisfy a check. What must never happen is a successor that
-    quietly loses an event the date already admitted: `events_behind_manifest`
-    would fall back to the evidence inference and that event would drop out of
-    the collision guard, which is the failure the binding exists to prevent.
-
-    So a publisher that cannot yet carry the other events on its date fails
-    loudly, which is recoverable, rather than publishing a version that forgets
-    one of them, which is not.
-    """
-    # Deliberately not short-circuiting on an empty recorded section. Dropping
-    # every event is still dropping, and an exemption applied before looking at
-    # what the date already admits is the widest possible one: a successor with
-    # no recorded section and no bindings leaves the admitted set empty and the
-    # guard forgets the date. What the section contains is irrelevant; what
-    # matters is whether this version still accounts for the events the current
-    # one admitted.
-    current = session.scalar(
-        select(PublicationManifest)
-        .where(
-            PublicationManifest.profile_date == profile_date,
-            PublicationManifest.profile_type == profile_type,
-            PublicationManifest.status == PublicationStatus.PUBLISHED,
-        )
-        .order_by(PublicationManifest.version.desc())
-    )
-    if current is None:
-        return
-    # Routed through the one function that answers "which events does this
-    # manifest publish", rather than reading the binding table directly. Reading
-    # the table was a second implementation of that question, and it disagreed
-    # with the first precisely where the fallback matters: the migration does not
-    # backfill bindings, so every manifest published before it has no rows, and a
-    # direct read waves through the first republish of every pre-existing date.
-    from app.governance import events_behind_manifest, events_from_recorded_roots
-
-    previously_admitted = events_behind_manifest(session, manifest=current)
-    # What this version will admit, predicted the same way it will later be
-    # read: its declared bindings, or -- when it declares none -- the events its
-    # own recorded statements resolve to. Comparing against the declarations
-    # alone would refuse a successor that republishes the very statements
-    # keeping an event on the date, which is preservation, not a drop.
-    declared = {binding.event_id for binding in recorded_events}
-    if not declared:
-        declared = events_from_recorded_roots(
-            session,
-            resolved_root_ids={
-                item.resolved_claim_id
-                for item in recorded_evidence
-                if item.resolved_claim_id is not None
-            },
-        )
-    dropped = previously_admitted - declared
-    if dropped:
-        raise ValueError(
-            f"{profile_date.isoformat()} already publishes recorded events "
-            f"{sorted(str(event_id) for event_id in dropped)}, which this "
-            "publication would drop. A successor must carry every admitted event "
-            "or the collision guard stops seeing them."
-        )
-
-
 def publish_day_profile(
     session: Session,
     *,
@@ -1625,20 +1549,6 @@ def publish_day_profile(
                 statement_evidence,
                 profile_date=profile_date,
                 profile_type=profile_type,
-            )
-            _validate_recorded_event_bindings(
-                session,
-                profile_date=profile_date,
-                profile_type=profile_type,
-                payload=payload,
-                recorded_events=list(recorded_events),
-                recorded_evidence=[
-                    item
-                    for item in evidence
-                    if item.statement_path.startswith(
-                        f"/sections/{RECORDED_EVENT_SECTION}/"
-                    )
-                ],
             )
             snapshotted_evidence = _snapshot_statement_evidence(session, evidence)
             _validate_profile_supersession(
