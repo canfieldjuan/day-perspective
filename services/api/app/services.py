@@ -5,7 +5,7 @@ import json
 import os
 import tempfile
 import time
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from datetime import UTC, date, datetime
@@ -1430,6 +1430,10 @@ def _acquire_publication_lock(
     )
 
 
+#: The published section whose contents are canonical events.
+RECORDED_EVENT_SECTION = "recorded_on_this_date"
+
+
 @dataclass(frozen=True)
 class RecordedEventBinding:
     """One canonical event a publication admits, and its place in the section.
@@ -1447,6 +1451,63 @@ class RecordedEventBinding:
     statement_count: int
 
 
+def _validate_recorded_event_bindings(
+    session: Session,
+    *,
+    profile_date: date,
+    profile_type: ProfileType,
+    payload: dict[str, Any],
+    recorded_events: Sequence[RecordedEventBinding],
+) -> None:
+    """A version that publishes recorded events must say which events they are.
+
+    The invariant is *never forget*, not *always declare*. A recorded section
+    does not always stand for canonical events -- context profiles publish an
+    empty one, and synthetic sections carry statements with no `Event` behind
+    them -- so demanding a binding everywhere would force callers to invent
+    identities to satisfy a check. What must never happen is a successor that
+    quietly loses an event the date already admitted: `events_behind_manifest`
+    would fall back to the evidence inference and that event would drop out of
+    the collision guard, which is the failure the binding exists to prevent.
+
+    So a publisher that cannot yet carry the other events on its date fails
+    loudly, which is recoverable, rather than publishing a version that forgets
+    one of them, which is not.
+    """
+    sections = payload.get("sections")
+    recorded = (
+        sections.get(RECORDED_EVENT_SECTION) if isinstance(sections, dict) else None
+    )
+    if not isinstance(recorded, list) or not recorded:
+        return
+    current = session.scalar(
+        select(PublicationManifest)
+        .where(
+            PublicationManifest.profile_date == profile_date,
+            PublicationManifest.profile_type == profile_type,
+            PublicationManifest.status == PublicationStatus.PUBLISHED,
+        )
+        .order_by(PublicationManifest.version.desc())
+    )
+    if current is None:
+        return
+    previously_admitted = set(
+        session.scalars(
+            select(PublicationRecordedEvent.event_id).where(
+                PublicationRecordedEvent.publication_manifest_id == current.id
+            )
+        )
+    )
+    dropped = previously_admitted - {binding.event_id for binding in recorded_events}
+    if dropped:
+        raise ValueError(
+            f"{profile_date.isoformat()} already publishes recorded events "
+            f"{sorted(str(event_id) for event_id in dropped)}, which this "
+            "publication would drop. A successor must carry every admitted event "
+            "or the collision guard stops seeing them."
+        )
+
+
 def publish_day_profile(
     session: Session,
     *,
@@ -1455,7 +1516,7 @@ def publish_day_profile(
     profile_type: ProfileType,
     payload: dict[str, Any],
     statement_evidence: Iterable[PublicationStatementEvidenceInput],
-    recorded_events: Iterable[RecordedEventBinding] = (),
+    recorded_events: Sequence[RecordedEventBinding] = (),
     supersedes_manifest_id: UUID | None = None,
     supersedes_day_profile_id: UUID | None = None,
     methodology_id: UUID | None = None,
@@ -1545,6 +1606,13 @@ def publish_day_profile(
                 statement_evidence,
                 profile_date=profile_date,
                 profile_type=profile_type,
+            )
+            _validate_recorded_event_bindings(
+                session,
+                profile_date=profile_date,
+                profile_type=profile_type,
+                payload=payload,
+                recorded_events=list(recorded_events),
             )
             snapshotted_evidence = _snapshot_statement_evidence(session, evidence)
             _validate_profile_supersession(

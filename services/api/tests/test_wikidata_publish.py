@@ -26,6 +26,8 @@ import json
 import sys
 from datetime import date
 from pathlib import Path
+from typing import Any
+from uuid import UUID
 
 import pytest
 from sqlalchemy import func, select
@@ -56,6 +58,7 @@ from app.models import (
     ProfileType,
     PublicationManifest,
     PublicationStatementEvidence,
+    PublicationStatus,
     PublicationTier,
     ResolvedClaim,
     ReviewTask,
@@ -65,6 +68,7 @@ from app.models import (
 from app.services import (
     LocalFilesystemPublishedProfileStore,
     PublicationStatementEvidenceInput,
+    RecordedEventBinding,
     create_claim,
     create_source_release,
     publish_day_profile,
@@ -171,16 +175,57 @@ def _wikidata_event(session: Session) -> Event:
     return event
 
 
+def _usgs_event_id(session: Session, manifest: PublicationManifest) -> UUID:
+    """The single canonical event a golden manifest publishes."""
+    behind = events_behind_manifest(session, manifest=manifest)
+    assert len(behind) == 1
+    return next(iter(behind))
+
+
+def _current_recorded(
+    session: Session, store: LocalFilesystemPublishedProfileStore
+) -> tuple[PublicationManifest, list[dict[str, Any]], list[UUID], set[UUID]]:
+    """The date's current recorded section, its roots, and the events behind it."""
+    manifest = session.scalar(
+        select(PublicationManifest)
+        .where(
+            PublicationManifest.profile_date == GOLDEN_DATE,
+            PublicationManifest.status == PublicationStatus.PUBLISHED,
+        )
+        .order_by(PublicationManifest.version.desc())
+    )
+    assert manifest is not None
+    payload = store.read(manifest.storage_uri, manifest.content_hash)
+    statements = list(payload["sections"]["recorded_on_this_date"])
+    roots: list[UUID] = []
+    for index in range(len(statements)):
+        root = session.scalar(
+            select(PublicationStatementEvidence.resolved_claim_id).where(
+                PublicationStatementEvidence.publication_manifest_id == manifest.id,
+                PublicationStatementEvidence.statement_path
+                == f"/sections/recorded_on_this_date/{index}",
+            )
+        )
+        assert root is not None
+        roots.append(root)
+    return manifest, statements, roots, events_behind_manifest(
+        session, manifest=manifest
+    )
+
+
 def _republish_with_a_different_event(
     session: Session,
     store: LocalFilesystemPublishedProfileStore,
     *,
     key: str,
 ) -> Event:
-    """Replace the date's recorded event with an unrelated one.
+    """Add an unrelated event to the date, changing the collision's event set.
 
-    The situation every merge-review staleness rule is about: the collision a
-    reviewer was asked to judge is no longer the collision the date holds.
+    The date's recorded event cannot simply be *replaced* -- publication refuses
+    to drop an event a version already admitted, which is the whole point of the
+    binding. What can happen is the set growing, and that is equally enough to
+    make a waiting merge-review task's subject no longer the collision the date
+    holds.
     """
     stranger = _make_event(session, key=key)
     occurrence = session.scalar(
@@ -189,32 +234,49 @@ def _republish_with_a_different_event(
         )
     )
     assert occurrence is not None
+    manifest, statements, roots, existing = _current_recorded(session, store)
+    assert len(existing) == 1
+    incumbent = next(iter(existing))
+    payload_statements = statements + [
+        {
+            "statement_id": key,
+            "statement": "Another recorded event now shares this date.",
+            "details": {},
+            "provenance_note": "development fixture",
+        }
+    ]
     publish_day_profile(
         session,
         store=store,
         profile_date=GOLDEN_DATE,
-        profile_type=ProfileType.STANDARD_STATISTICAL,
+        profile_type=manifest.profile_type,
         payload={
             "schema_version": "1",
             "date": GOLDEN_DATE.isoformat(),
-            "profile_type": ProfileType.STANDARD_STATISTICAL.value,
-            "sections": {
-                "recorded_on_this_date": [
-                    {
-                        "statement_id": key,
-                        "statement": "A different recorded event now holds this date.",
-                        "details": {},
-                        "provenance_note": "development fixture",
-                    }
-                ]
-            },
+            "profile_type": manifest.profile_type.value,
+            "sections": {"recorded_on_this_date": payload_statements},
             "section_states": {"recorded_on_this_date": {"status": "available"}},
         },
         statement_evidence=[
             PublicationStatementEvidenceInput(
-                statement_path="/sections/recorded_on_this_date/0",
-                resolved_claim_id=occurrence,
+                statement_path=f"/sections/recorded_on_this_date/{index}",
+                resolved_claim_id=root,
             )
+            for index, root in enumerate([*roots, occurrence])
+        ],
+        recorded_events=[
+            RecordedEventBinding(
+                event_id=incumbent,
+                is_featured=True,
+                featured_selection_id=None,
+                statement_count=len(statements),
+            ),
+            RecordedEventBinding(
+                event_id=stranger.id,
+                is_featured=False,
+                featured_selection_id=None,
+                statement_count=1,
+            ),
         ],
         force_new_version=True,
     )
@@ -1260,6 +1322,14 @@ def test_a_republication_of_the_same_event_still_allows_adjudication(
                 resolved_claim_id=root,
             )
             for index, root in enumerate(same_roots)
+        ],
+        recorded_events=[
+            RecordedEventBinding(
+                event_id=_usgs_event_id(session, golden_manifest),
+                is_featured=True,
+                featured_selection_id=None,
+                statement_count=len(same_roots),
+            )
         ],
         supersedes_manifest_id=golden_manifest.id,
         supersedes_day_profile_id=golden.id,

@@ -44,6 +44,7 @@ from app.models import (
     EventTime,
     ProfileType,
     PublicationManifest,
+    PublicationRecordedEvent,
     PublicationStatementEvidence,
 )
 from app.services import (
@@ -463,3 +464,92 @@ def _publish_two_event_prior(
     manifest = session.get(PublicationManifest, profile.publication_manifest_id)
     assert manifest is not None
     return manifest
+
+
+@pytest.mark.integration
+def test_a_successor_may_not_drop_a_previously_admitted_event(
+    session: Session, tmp_path: Path
+) -> None:
+    """Forgetting an admitted event fails loudly rather than silently.
+
+    A publisher that cannot yet carry the other events on its date is
+    recoverable; a successor that quietly forgets one of them is not, because
+    the collision guard simply stops seeing it.
+    """
+    first = _make_event(session, key="first-admitted")
+    second = _make_event(session, key="second-admitted")
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+    _publish_two_event_prior(session, store, first=first, second=second)
+
+    only_first = session.scalar(
+        select(EventTime.provenance_resolved_claim_id).where(
+            EventTime.event_id == first.id, EventTime.is_primary.is_(True)
+        )
+    )
+    assert only_first is not None
+
+    with pytest.raises(ValueError, match="would drop"):
+        publish_day_profile(
+            session,
+            store=store,
+            profile_date=GOLDEN_DATE,
+            profile_type=ProfileType.STANDARD_STATISTICAL,
+            payload={
+                "schema_version": "1",
+                "date": GOLDEN_DATE.isoformat(),
+                "profile_type": ProfileType.STANDARD_STATISTICAL.value,
+                "sections": {
+                    "recorded_on_this_date": [
+                        {
+                            "statement_id": "only-first",
+                            "statement": "A successor carrying one event only.",
+                            "details": {},
+                            "provenance_note": "development fixture",
+                        }
+                    ]
+                },
+                "section_states": {"recorded_on_this_date": {"status": "available"}},
+            },
+            statement_evidence=[
+                PublicationStatementEvidenceInput(
+                    statement_path="/sections/recorded_on_this_date/0",
+                    resolved_claim_id=only_first,
+                )
+            ],
+            recorded_events=[
+                RecordedEventBinding(
+                    event_id=first.id,
+                    is_featured=True,
+                    featured_selection_id=None,
+                    statement_count=1,
+                )
+            ],
+            force_new_version=True,
+        )
+
+
+@pytest.mark.integration
+def test_the_golden_publisher_binds_its_recorded_event(
+    session: Session, tmp_path: Path
+) -> None:
+    """The other real recorded-event publisher declares its admitted event too.
+
+    Fixing only the publisher in front of me would leave the next USGS run able
+    to mint a successor with no bound rows, so the admitted set would fall back
+    to inference and a co-published event would drop out of the guard again.
+    """
+    _, golden = publish_golden(session, tmp_path)
+
+    manifest = session.get(PublicationManifest, golden.publication_manifest_id)
+    assert manifest is not None
+    bound = events_behind_manifest(session, manifest=manifest)
+    assert len(bound) == 1
+    rows = list(
+        session.scalars(
+            select(PublicationRecordedEvent).where(
+                PublicationRecordedEvent.publication_manifest_id == manifest.id
+            )
+        )
+    )
+    assert [row.is_featured for row in rows] == [True]
+    assert rows[0].statement_count > 0

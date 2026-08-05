@@ -69,6 +69,7 @@ from app.models import (
 from app.services import (
     LocalFilesystemPublishedProfileStore,
     PublicationStatementEvidenceInput,
+    RecordedEventBinding,
     canonical_json_bytes,
     content_hash,
     create_claim,
@@ -1398,6 +1399,19 @@ def publish_golden_profile(
         if previous_manifest is not None
         else None
     )
+    # The recorded section this publishes is one canonical event, and the
+    # version has to say so: a successor that omits the binding would leave the
+    # admitted set to be inferred, and a co-published event would drop out of
+    # the collision guard.
+    golden_event = session.scalar(
+        select(Event).where(
+            Event.resolved_claim_id == resolved["event_identity"].id
+        )
+    )
+    if golden_event is None:
+        raise ValueError(
+            "The golden recorded event has not been resolved into an Event."
+        )
     return publish_day_profile(
         session,
         store=store,
@@ -1405,6 +1419,14 @@ def publish_golden_profile(
         profile_type=ProfileType.STANDARD_STATISTICAL,
         payload=payload,
         statement_evidence=evidence,
+        recorded_events=[
+            RecordedEventBinding(
+                event_id=golden_event.id,
+                is_featured=True,
+                featured_selection_id=None,
+                statement_count=len(statements),
+            )
+        ],
         supersedes_manifest_id=previous_manifest.id if previous_manifest is not None else None,
         supersedes_day_profile_id=previous_profile.id if previous_profile is not None else None,
         methodology_id=methodology.id,
