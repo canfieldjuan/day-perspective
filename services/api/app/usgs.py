@@ -29,6 +29,7 @@ from app.governance import (
     LicenseInput,
     ReviewDecisionValue,
     assert_release_publication_eligible,
+    events_behind_manifest,
     lineage_root_ids,
     record_claim_review,
     record_editorial_selection,
@@ -1412,6 +1413,33 @@ def publish_golden_profile(
         raise ValueError(
             "The golden recorded event has not been resolved into an Event."
         )
+    # This publisher rebuilds only its own recorded statements, so on a date that
+    # has since admitted another publisher's event it would mint a successor whose
+    # payload and binding both omit it -- and a non-empty binding is believed, so
+    # that event would simply stop existing for the collision guard. Carrying
+    # another source's statements is not this slice's job; refusing is
+    # recoverable, forgetting is not.
+    published = session.scalar(
+        select(PublicationManifest)
+        .where(
+            PublicationManifest.profile_date == GOLDEN_DATE,
+            PublicationManifest.profile_type == ProfileType.STANDARD_STATISTICAL,
+            PublicationManifest.status == PublicationStatus.PUBLISHED,
+        )
+        .order_by(PublicationManifest.version.desc())
+    )
+    if published is not None:
+        co_published = events_behind_manifest(
+            session, manifest=published
+        ) - {golden_event.id}
+        if co_published:
+            raise ValueError(
+                f"{GOLDEN_DATE.isoformat()} also publishes recorded events "
+                f"{sorted(str(event_id) for event_id in co_published)}, which "
+                "this publisher cannot carry. Republish through the publisher "
+                "that owns the date's full admitted set rather than mint a "
+                "version that forgets them."
+            )
     return publish_day_profile(
         session,
         store=store,

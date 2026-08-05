@@ -53,6 +53,7 @@ from app.services import (
     RecordedEventBinding,
     publish_day_profile,
 )
+from app.usgs import publish_golden_profile
 from app.wikidata import (
     _retained_recorded_groups,
     publish_wikidata_event,
@@ -493,3 +494,47 @@ def test_the_golden_publisher_binds_its_recorded_event(
     assert rows[0].statement_count > 0
 
 
+
+
+@pytest.mark.integration
+def test_a_usgs_rerun_refuses_to_forget_a_co_published_event(
+    session: Session, tmp_path: Path
+) -> None:
+    """A publisher that cannot carry the date's whole admitted set must not run.
+
+    Once this slice makes multi-event dates possible, the golden publisher
+    rebuilds only its own statements — so a normal rerun would mint a successor
+    whose payload and binding both omit the co-published event. A non-empty
+    binding is believed, so that event would stop existing for the collision
+    guard entirely.
+    """
+    store, usgs, wikidata = _admit_both(session, tmp_path)
+    _feature(session, chosen=wikidata, candidates=[usgs, wikidata])
+    publish_wikidata_event(session, store=store)
+    rebuild_coverage_index(session)
+    session.flush()
+
+    with pytest.raises(ValueError, match="cannot carry"):
+        publish_golden_profile(
+            session,
+            store=store,
+            force_new_version=True,
+        )
+
+
+@pytest.mark.integration
+def test_a_usgs_rerun_still_works_where_it_owns_the_date(
+    session: Session, tmp_path: Path
+) -> None:
+    """The other side: the ordinary single-event rerun is untouched."""
+    publish_golden(session, tmp_path)
+    rebuild_coverage_index(session)
+    session.flush()
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+
+    profile = publish_golden_profile(session, store=store, force_new_version=True)
+
+    assert profile.publication_manifest_id is not None
+    manifest = session.get(PublicationManifest, profile.publication_manifest_id)
+    assert manifest is not None
+    assert len(events_behind_manifest(session, manifest=manifest)) == 1
