@@ -1461,6 +1461,44 @@ def _surviving_recorded_statements(
     return surviving_statements, surviving_evidence
 
 
+def _event_has_surviving_evidence(
+    session: Session, *, event_id: UUID | None, surviving_root_ids: set[UUID]
+) -> bool:
+    """Whether any surviving statement's root is actually this event's own.
+
+    The featured pick (the ``featured_event`` section) and per-predicate
+    rejection (the ``recorded_on_this_date`` section) are independent
+    governance decisions on independent roots, so a featured prior event can
+    have every one of its own predicates separately rejected without the
+    featured selection itself ever being touched. Checked only via the two
+    roots that do link back to an event -- occurrence and, when present,
+    location -- the same two `events_behind_manifest` reads; this function
+    answers one existence question, not the full per-statement attribution
+    `_surviving_recorded_statements` deliberately does not attempt.
+    """
+    if event_id is None or not surviving_root_ids:
+        return False
+    return bool(
+        session.scalar(
+            select(func.count())
+            .select_from(EventTime)
+            .where(
+                EventTime.event_id == event_id,
+                EventTime.provenance_resolved_claim_id.in_(surviving_root_ids),
+            )
+        )
+    ) or bool(
+        session.scalar(
+            select(func.count())
+            .select_from(EventLocation)
+            .where(
+                EventLocation.event_id == event_id,
+                EventLocation.provenance_resolved_claim_id.in_(surviving_root_ids),
+            )
+        )
+    )
+
+
 def publish_wikidata_event(
     session: Session,
     *,
@@ -1728,10 +1766,15 @@ def publish_wikidata_event(
         if outcome is not None:
             return outcome
         candidate_roots = [identity_resolved.id]
+        # Maps each candidate identity root back to its event, so a featured
+        # root that turns out to be one of the "other" events can be checked
+        # for surviving content below.
+        root_owner: dict[UUID, UUID] = {identity_resolved.id: event.id}
         for other_event_id in sorted(other_events, key=str):
             other_event = session.get(Event, other_event_id)
             if other_event is not None:
                 candidate_roots.append(other_event.resolved_claim_id)
+                root_owner[other_event.resolved_claim_id] = other_event_id
         try:
             featured_root = resolve_featured_event(
                 session,
@@ -1769,6 +1812,27 @@ def publish_wikidata_event(
                 if item.resolved_claim_id is not None
             },
         )
+        if featured_root != identity_resolved.id and not _event_has_surviving_evidence(
+            session,
+            event_id=root_owner.get(featured_root),
+            surviving_root_ids={
+                item.resolved_claim_id
+                for item in surviving_evidence
+                if item.resolved_claim_id is not None
+            },
+        ):
+            # The featured pick and per-predicate rejections are independent
+            # governance decisions: a human can feature event A and, later and
+            # separately, reject every one of A's own recorded predicates. If
+            # nothing of A survives, featuring it would bind the manifest to
+            # an event it does not actually publish -- fail closed instead
+            # rather than let a resolved featured root outrun the predicate
+            # governance that decides what is actually on the page.
+            return WikidataPublishOutcome(
+                status="featured_event_required",
+                occurrence_date=occurrence_date,
+                colliding_manifest_id=previous_manifest.id,
+            )
         # Only a two-way split: featured-vs-not. A date with more than two
         # admitted events, where the featured one is neither this candidate nor
         # first in the prior artifact's order, is not reachable through any
