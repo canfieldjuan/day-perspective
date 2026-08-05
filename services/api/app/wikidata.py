@@ -25,11 +25,14 @@ from app.governance import (
     IdentityAdjudicationDecision,
     LicenseInput,
     assert_release_publication_eligible,
+    current_featured_selection,
     events_behind_manifest,
     is_human_reviewer,
     latest_identity_adjudication,
     record_identity_adjudication,
+    record_published_events,
     register_release_license,
+    resolve_featured_event,
 )
 from app.models import (
     Claim,
@@ -1286,6 +1289,91 @@ def _ranked_recorded_predicates(
     return [(predicate, resolved) for _, predicate, resolved in ranked]
 
 
+def _latest_recorded_selections(
+    session: Session, *, profile_date: date
+) -> dict[UUID, EditorialSelection]:
+    """Each recorded-section root's current editorial decision for a date."""
+    latest: dict[UUID, EditorialSelection] = {}
+    for selection in session.scalars(
+        select(EditorialSelection)
+        .where(
+            EditorialSelection.profile_date == profile_date,
+            EditorialSelection.section_key == "recorded_on_this_date",
+        )
+        .order_by(EditorialSelection.decision_version.desc())
+    ):
+        if selection.resolved_claim_id is not None:
+            latest.setdefault(selection.resolved_claim_id, selection)
+    return latest
+
+
+def _retained_recorded_statements(
+    session: Session,
+    *,
+    store: PublishedProfileStore,
+    manifest: PublicationManifest,
+    profile_date: date,
+    rebuilt_key_prefix: str,
+) -> tuple[list[dict[str, Any]], list[UUID]]:
+    """The prior version's recorded statements for events this pass is *not* rebuilding.
+
+    Re-checked against the current editorial selections rather than copied. An
+    artifact that preserved a predicate merely because the previous version
+    carried it would keep asserting something nobody currently stands behind,
+    which is the difference between an archive and a cache.
+
+    ``rebuilt_key_prefix`` names the resolution keyspace this pass regenerates
+    from scratch -- its own entity's. Retaining those too would publish every one
+    of this event's statements twice on a republication, which is not a display
+    quirk: it changes the content hash, so an otherwise idempotent republish
+    would mint a new version every time it ran.
+
+    Scoped to the recorded-event section deliberately; the general revalidation
+    of every carried section is #78 and stays deferred.
+    """
+    payload = store.read(manifest.storage_uri, manifest.content_hash)
+    sections = payload.get("sections")
+    prior = sections.get("recorded_on_this_date") if isinstance(sections, dict) else None
+    if not isinstance(prior, list):
+        return [], []
+    roots_by_index: dict[int, UUID] = {}
+    for row in session.scalars(
+        select(PublicationStatementEvidence).where(
+            PublicationStatementEvidence.publication_manifest_id == manifest.id
+        )
+    ):
+        if not row.statement_path.startswith("/sections/recorded_on_this_date/"):
+            continue
+        tail = row.statement_path.rsplit("/", 1)[-1]
+        if tail.isdigit() and row.resolved_claim_id is not None:
+            roots_by_index[int(tail)] = row.resolved_claim_id
+    latest = _latest_recorded_selections(session, profile_date=profile_date)
+    rebuilt = {
+        root_id
+        for root_id, key in session.execute(
+            select(ResolvedClaim.id, ResolvedClaim.canonical_key).where(
+                ResolvedClaim.id.in_(roots_by_index.values())
+            )
+        )
+        if isinstance(key, str) and key.startswith(rebuilt_key_prefix)
+    }
+    statements: list[dict[str, Any]] = []
+    roots: list[UUID] = []
+    for index, statement in enumerate(prior):
+        root = roots_by_index.get(index)
+        if root is None or root in rebuilt or not isinstance(statement, dict):
+            continue
+        selection = latest.get(root)
+        if (
+            selection is None
+            or selection.status != EditorialSelectionStatus.SELECTED.value
+        ):
+            continue
+        statements.append(statement)
+        roots.append(root)
+    return statements, roots
+
+
 def _carried_forward_evidence(
     session: Session, *, manifest_id: UUID
 ) -> list[PublicationStatementEvidenceInput]:
@@ -1477,9 +1565,9 @@ def publish_wikidata_event(
             "carries the temporal precision, assignment, and date role."
         )
     statements: list[dict[str, Any]] = []
-    evidence: list[PublicationStatementEvidenceInput] = []
+    own_roots: list[UUID] = []
     roots_by_release: dict[UUID, set[UUID]] = {}
-    for index, (predicate, resolved) in enumerate(ranked):
+    for _index, (predicate, resolved) in enumerate(ranked):
         lineage_claim, lineage_release = _resolution_lineage(
             session, resolved=resolved
         )
@@ -1522,12 +1610,7 @@ def publish_wikidata_event(
                 ),
             }
         )
-        evidence.append(
-            PublicationStatementEvidenceInput(
-                statement_path=f"/sections/recorded_on_this_date/{index}",
-                resolved_claim_id=resolved.id,
-            )
-        )
+        own_roots.append(resolved.id)
         roots_by_release.setdefault(lineage_release.id, set()).add(resolved.id)
 
     # Publication consumes the human editorial-ranking stage. Each selected root is
@@ -1561,6 +1644,73 @@ def publish_wikidata_event(
         else None
     )
 
+    # Featured means emphasized first, not retained alone. Every event this date
+    # has already admitted stays published; the featured choice decides which one
+    # leads. Dropping the others would not only lose them from the page -- it
+    # would lose their identities from the manifest, and the collision guard
+    # checks a later candidate against exactly that set.
+    admitted_ids: list[UUID] = [event.id]
+    retained_statements: list[dict[str, Any]] = []
+    retained_roots: list[UUID] = []
+    if previous_manifest is not None:
+        retained_statements, retained_roots = _retained_recorded_statements(
+            session,
+            store=store,
+            manifest=previous_manifest,
+            profile_date=occurrence_date,
+            rebuilt_key_prefix=f"wikidata:{qid}:",
+        )
+        for other_id in sorted(
+            events_behind_manifest(session, manifest=previous_manifest), key=str
+        ):
+            if other_id != event.id:
+                admitted_ids.append(other_id)
+
+    identity_roots: dict[UUID, UUID] = {}
+    for event_id in admitted_ids:
+        admitted = session.get(Event, event_id)
+        if admitted is None:
+            raise ValueError(
+                f"Event {event_id} was published on {occurrence_date.isoformat()} "
+                "but no longer exists."
+            )
+        identity_roots[event_id] = admitted.resolved_claim_id
+
+    # A date holding several events needs a human's choice of headline. The
+    # deterministic default is a later slice; until then this fails closed
+    # rather than lead with whichever event a query happened to order first.
+    featured_root = resolve_featured_event(
+        session,
+        profile_date=occurrence_date,
+        candidate_root_ids=[identity_roots[event_id] for event_id in admitted_ids],
+    )
+    featured_event_id = next(
+        event_id
+        for event_id, root in identity_roots.items()
+        if root == featured_root
+    )
+    featured_selection = (
+        current_featured_selection(
+            session, profile_date=occurrence_date, root_id=featured_root
+        )
+        if featured_root is not None and len(admitted_ids) > 1
+        else None
+    )
+
+    if featured_event_id == event.id:
+        ordered_statements = statements + retained_statements
+        ordered_roots = own_roots + retained_roots
+    else:
+        ordered_statements = retained_statements + statements
+        ordered_roots = retained_roots + own_roots
+    evidence = [
+        PublicationStatementEvidenceInput(
+            statement_path=f"/sections/recorded_on_this_date/{index}",
+            resolved_claim_id=root,
+        )
+        for index, root in enumerate(ordered_roots)
+    ]
+
     source_attribution = {
         "name": source.name,
         "publisher": source.publisher,
@@ -1571,7 +1721,7 @@ def publish_wikidata_event(
             "schema_version": "1",
             "date": occurrence_date.isoformat(),
             "profile_type": profile_type.value,
-            "sections": {"recorded_on_this_date": statements},
+            "sections": {"recorded_on_this_date": ordered_statements},
             "section_states": {"recorded_on_this_date": {"status": "available"}},
             "source_attribution": source_attribution,
         }
@@ -1588,7 +1738,7 @@ def publish_wikidata_event(
             "profile_type": profile_type.value,
             "sections": {
                 **(base_sections if isinstance(base_sections, dict) else {}),
-                "recorded_on_this_date": statements,
+                "recorded_on_this_date": ordered_statements,
             },
             "section_states": {
                 **(base_states if isinstance(base_states, dict) else {}),
@@ -1623,6 +1773,20 @@ def publish_wikidata_event(
         ),
         manifest_metadata={"wikidata_entity_id": qid},
         force_new_version=force_new_version,
+    )
+    # The version remembers which events it admitted and which it led with, so
+    # the admitted set never has to be guessed back out of surviving statements.
+    published_manifest = session.get(
+        PublicationManifest, profile.publication_manifest_id
+    )
+    if published_manifest is None:  # pragma: no cover - just published
+        raise ValueError("The published manifest could not be read back.")
+    record_published_events(
+        session,
+        manifest=published_manifest,
+        event_ids=admitted_ids,
+        featured_event_id=featured_event_id,
+        featured_selection_id=None if featured_selection is None else featured_selection.id,
     )
     return WikidataPublishOutcome(
         status="published",

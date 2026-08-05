@@ -43,6 +43,7 @@ from app.governance import (
     events_behind_manifest,
     record_claim_review,
     record_editorial_selection,
+    record_featured_event_selection,
     record_identity_adjudication,
 )
 from app.models import (
@@ -220,6 +221,30 @@ def _republish_with_a_different_event(
     rebuild_coverage_index(session)
     session.flush()
     return stranger
+
+
+def _feature_the_wikidata_event(session: Session) -> None:
+    """A human picks the headline for a date that now admits two events.
+
+    Publishing a multi-event date requires a human's choice (G3b-1); the
+    deterministic default is a later slice. These tests are about the collision
+    guard, not about who leads, so they supply the choice rather than assert it
+    is unnecessary.
+    """
+    wikidata = _wikidata_event(session)
+    candidates = [wikidata.resolved_claim_id] + [
+        event.resolved_claim_id
+        for event in session.scalars(select(Event))
+        if event.id != wikidata.id
+    ]
+    record_featured_event_selection(
+        session,
+        profile_date=GOLDEN_DATE,
+        candidate_root_ids=candidates,
+        chosen_root_id=wikidata.resolved_claim_id,
+        reviewer="test-human",
+        rationale="Featured so the date has one headline.",
+    )
 
 
 def _prepare_for_publication(session: Session, tmp_path: Path) -> None:
@@ -732,6 +757,7 @@ def test_a_human_distinct_event_decision_lets_publication_pass_the_collision(
         reviewer="test-human",
         rationale="Two different events that share 1964-03-27.",
     )
+    _feature_the_wikidata_event(session)
     session.flush()
 
     published = publish_wikidata_event(session, store=store)
@@ -889,6 +915,8 @@ def test_the_adjudicate_command_records_the_decision_and_unblocks_publication(
     assert "decision=distinct_event" in reported
     assert "adjudication_id=" in reported
     # And the guard now lets the second event through.
+    _feature_the_wikidata_event(session)
+    session.flush()
     assert publish_wikidata_event(session, store=store).status == "published"
 
 
@@ -1246,6 +1274,8 @@ def test_a_republication_of_the_same_event_still_allows_adjudication(
         reviewer="test-human",
         rationale="Same two events; the date was merely republished.",
     )
+    _feature_the_wikidata_event(session)
+    session.flush()
 
     assert recorded
     assert publish_wikidata_event(session, store=store).status == "published"

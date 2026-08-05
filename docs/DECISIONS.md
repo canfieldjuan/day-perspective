@@ -1370,3 +1370,66 @@ gap where no human has chosen — the SHA-256 tiebreak — and binds the chosen
 identity to the published manifest so `derive_review_status` can see it. This
 slice deliberately stops short of that: nothing yet calls the writer in
 production, and G4 does not begin until G3b lands.
+
+## D044: Featured means emphasized first, not retained alone
+
+**Context:** D042 let a human rule two events distinct so the second could publish
+past the collision guard. It did not change what publication *writes*. The
+publisher rebuilds `recorded_on_this_date` from one event's predicates, so
+publishing B after `distinct_event(A, B)` deleted A from the date it still
+occurred on — the archive contradicting a decision it had just recorded.
+
+The display loss is the visible half. The dangerous half is collision safety:
+`events_behind_manifest` answers "which events does this date already publish",
+and the guard checks every new candidate against that set. An event that
+disappears from the manifest takes its identity with it, so a later candidate C
+carrying only `distinct_event(C, A)` could publish past an unjudged B. The
+system would forget its own prior identity decision — a sophisticated way to
+become unsafe.
+
+**Decision:** A version publishes the **complete admitted event set** for its
+date. The featured choice decides which event *leads*, never which events
+survive. A date holding several events requires a human's headline choice and
+**fails closed** without one; the deterministic default is a later slice.
+
+**Mechanism:** `publish_wikidata_event` (`services/api/app/wikidata.py`) computes
+the admitted set as this event plus every event behind the prior manifest,
+resolves the headline through G3a's `resolve_featured_event`, and orders the
+featured event's statements first. `publication_recorded_events` (migration
+`20260805_0019`) binds every admitted event id, which one was featured, and the
+**exact** `featured_selection_id` the version published under — a later decision
+must not be able to change what an immutable artifact is understood to have
+claimed. `events_behind_manifest` believes that binding, falling back to the
+evidence-graph inference only for versions published before it existed.
+
+The binding is not redundant with the inference. The derivation can only
+recognise an event whose statements root on a relation it knows about (identity,
+primary `EventTime` provenance, `EventLocation` provenance). USGS publishes
+title, magnitude, depth and type through none of those, so a co-published USGS
+event would have been invisible in the manifest *even with its statements on the
+page*.
+
+Retained statements are re-checked against current editorial selections rather
+than copied, so a predicate a human has since withdrawn cannot survive by having
+appeared in the previous artifact. The pass rebuilds its own entity's material
+and retains only other events' — keyed on the resolution keyspace
+(`wikidata:{qid}:`) rather than on root ids, because a re-resolved predicate gets
+a new id and id-matching would silently duplicate every statement on a re-ingest,
+changing the content hash and defeating idempotent republication.
+
+**Alternatives considered:** Inferring the admitted set from surviving statement
+roots — insufficient, per above, and it fails silently in exactly the case that
+matters. Binding only the featured event — that is the defect, restated.
+Carrying the prior recorded statements verbatim — cheaper, but it lets a
+withdrawn predicate outlive the decision that withdrew it.
+
+**Consequences:** A date can hold several legitimately co-occurring events, with
+one headline, and none of them vanish when another is published or the headline
+is switched. Three G3a collision tests now supply a headline before publishing;
+their assertions are unchanged, because the contract they prove (the guard opens)
+is unchanged.
+
+Grouping statements *by event* in the payload, featured-versus-secondary
+rendering, review-status consuming the bound selection, and honest multi-source
+attribution are G3b-2. Until then the section is a flat array with the featured
+event's statements first, which is what the web already treats as the lead.
