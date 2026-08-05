@@ -22,14 +22,17 @@ from app.governance import (
     EditorialSelection,
     EditorialSelectionStatus,
     EventIdentityAdjudication,
+    FeaturedEventUnresolved,
     IdentityAdjudicationDecision,
     LicenseInput,
     assert_release_publication_eligible,
+    current_featured_event_selection,
     events_behind_manifest,
     is_human_reviewer,
     latest_identity_adjudication,
     record_identity_adjudication,
     register_release_license,
+    resolve_featured_event,
 )
 from app.models import (
     Claim,
@@ -793,7 +796,12 @@ class WikidataPublishOutcome:
     distinct-event. ``blocked_by_adjudication`` means a human has already decided,
     and their decision was not ``distinct_event``: the collision stands, and
     ``adjudication_id`` points at the decision that says so rather than asking the
-    same question again with a fresh review task.
+    same question again with a fresh review task. ``featured_event_required``
+    means a human ``distinct_event`` decision (D042) admits this candidate
+    alongside another already-published event, but nobody has yet chosen which of
+    the date's events is featured (D043); the pass publishes nothing rather than
+    pick a headline itself (``colliding_manifest_id`` names the manifest that
+    could not be safely extended).
     """
 
     status: str
@@ -1007,10 +1015,16 @@ def _collision_adjudication(
     evidence yields no decisions at all -- which would make "every event is
     adjudicated distinct" vacuously true over an empty set, and bypass the guard
     precisely when the collision is least understood.
+
+    Excludes the event itself from the manifest's events before checking (G3b-1):
+    once a manifest legitimately carries this event alongside another, this same
+    check runs again on every later publish attempt to that manifest, and a
+    self-pair would otherwise read as an unresolved adjudication against
+    ourselves.
     """
     if event is None:
         return False, None
-    others = events_behind_manifest(session, manifest=manifest)
+    others = events_behind_manifest(session, manifest=manifest) - {event.id}
     if not others:
         return False, None
     decisions = [
@@ -1042,6 +1056,51 @@ def _collision_adjudication(
         None,
     )
     return False, blocking
+
+
+def _collision_outcome_if_blocked(
+    session: Session,
+    *,
+    event: Event | None,
+    manifest: PublicationManifest,
+    identity_claim: Claim,
+    qid: str,
+    occurrence_date: date,
+) -> WikidataPublishOutcome | None:
+    """``None`` to proceed past this manifest's collision; else the outcome to
+    return instead.
+
+    Shared by a brand-new candidate's collision check and the revalidation of
+    events already carried onto a manifest that also contains our own event
+    (G3b-1): a ``distinct_event`` decision can be superseded later by
+    ``merge``/``supersede``/``deferred``, and that later decision must reach the
+    same durable-adjudication rules the original guard applied, not be skipped
+    merely because the manifest already includes this event.
+    """
+    bypass, blocking = _collision_adjudication(session, event=event, manifest=manifest)
+    if bypass:
+        return None
+    if blocking is not None:
+        return WikidataPublishOutcome(
+            status="blocked_by_adjudication",
+            occurrence_date=occurrence_date,
+            colliding_manifest_id=manifest.id,
+            adjudication_id=blocking.id,
+        )
+    task = _ensure_merge_review_task(
+        session,
+        identity_claim=identity_claim,
+        qid=qid,
+        occurrence_date=occurrence_date,
+        colliding_manifest_id=manifest.id,
+        colliding_events=events_behind_manifest(session, manifest=manifest),
+    )
+    return WikidataPublishOutcome(
+        status="deferred_to_merge_review",
+        occurrence_date=occurrence_date,
+        colliding_manifest_id=manifest.id,
+        merge_review_task_id=task.id,
+    )
 
 
 def resolve_merge_review(
@@ -1314,6 +1373,132 @@ def _carried_forward_evidence(
     return carried
 
 
+def _surviving_recorded_statements(
+    session: Session,
+    *,
+    store: PublishedProfileStore,
+    manifest: PublicationManifest,
+    profile_date: date,
+    exclude_root_ids: set[UUID],
+) -> tuple[list[dict[str, Any]], list[PublicationStatementEvidenceInput]]:
+    """A prior manifest's *other* recorded-event statements that are still selected.
+
+    Rebuilt from current governance, not copied blindly (D042/D043): a
+    predicate withdrawn since that manifest published must not survive into the
+    successor merely because it appeared in the old artifact. The statement
+    content itself is read back from the prior artifact -- the only place this
+    module has a foreign source's own rendering of its own predicates -- but
+    *which* predicates survive is decided fresh, from the current
+    ``recorded_on_this_date`` editorial selections for this date, so a root a
+    human has since rejected drops out even though the old artifact still
+    names it.
+
+    Deliberately a flat list, not grouped by event: only two of an event's
+    published predicates (occurrence and, when present, coordinates) carry an
+    ``Event``/``EventTime``/``EventLocation`` link at all -- the rest (name,
+    magnitude, depth, type, ...) have no column tying them back to an event, by
+    design (D044's alternatives): that mapping is source-specific rendering
+    knowledge this module deliberately does not carry for a foreign source.
+    Grouping by event from this data would silently drop every unlinked
+    predicate for a carried-forward event, which is a worse defect than the
+    ordering limitation this function accepts (see the caller for the
+    ordering this implies when a date carries more than two admitted events).
+
+    ``exclude_root_ids`` are the current candidate's own roots -- already
+    freshly rendered by the caller -- so its predicates are never duplicated
+    between its own fresh statements and this function's carried-forward ones.
+    """
+    prior_payload = store.read(manifest.storage_uri, manifest.content_hash)
+    prior_sections = prior_payload.get("sections")
+    prior_statements = (
+        prior_sections.get("recorded_on_this_date")
+        if isinstance(prior_sections, dict)
+        else None
+    )
+    if not isinstance(prior_statements, list):
+        return [], []
+    evidence_by_path = {
+        row.statement_path: row
+        for row in session.scalars(
+            select(PublicationStatementEvidence).where(
+                PublicationStatementEvidence.publication_manifest_id == manifest.id,
+                PublicationStatementEvidence.statement_path.startswith(
+                    "/sections/recorded_on_this_date/", autoescape=True
+                ),
+            )
+        )
+    }
+    latest_selected: dict[UUID, EditorialSelection] = {}
+    for selection in session.scalars(
+        select(EditorialSelection)
+        .where(
+            EditorialSelection.profile_date == profile_date,
+            EditorialSelection.section_key == "recorded_on_this_date",
+        )
+        .order_by(EditorialSelection.decision_version.desc())
+    ):
+        if selection.resolved_claim_id is not None:
+            latest_selected.setdefault(selection.resolved_claim_id, selection)
+
+    surviving_statements: list[dict[str, Any]] = []
+    surviving_evidence: list[PublicationStatementEvidenceInput] = []
+    for index, statement in enumerate(prior_statements):
+        row = evidence_by_path.get(f"/sections/recorded_on_this_date/{index}")
+        if row is None or row.resolved_claim_id is None:
+            continue
+        if row.resolved_claim_id in exclude_root_ids:
+            continue
+        decision = latest_selected.get(row.resolved_claim_id)
+        if decision is None or decision.status != EditorialSelectionStatus.SELECTED.value:
+            continue
+        surviving_statements.append(statement)
+        surviving_evidence.append(
+            PublicationStatementEvidenceInput(
+                statement_path=row.statement_path,
+                resolved_claim_id=row.resolved_claim_id,
+            )
+        )
+    return surviving_statements, surviving_evidence
+
+
+def _event_has_surviving_evidence(
+    session: Session, *, event_id: UUID | None, surviving_root_ids: set[UUID]
+) -> bool:
+    """Whether any surviving statement's root is actually this event's own.
+
+    The featured pick (the ``featured_event`` section) and per-predicate
+    rejection (the ``recorded_on_this_date`` section) are independent
+    governance decisions on independent roots, so a featured prior event can
+    have every one of its own predicates separately rejected without the
+    featured selection itself ever being touched. Checked only via the two
+    roots that do link back to an event -- occurrence and, when present,
+    location -- the same two `events_behind_manifest` reads; this function
+    answers one existence question, not the full per-statement attribution
+    `_surviving_recorded_statements` deliberately does not attempt.
+    """
+    if event_id is None or not surviving_root_ids:
+        return False
+    return bool(
+        session.scalar(
+            select(func.count())
+            .select_from(EventTime)
+            .where(
+                EventTime.event_id == event_id,
+                EventTime.provenance_resolved_claim_id.in_(surviving_root_ids),
+            )
+        )
+    ) or bool(
+        session.scalar(
+            select(func.count())
+            .select_from(EventLocation)
+            .where(
+                EventLocation.event_id == event_id,
+                EventLocation.provenance_resolved_claim_id.in_(surviving_root_ids),
+            )
+        )
+    )
+
+
 def publish_wikidata_event(
     session: Session,
     *,
@@ -1408,33 +1593,16 @@ def publish_wikidata_event(
         # A human may have already ruled that these are two different events that
         # happen to share a date. That decision -- pair-specific, current, and
         # theirs -- is the only thing that lets a second recorded event publish.
-        bypass, blocking = _collision_adjudication(
-            session, event=event, manifest=collision
+        outcome = _collision_outcome_if_blocked(
+            session,
+            event=event,
+            manifest=collision,
+            identity_claim=claims["candidate_event_identity"],
+            qid=qid,
+            occurrence_date=occurrence_date,
         )
-        if not bypass:
-            if blocking is not None:
-                return WikidataPublishOutcome(
-                    status="blocked_by_adjudication",
-                    occurrence_date=occurrence_date,
-                    colliding_manifest_id=collision.id,
-                    adjudication_id=blocking.id,
-                )
-            task = _ensure_merge_review_task(
-                session,
-                identity_claim=claims["candidate_event_identity"],
-                qid=qid,
-                occurrence_date=occurrence_date,
-                colliding_manifest_id=collision.id,
-                colliding_events=events_behind_manifest(
-                    session, manifest=collision
-                ),
-            )
-            return WikidataPublishOutcome(
-                status="deferred_to_merge_review",
-                occurrence_date=occurrence_date,
-                colliding_manifest_id=collision.id,
-                merge_review_task_id=task.id,
-            )
+        if outcome is not None:
+            return outcome
 
     # Publication requires the resolved event (G2a).
     if event is None or identity_resolved is None or resolved_occurrence is None:
@@ -1561,6 +1729,134 @@ def publish_wikidata_event(
         else None
     )
 
+    # Other canonical events the prior manifest already admits, besides this
+    # candidate's own. Non-empty exactly when a human has adjudicated a genuine
+    # identity collision distinct (D042): the successor must retain every
+    # admitted event, never replace one with another, and must carry exactly
+    # one featured choice among them (D043). No standing rule exists yet
+    # (G3b-2), so an unresolved choice fails closed rather than publish an
+    # arbitrary headline.
+    other_events = (
+        events_behind_manifest(session, manifest=previous_manifest) - {event.id}
+        if previous_manifest is not None
+        else set()
+    )
+    recorded_statements = statements
+    recorded_evidence = evidence
+    featured_metadata: dict[str, Any] = {}
+    if other_events:
+        # other_events is only ever non-empty when previous_manifest is not
+        # None (see its definition immediately above).
+        assert previous_manifest is not None
+        # Re-check the collision guard even though this manifest already
+        # carries our own event: the earlier check above is skipped whenever
+        # _manifest_is_wikidata_event is true, but a distinct_event decision
+        # that once admitted these other events can be superseded later by a
+        # human recording merge/supersede/deferred for the same pair. Without
+        # this, a stale decision would go unenforced on every later republish
+        # that merely carries the other event forward (G3b-1 round 1).
+        outcome = _collision_outcome_if_blocked(
+            session,
+            event=event,
+            manifest=previous_manifest,
+            identity_claim=claims["candidate_event_identity"],
+            qid=qid,
+            occurrence_date=occurrence_date,
+        )
+        if outcome is not None:
+            return outcome
+        candidate_roots = [identity_resolved.id]
+        for other_event_id in sorted(other_events, key=str):
+            other_event = session.get(Event, other_event_id)
+            if other_event is not None:
+                candidate_roots.append(other_event.resolved_claim_id)
+        try:
+            featured_root = resolve_featured_event(
+                session,
+                profile_date=occurrence_date,
+                candidate_root_ids=candidate_roots,
+            )
+        except FeaturedEventUnresolved:
+            return WikidataPublishOutcome(
+                status="featured_event_required",
+                occurrence_date=occurrence_date,
+                colliding_manifest_id=previous_manifest.id,
+            )
+        # At least two candidate roots are always supplied here, so the
+        # resolver never returns None (that is only for zero candidates).
+        assert featured_root is not None
+        featured_selection = current_featured_event_selection(
+            session, profile_date=occurrence_date, root_id=featured_root
+        )
+        if featured_selection is None:
+            raise ValueError(
+                "A featured event was resolved but has no recorded selection."
+            )
+        featured_metadata = {
+            "featured_event_selection_id": str(featured_selection.id),
+            "featured_event_selection_version": featured_selection.decision_version,
+        }
+        surviving_statements, surviving_evidence = _surviving_recorded_statements(
+            session,
+            store=store,
+            manifest=previous_manifest,
+            profile_date=occurrence_date,
+            exclude_root_ids={
+                item.resolved_claim_id
+                for item in evidence
+                if item.resolved_claim_id is not None
+            },
+        )
+        surviving_root_ids = {
+            item.resolved_claim_id
+            for item in surviving_evidence
+            if item.resolved_claim_id is not None
+        }
+        if any(
+            not _event_has_surviving_evidence(
+                session, event_id=other_event_id, surviving_root_ids=surviving_root_ids
+            )
+            for other_event_id in other_events
+        ):
+            # Featuring and per-predicate rejection are independent governance
+            # decisions: a human can reject every one of an admitted event's
+            # own recorded predicates -- whether or not that event is the
+            # featured one -- without ever touching its adjudication or
+            # featured-event standing. If nothing of an admitted event
+            # survives, carrying it forward silently drops its evidence from
+            # the successor manifest, which makes it invisible to
+            # `events_behind_manifest` on every later publish attempt -- a
+            # future candidate would then never be checked against an event
+            # the date had genuinely admitted. Fail closed instead, for every
+            # `other_events` member, not only whichever one is featured.
+            return WikidataPublishOutcome(
+                status="featured_event_required",
+                occurrence_date=occurrence_date,
+                colliding_manifest_id=previous_manifest.id,
+            )
+        # Only a two-way split: featured-vs-not. A date with more than two
+        # admitted events, where the featured one is neither this candidate nor
+        # first in the prior artifact's order, is not reachable through any
+        # real publisher in this codebase today (only one real Wikidata entity
+        # exists, alongside USGS's single golden event) and is deliberately not
+        # handled precisely here -- see the module-level note on
+        # `_surviving_recorded_statements` for why a per-event grouping fix is
+        # deferred rather than approximated.
+        if featured_root == identity_resolved.id:
+            recorded_statements = [*statements, *surviving_statements]
+            recorded_evidence = [*evidence, *surviving_evidence]
+        else:
+            recorded_statements = [*surviving_statements, *statements]
+            recorded_evidence = [*surviving_evidence, *evidence]
+        recorded_evidence = [
+            PublicationStatementEvidenceInput(
+                statement_path=f"/sections/recorded_on_this_date/{index}",
+                resolved_claim_id=item.resolved_claim_id,
+                derived_value_id=item.derived_value_id,
+            )
+            for index, item in enumerate(recorded_evidence)
+        ]
+
     source_attribution = {
         "name": source.name,
         "publisher": source.publisher,
@@ -1571,7 +1867,7 @@ def publish_wikidata_event(
             "schema_version": "1",
             "date": occurrence_date.isoformat(),
             "profile_type": profile_type.value,
-            "sections": {"recorded_on_this_date": statements},
+            "sections": {"recorded_on_this_date": recorded_statements},
             "section_states": {"recorded_on_this_date": {"status": "available"}},
             "source_attribution": source_attribution,
         }
@@ -1588,7 +1884,7 @@ def publish_wikidata_event(
             "profile_type": profile_type.value,
             "sections": {
                 **(base_sections if isinstance(base_sections, dict) else {}),
-                "recorded_on_this_date": statements,
+                "recorded_on_this_date": recorded_statements,
             },
             "section_states": {
                 **(base_states if isinstance(base_states, dict) else {}),
@@ -1598,9 +1894,23 @@ def publish_wikidata_event(
         }
         if isinstance(base.get("quality"), dict):
             payload["quality"] = base["quality"]
-        evidence = _carried_forward_evidence(
+        recorded_evidence = _carried_forward_evidence(
             session, manifest_id=previous_manifest.id
-        ) + evidence
+        ) + recorded_evidence
+
+    # publish_day_profile's idempotency decides purely on the rendered payload's
+    # content hash. A human can reaffirm or replace the current featured choice
+    # for the *same* root -- a new EditorialSelection version with the same
+    # outcome -- which changes nothing about the rendered section or its order.
+    # Without this, that republish would be treated as a no-op and the manifest
+    # would keep pointing at the stale selection row/version even though this
+    # publish resolved against a newer one.
+    metadata_binding_changed = bool(featured_metadata) and previous_manifest is not None and (
+        previous_manifest.metadata_json.get("featured_event_selection_id")
+        != featured_metadata.get("featured_event_selection_id")
+        or previous_manifest.metadata_json.get("featured_event_selection_version")
+        != featured_metadata.get("featured_event_selection_version")
+    )
 
     profile = publish_day_profile(
         session,
@@ -1608,7 +1918,7 @@ def publish_wikidata_event(
         profile_date=occurrence_date,
         profile_type=profile_type,
         payload=payload,
-        statement_evidence=evidence,
+        statement_evidence=recorded_evidence,
         methodology_id=methodology.id,
         supersedes_manifest_id=(
             previous_manifest.id if previous_manifest is not None else None
@@ -1621,8 +1931,8 @@ def publish_wikidata_event(
             if previous_manifest is not None
             else 1
         ),
-        manifest_metadata={"wikidata_entity_id": qid},
-        force_new_version=force_new_version,
+        manifest_metadata={"wikidata_entity_id": qid, **featured_metadata},
+        force_new_version=force_new_version or metadata_binding_changed,
     )
     return WikidataPublishOutcome(
         status="published",

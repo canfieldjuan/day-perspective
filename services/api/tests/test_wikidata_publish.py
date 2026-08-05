@@ -34,6 +34,7 @@ from sqlalchemy.orm import Session
 from app.adapters.base import LocalFilesystemRawSourceStore
 from app.coverage import coverage_entry, rebuild_coverage_index
 from app.governance import (
+    EditorialSelection,
     EditorialSelectionStatus,
     EventIdentityAdjudication,
     IdentityAdjudicationDecision,
@@ -43,6 +44,7 @@ from app.governance import (
     events_behind_manifest,
     record_claim_review,
     record_editorial_selection,
+    record_featured_event_selection,
     record_identity_adjudication,
 )
 from app.models import (
@@ -168,6 +170,35 @@ def _wikidata_event(session: Session) -> Event:
     )
     assert event is not None
     return event
+
+
+def _golden_event(session: Session, golden: DayProfile) -> Event:
+    """The canonical Event behind the published USGS golden manifest."""
+    golden_manifest = session.get(PublicationManifest, golden.publication_manifest_id)
+    assert golden_manifest is not None
+    event_ids = events_behind_manifest(session, manifest=golden_manifest)
+    assert len(event_ids) == 1
+    event = session.get(Event, next(iter(event_ids)))
+    assert event is not None
+    return event
+
+
+def _feature(
+    session: Session,
+    *,
+    candidates: list[Event],
+    chosen: Event,
+    reviewer: str = "test-human",
+) -> None:
+    record_featured_event_selection(
+        session,
+        profile_date=GOLDEN_DATE,
+        candidate_root_ids=[candidate.resolved_claim_id for candidate in candidates],
+        chosen_root_id=chosen.resolved_claim_id,
+        reviewer=reviewer,
+        rationale=f"Featuring {chosen.canonical_title!r} for this test.",
+    )
+    session.flush()
 
 
 def _republish_with_a_different_event(
@@ -717,7 +748,7 @@ def test_a_human_distinct_event_decision_lets_publication_pass_the_collision(
     the next attempt collided and deferred again, because the guard had no record
     to read.
     """
-    publish_golden(session, tmp_path)
+    _, golden = publish_golden(session, tmp_path)
     _prepare_for_publication(session, tmp_path)
     rebuild_coverage_index(session)
     session.flush()
@@ -733,6 +764,14 @@ def test_a_human_distinct_event_decision_lets_publication_pass_the_collision(
         rationale="Two different events that share 1964-03-27.",
     )
     session.flush()
+
+    # A genuine multi-event date (D042) still needs one featured headline
+    # (D043) before the successor can publish (G3b-1).
+    _feature(
+        session,
+        candidates=[_golden_event(session, golden), _wikidata_event(session)],
+        chosen=_wikidata_event(session),
+    )
 
     published = publish_wikidata_event(session, store=store)
 
@@ -853,7 +892,7 @@ def test_the_adjudicate_command_records_the_decision_and_unblocks_publication(
 
     from app import candidate_cli
 
-    publish_golden(session, tmp_path)
+    _, golden = publish_golden(session, tmp_path)
     _prepare_for_publication(session, tmp_path)
     rebuild_coverage_index(session)
     session.flush()
@@ -888,6 +927,12 @@ def test_the_adjudicate_command_records_the_decision_and_unblocks_publication(
     reported = capsys.readouterr().out
     assert "decision=distinct_event" in reported
     assert "adjudication_id=" in reported
+    # A genuine multi-event date still needs one featured headline (D043).
+    _feature(
+        session,
+        candidates=[_golden_event(session, golden), _wikidata_event(session)],
+        chosen=_wikidata_event(session),
+    )
     # And the guard now lets the second event through.
     assert publish_wikidata_event(session, store=store).status == "published"
 
@@ -1248,6 +1293,11 @@ def test_a_republication_of_the_same_event_still_allows_adjudication(
     )
 
     assert recorded
+    _feature(
+        session,
+        candidates=[_golden_event(session, golden), _wikidata_event(session)],
+        chosen=_wikidata_event(session),
+    )
     assert publish_wikidata_event(session, store=store).status == "published"
 
 
@@ -1317,3 +1367,445 @@ def test_a_non_distinct_decision_blocks_without_reopening_the_task(
         )
         == 0
     )
+
+
+def _publish_past_the_golden_collision(
+    session: Session, tmp_path: Path
+) -> tuple[LocalFilesystemPublishedProfileStore, DayProfile]:
+    """Golden published, Wikidata adjudicated distinct from it, not yet featured.
+
+    The shared setup for every G3b-1 test below: a genuine multi-event date
+    (D042) with no featured choice recorded yet.
+    """
+    _, golden = publish_golden(session, tmp_path)
+    _prepare_for_publication(session, tmp_path)
+    rebuild_coverage_index(session)
+    session.flush()
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+    assert publish_wikidata_event(session, store=store).status == (
+        "deferred_to_merge_review"
+    )
+    resolve_merge_review(
+        session,
+        decision=IdentityAdjudicationDecision.DISTINCT_EVENT,
+        reviewer="test-human",
+        rationale="Two different events that share 1964-03-27.",
+    )
+    session.flush()
+    return store, golden
+
+
+@pytest.mark.integration
+def test_publish_past_a_collision_fails_closed_without_an_existing_featured_choice(
+    session: Session, tmp_path: Path
+) -> None:
+    """G3b-1: a human `distinct_event` decision is not enough by itself.
+
+    Before this slice, the bypass alone let the second event publish, silently
+    replacing the first (D042/D043). No standing rule exists yet (G3b-2), so an
+    unresolved multi-event date must fail closed rather than pick a headline.
+    """
+    store, golden = _publish_past_the_golden_collision(session, tmp_path)
+    golden_manifest_before = session.get(
+        PublicationManifest, golden.publication_manifest_id
+    )
+    assert golden_manifest_before is not None
+    hash_before = golden_manifest_before.content_hash
+
+    outcome = publish_wikidata_event(session, store=store)
+
+    assert outcome.status == "featured_event_required"
+    assert outcome.colliding_manifest_id == golden.publication_manifest_id
+    # Nothing published: the golden manifest is untouched.
+    golden_after = session.get(
+        PublicationManifest, golden.publication_manifest_id
+    )
+    assert golden_after is not None
+    assert golden_after.content_hash == hash_before
+
+
+@pytest.mark.integration
+def test_publish_past_a_collision_preserves_both_events_once_one_is_featured(
+    session: Session, tmp_path: Path
+) -> None:
+    """The headline fix: featuring one event must not erase the other (D042)."""
+    store, golden = _publish_past_the_golden_collision(session, tmp_path)
+    golden_event = _golden_event(session, golden)
+    wikidata_event = _wikidata_event(session)
+    _feature(session, candidates=[golden_event, wikidata_event], chosen=wikidata_event)
+
+    outcome = publish_wikidata_event(session, store=store)
+
+    assert outcome.status == "published"
+    manifest = session.get(PublicationManifest, outcome.manifest_id)
+    assert manifest is not None
+    payload = store.read(manifest.storage_uri, manifest.content_hash)
+    statement_ids = {
+        item["statement_id"] for item in payload["sections"]["recorded_on_this_date"]
+    }
+    # The golden USGS statements (e.g. "event-title") survive alongside the
+    # newly published Wikidata statements (e.g. "wikidata-name") -- neither
+    # replaces the other.
+    assert "event-title" in statement_ids
+    assert "wikidata-name" in statement_ids
+    assert events_behind_manifest(session, manifest=manifest) == {
+        golden_event.id,
+        wikidata_event.id,
+    }
+    # The featured decision used for this exact version is bound to it.
+    assert manifest.metadata_json.get("featured_event_selection_id") is not None
+    assert manifest.metadata_json.get("featured_event_selection_version") == 1
+    # The featured event's own statements lead.
+    recorded = payload["sections"]["recorded_on_this_date"]
+    assert recorded[0]["statement_id"].startswith("wikidata-")
+
+
+@pytest.mark.integration
+def test_human_feature_switch_creates_a_new_version_and_keeps_both_events(
+    session: Session, tmp_path: Path
+) -> None:
+    """Switching the headline is a new version; it removes neither event."""
+    store, golden = _publish_past_the_golden_collision(session, tmp_path)
+    golden_event = _golden_event(session, golden)
+    wikidata_event = _wikidata_event(session)
+    _feature(session, candidates=[golden_event, wikidata_event], chosen=wikidata_event)
+    first = publish_wikidata_event(session, store=store)
+    assert first.status == "published"
+
+    _feature(session, candidates=[golden_event, wikidata_event], chosen=golden_event)
+    second = publish_wikidata_event(session, store=store)
+
+    assert second.status == "published"
+    assert second.manifest_id != first.manifest_id
+    manifest = session.get(PublicationManifest, second.manifest_id)
+    assert manifest is not None
+    assert manifest.supersedes_manifest_id == first.manifest_id
+    payload = store.read(manifest.storage_uri, manifest.content_hash)
+    recorded = payload["sections"]["recorded_on_this_date"]
+    statement_ids = {item["statement_id"] for item in recorded}
+    assert "event-title" in statement_ids
+    assert "wikidata-name" in statement_ids
+    # The golden event's statements now lead.
+    assert recorded[0]["statement_id"] == "event-title"
+    # The earlier version's binding is untouched by the later choice.
+    first_manifest = session.get(PublicationManifest, first.manifest_id)
+    assert first_manifest is not None
+    assert (
+        first_manifest.metadata_json.get("featured_event_selection_id")
+        != manifest.metadata_json.get("featured_event_selection_id")
+    )
+
+
+@pytest.mark.integration
+def test_an_unadjudicated_third_event_still_defers(
+    session: Session, tmp_path: Path
+) -> None:
+    """C is adjudicated distinct from A only; B remains unadjudicated for C.
+
+    The successor manifest now legitimately carries both A and B, so a third
+    candidate must be checked against *both* -- exactly the collision-safety
+    concern the operator's clarification raised: a dropped event would make a
+    later collision guard blind to it. Exercised directly against
+    ``_collision_adjudication``, the same check ``publish_wikidata_event``
+    calls, since only one Wikidata entity is committed offline.
+    """
+    store, golden = _publish_past_the_golden_collision(session, tmp_path)
+    golden_event = _golden_event(session, golden)
+    wikidata_event = _wikidata_event(session)
+    _feature(session, candidates=[golden_event, wikidata_event], chosen=wikidata_event)
+    published = publish_wikidata_event(session, store=store)
+    assert published.status == "published"
+    manifest = session.get(PublicationManifest, published.manifest_id)
+    assert manifest is not None
+    assert events_behind_manifest(session, manifest=manifest) == {
+        golden_event.id,
+        wikidata_event.id,
+    }
+
+    stranger = _make_event(session, key="third-event-adjudicated-against-golden-only")
+    record_identity_adjudication(
+        session,
+        event_a_id=stranger.id,
+        event_b_id=golden_event.id,
+        decision=IdentityAdjudicationDecision.DISTINCT_EVENT,
+        reviewer="test-human",
+        rationale="Distinct from the golden event only.",
+    )
+    session.flush()
+
+    # Adjudicated distinct from A, but B is still unadjudicated for C: fails
+    # closed rather than treat one pair's answer as blanket permission.
+    bypass, blocking = _collision_adjudication(
+        session, event=stranger, manifest=manifest
+    )
+    assert (bypass, blocking) == (False, None)
+
+    record_identity_adjudication(
+        session,
+        event_a_id=stranger.id,
+        event_b_id=wikidata_event.id,
+        decision=IdentityAdjudicationDecision.DISTINCT_EVENT,
+        reviewer="test-human",
+        rationale="Distinct from the Wikidata event too.",
+    )
+    session.flush()
+
+    # Adjudicated distinct from every event the manifest admits: may bypass.
+    bypass, blocking = _collision_adjudication(
+        session, event=stranger, manifest=manifest
+    )
+    assert bypass is True
+
+
+@pytest.mark.integration
+def test_single_event_publication_writes_no_feature_governance_row(
+    session: Session, tmp_path: Path
+) -> None:
+    """A single-event date is unaffected: no featured-event row, no gate."""
+    _prepare_for_publication(session, tmp_path)
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+
+    outcome = publish_wikidata_event(session, store=store)
+
+    assert outcome.status == "published"
+    assert (
+        session.scalar(
+            select(func.count())
+            .select_from(EditorialSelection)
+            .where(EditorialSelection.section_key == "featured_event")
+        )
+        == 0
+    )
+
+
+@pytest.mark.integration
+def test_a_superseded_distinct_event_decision_blocks_a_later_republish(
+    session: Session, tmp_path: Path
+) -> None:
+    """A distinct_event decision can be withdrawn after the events already publish.
+
+    Once A and B are legitimately admitted together, a later republish attempt
+    (for whichever event) must recheck the collision guard, not merely carry the
+    other event forward because it was already on the manifest. Superseding the
+    original `distinct_event(A, B)` with `deferred` must be enforced on the very
+    next publish attempt, exactly as it would be for a brand-new candidate.
+    """
+    store, golden = _publish_past_the_golden_collision(session, tmp_path)
+    golden_event = _golden_event(session, golden)
+    wikidata_event = _wikidata_event(session)
+    _feature(session, candidates=[golden_event, wikidata_event], chosen=wikidata_event)
+    first = publish_wikidata_event(session, store=store)
+    assert first.status == "published"
+    first_manifest = session.get(PublicationManifest, first.manifest_id)
+    assert first_manifest is not None
+    hash_before = first_manifest.content_hash
+
+    # A human reconsiders and withdraws the earlier distinct_event decision.
+    superseding = record_identity_adjudication(
+        session,
+        event_a_id=golden_event.id,
+        event_b_id=wikidata_event.id,
+        decision=IdentityAdjudicationDecision.DEFERRED,
+        reviewer="test-human",
+        rationale="Reconsidering; not settled that these are distinct after all.",
+    )
+    session.flush()
+
+    outcome = publish_wikidata_event(session, store=store)
+
+    assert outcome.status == "blocked_by_adjudication"
+    assert outcome.adjudication_id == superseding.id
+    # Nothing published: the prior successor is untouched.
+    first_manifest_after = session.get(PublicationManifest, first.manifest_id)
+    assert first_manifest_after is not None
+    assert first_manifest_after.content_hash == hash_before
+    assert (
+        session.scalar(
+            select(func.count())
+            .select_from(PublicationManifest)
+            .where(
+                PublicationManifest.profile_date == GOLDEN_DATE,
+                PublicationManifest.id.notin_([golden.publication_manifest_id]),
+            )
+        )
+        == 1
+    )
+
+
+@pytest.mark.integration
+def test_reaffirming_the_same_feature_still_rebinds_the_manifest_to_the_new_selection(
+    session: Session, tmp_path: Path
+) -> None:
+    """A same-root re-selection changes the bound row/version, not the content.
+
+    publish_day_profile's idempotency decides on the rendered payload alone.
+    Without forcing a new version here, a reaffirmed choice (a new
+    EditorialSelection version for the same already-featured root) would leave
+    the manifest pointing at the stale selection row even though this publish
+    resolved against a newer one.
+    """
+    store, golden = _publish_past_the_golden_collision(session, tmp_path)
+    golden_event = _golden_event(session, golden)
+    wikidata_event = _wikidata_event(session)
+    _feature(session, candidates=[golden_event, wikidata_event], chosen=wikidata_event)
+    first = publish_wikidata_event(session, store=store)
+    assert first.status == "published"
+    first_manifest = session.get(PublicationManifest, first.manifest_id)
+    assert first_manifest is not None
+    first_selection_id = first_manifest.metadata_json.get(
+        "featured_event_selection_id"
+    )
+    assert first_selection_id is not None
+
+    # A human reaffirms the *same* headline with a different reviewer identity
+    # -- a new EditorialSelection version, same outcome, so the rendered
+    # section is byte-identical.
+    _feature(
+        session,
+        candidates=[golden_event, wikidata_event],
+        chosen=wikidata_event,
+        reviewer="test-human-2",
+    )
+
+    second = publish_wikidata_event(session, store=store)
+
+    assert second.status == "published"
+    assert second.manifest_id != first.manifest_id
+    second_manifest = session.get(PublicationManifest, second.manifest_id)
+    assert second_manifest is not None
+    second_selection_id = second_manifest.metadata_json.get(
+        "featured_event_selection_id"
+    )
+    assert second_selection_id is not None
+    assert second_selection_id != first_selection_id
+    # The rendered content is unchanged -- only the binding moved.
+    first_payload = store.read(first_manifest.storage_uri, first_manifest.content_hash)
+    second_payload = store.read(
+        second_manifest.storage_uri, second_manifest.content_hash
+    )
+    assert (
+        first_payload["sections"]["recorded_on_this_date"]
+        == second_payload["sections"]["recorded_on_this_date"]
+    )
+
+
+@pytest.mark.integration
+def test_featuring_a_prior_event_whose_predicates_are_all_rejected_fails_closed(
+    session: Session, tmp_path: Path
+) -> None:
+    """The featured pick and per-predicate rejections are independent decisions.
+
+    If every one of the featured prior event's own recorded predicates has
+    since been rejected, that event has nothing left to publish. Binding it as
+    featured anyway would make the manifest claim an event it does not
+    actually carry -- a conflicting-governance state that must fail closed
+    rather than publish.
+    """
+    store, golden = _publish_past_the_golden_collision(session, tmp_path)
+    golden_event = _golden_event(session, golden)
+    wikidata_event = _wikidata_event(session)
+    _feature(session, candidates=[golden_event, wikidata_event], chosen=golden_event)
+    first = publish_wikidata_event(session, store=store)
+    assert first.status == "published"
+    first_manifest = session.get(PublicationManifest, first.manifest_id)
+    assert first_manifest is not None
+    hash_before = first_manifest.content_hash
+
+    # Every one of the golden event's own recorded predicates is separately
+    # rejected -- a correction to predicate-level governance that never
+    # touches the featured-event decision at all.
+    golden_manifest = session.get(PublicationManifest, golden.publication_manifest_id)
+    assert golden_manifest is not None
+    golden_roots = list(
+        session.scalars(
+            select(PublicationStatementEvidence.resolved_claim_id).where(
+                PublicationStatementEvidence.publication_manifest_id
+                == golden_manifest.id,
+                PublicationStatementEvidence.statement_path.startswith(
+                    "/sections/recorded_on_this_date/", autoescape=True
+                ),
+                PublicationStatementEvidence.resolved_claim_id.is_not(None),
+            )
+        )
+    )
+    assert golden_roots
+    for root_id in golden_roots:
+        record_editorial_selection(
+            session,
+            profile_date=GOLDEN_DATE,
+            section_key="recorded_on_this_date",
+            resolved_claim_id=root_id,
+            status=EditorialSelectionStatus.REJECTED,
+            display_rank=None,
+            rationale="Rejecting this golden predicate for this test.",
+            reviewed_by="test-human",
+        )
+    session.flush()
+
+    outcome = publish_wikidata_event(session, store=store)
+
+    assert outcome.status == "featured_event_required"
+    # Nothing published: the prior successor is untouched.
+    first_manifest_after = session.get(PublicationManifest, first.manifest_id)
+    assert first_manifest_after is not None
+    assert first_manifest_after.content_hash == hash_before
+
+
+@pytest.mark.integration
+def test_a_non_featured_admitted_event_whose_predicates_are_all_rejected_fails_closed(
+    session: Session, tmp_path: Path
+) -> None:
+    """The surviving-evidence check covers every admitted event, not only
+    whichever one happens to be featured.
+
+    Golden is admitted but not featured here (Wikidata is). If golden's own
+    recorded predicates have all since been rejected, carrying it forward
+    would silently drop its evidence from the successor manifest -- making it
+    invisible to `events_behind_manifest` on every later publish attempt, so a
+    future third candidate would never be checked against an event the date
+    had genuinely admitted.
+    """
+    store, golden = _publish_past_the_golden_collision(session, tmp_path)
+    golden_event = _golden_event(session, golden)
+    wikidata_event = _wikidata_event(session)
+    _feature(session, candidates=[golden_event, wikidata_event], chosen=wikidata_event)
+    first = publish_wikidata_event(session, store=store)
+    assert first.status == "published"
+    first_manifest = session.get(PublicationManifest, first.manifest_id)
+    assert first_manifest is not None
+    hash_before = first_manifest.content_hash
+
+    golden_manifest = session.get(PublicationManifest, golden.publication_manifest_id)
+    assert golden_manifest is not None
+    golden_roots = list(
+        session.scalars(
+            select(PublicationStatementEvidence.resolved_claim_id).where(
+                PublicationStatementEvidence.publication_manifest_id
+                == golden_manifest.id,
+                PublicationStatementEvidence.statement_path.startswith(
+                    "/sections/recorded_on_this_date/", autoescape=True
+                ),
+                PublicationStatementEvidence.resolved_claim_id.is_not(None),
+            )
+        )
+    )
+    assert golden_roots
+    for root_id in golden_roots:
+        record_editorial_selection(
+            session,
+            profile_date=GOLDEN_DATE,
+            section_key="recorded_on_this_date",
+            resolved_claim_id=root_id,
+            status=EditorialSelectionStatus.REJECTED,
+            display_rank=None,
+            rationale="Rejecting this golden predicate for this test.",
+            reviewed_by="test-human",
+        )
+    session.flush()
+
+    outcome = publish_wikidata_event(session, store=store)
+
+    assert outcome.status == "featured_event_required"
+    first_manifest_after = session.get(PublicationManifest, first.manifest_id)
+    assert first_manifest_after is not None
+    assert first_manifest_after.content_hash == hash_before
