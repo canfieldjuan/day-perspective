@@ -1458,6 +1458,7 @@ def _validate_recorded_event_bindings(
     profile_type: ProfileType,
     payload: dict[str, Any],
     recorded_events: Sequence[RecordedEventBinding],
+    recorded_evidence: Sequence[PublicationStatementEvidenceInput],
 ) -> None:
     """A version that publishes recorded events must say which events they are.
 
@@ -1492,14 +1493,31 @@ def _validate_recorded_event_bindings(
     )
     if current is None:
         return
-    previously_admitted = set(
-        session.scalars(
-            select(PublicationRecordedEvent.event_id).where(
-                PublicationRecordedEvent.publication_manifest_id == current.id
-            )
+    # Routed through the one function that answers "which events does this
+    # manifest publish", rather than reading the binding table directly. Reading
+    # the table was a second implementation of that question, and it disagreed
+    # with the first precisely where the fallback matters: the migration does not
+    # backfill bindings, so every manifest published before it has no rows, and a
+    # direct read waves through the first republish of every pre-existing date.
+    from app.governance import events_behind_manifest, events_from_recorded_roots
+
+    previously_admitted = events_behind_manifest(session, manifest=current)
+    # What this version will admit, predicted the same way it will later be
+    # read: its declared bindings, or -- when it declares none -- the events its
+    # own recorded statements resolve to. Comparing against the declarations
+    # alone would refuse a successor that republishes the very statements
+    # keeping an event on the date, which is preservation, not a drop.
+    declared = {binding.event_id for binding in recorded_events}
+    if not declared:
+        declared = events_from_recorded_roots(
+            session,
+            resolved_root_ids={
+                item.resolved_claim_id
+                for item in recorded_evidence
+                if item.resolved_claim_id is not None
+            },
         )
-    )
-    dropped = previously_admitted - {binding.event_id for binding in recorded_events}
+    dropped = previously_admitted - declared
     if dropped:
         raise ValueError(
             f"{profile_date.isoformat()} already publishes recorded events "
@@ -1614,6 +1632,13 @@ def publish_day_profile(
                 profile_type=profile_type,
                 payload=payload,
                 recorded_events=list(recorded_events),
+                recorded_evidence=[
+                    item
+                    for item in evidence
+                    if item.statement_path.startswith(
+                        f"/sections/{RECORDED_EVENT_SECTION}/"
+                    )
+                ],
             )
             snapshotted_evidence = _snapshot_statement_evidence(session, evidence)
             _validate_profile_supersession(

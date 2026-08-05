@@ -910,21 +910,34 @@ def events_behind_manifest(
     )
     if bound:
         return bound
-    roots = set(
-        session.scalars(
-            select(PublicationStatementEvidence.resolved_claim_id).where(
-                PublicationStatementEvidence.publication_manifest_id == manifest.id,
-                # autoescape, because every underscore in a LIKE pattern is a
-                # single-character wildcard: without it `recorded_on_this_date`
-                # also matches a section named `recordedXonYthisZdate`, and a
-                # lookalike section would resolve to a recorded event.
-                PublicationStatementEvidence.statement_path.startswith(
-                    f"/sections/{RECORDED_EVENT_SECTION}/", autoescape=True
-                ),
-                PublicationStatementEvidence.resolved_claim_id.is_not(None),
+    return events_from_recorded_roots(
+        session,
+        resolved_root_ids=set(
+            session.scalars(
+                select(PublicationStatementEvidence.resolved_claim_id).where(
+                    PublicationStatementEvidence.publication_manifest_id
+                    == manifest.id,
+                    PublicationStatementEvidence.statement_path.startswith(
+                        f"/sections/{RECORDED_EVENT_SECTION}/", autoescape=True
+                    ),
+                    PublicationStatementEvidence.resolved_claim_id.is_not(None),
+                )
             )
-        )
+        ),
     )
+
+
+def events_from_recorded_roots(
+    session: Session, *, resolved_root_ids: set[UUID]
+) -> set[UUID]:
+    """The canonical events a set of recorded-section roots resolves to.
+
+    The inference half of ``events_behind_manifest``, shared so that predicting
+    what a version *will* admit and reading what a version *did* admit cannot
+    answer differently. Two implementations of that question is what let a
+    successor look like it dropped an event it was in fact republishing.
+    """
+    roots = resolved_root_ids
     if not roots:
         return set()
     found: set[UUID] = set(

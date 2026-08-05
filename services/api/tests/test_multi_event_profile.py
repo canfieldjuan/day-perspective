@@ -650,3 +650,114 @@ def test_an_empty_recorded_section_is_fine_where_nothing_was_admitted(
     )
 
     assert profile.publication_manifest_id is not None
+
+
+@pytest.mark.integration
+def test_a_legacy_manifest_without_bindings_is_still_protected(
+    session: Session, tmp_path: Path
+) -> None:
+    """Versions published before the binding existed must not be forgettable.
+
+    The migration does not backfill ``publication_recorded_events``, so every
+    manifest published before it has no rows. ``events_behind_manifest`` infers
+    the event for those; a drop check that reads the table directly sees nothing
+    and waves the successor through, and the first republish of any pre-existing
+    date silently loses its recorded event.
+    """
+    incumbent = _make_event(session, key="legacy-incumbent")
+    successor_event = _make_event(session, key="legacy-successor")
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+
+    def _occurrence(event: Event) -> uuid.UUID:
+        root = session.scalar(
+            select(EventTime.provenance_resolved_claim_id).where(
+                EventTime.event_id == event.id, EventTime.is_primary.is_(True)
+            )
+        )
+        assert root is not None
+        return root
+
+    # A version published the way everything before this migration was: recorded
+    # statements, no bindings. Its event is only discoverable by inference.
+    legacy = publish_day_profile(
+        session,
+        store=store,
+        profile_date=GOLDEN_DATE,
+        profile_type=ProfileType.STANDARD_STATISTICAL,
+        payload={
+            "schema_version": "1",
+            "date": GOLDEN_DATE.isoformat(),
+            "profile_type": ProfileType.STANDARD_STATISTICAL.value,
+            "sections": {
+                "recorded_on_this_date": [
+                    {
+                        "statement_id": "legacy",
+                        "statement": "A recorded event published before bindings.",
+                        "details": {},
+                        "provenance_note": "development fixture",
+                    }
+                ]
+            },
+            "section_states": {"recorded_on_this_date": {"status": "available"}},
+        },
+        statement_evidence=[
+            PublicationStatementEvidenceInput(
+                statement_path="/sections/recorded_on_this_date/0",
+                resolved_claim_id=_occurrence(incumbent),
+            )
+        ],
+    )
+    legacy_manifest = session.get(
+        PublicationManifest, legacy.publication_manifest_id
+    )
+    assert legacy_manifest is not None
+    assert not list(
+        session.scalars(
+            select(PublicationRecordedEvent).where(
+                PublicationRecordedEvent.publication_manifest_id
+                == legacy_manifest.id
+            )
+        )
+    ), "the fixture must be genuinely binding-free to model a legacy version"
+    assert events_behind_manifest(session, manifest=legacy_manifest) == {
+        incumbent.id
+    }
+
+    with pytest.raises(ValueError, match="would drop"):
+        publish_day_profile(
+            session,
+            store=store,
+            profile_date=GOLDEN_DATE,
+            profile_type=ProfileType.STANDARD_STATISTICAL,
+            payload={
+                "schema_version": "1",
+                "date": GOLDEN_DATE.isoformat(),
+                "profile_type": ProfileType.STANDARD_STATISTICAL.value,
+                "sections": {
+                    "recorded_on_this_date": [
+                        {
+                            "statement_id": "successor",
+                            "statement": "A successor that forgets the incumbent.",
+                            "details": {},
+                            "provenance_note": "development fixture",
+                        }
+                    ]
+                },
+                "section_states": {"recorded_on_this_date": {"status": "available"}},
+            },
+            statement_evidence=[
+                PublicationStatementEvidenceInput(
+                    statement_path="/sections/recorded_on_this_date/0",
+                    resolved_claim_id=_occurrence(successor_event),
+                )
+            ],
+            recorded_events=[
+                RecordedEventBinding(
+                    event_id=successor_event.id,
+                    is_featured=True,
+                    featured_selection_id=None,
+                    statement_count=1,
+                )
+            ],
+            force_new_version=True,
+        )
