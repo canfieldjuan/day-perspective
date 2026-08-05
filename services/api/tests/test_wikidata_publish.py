@@ -1630,3 +1630,60 @@ def test_a_superseded_distinct_event_decision_blocks_a_later_republish(
         )
         == 1
     )
+
+
+@pytest.mark.integration
+def test_reaffirming_the_same_feature_still_rebinds_the_manifest_to_the_new_selection(
+    session: Session, tmp_path: Path
+) -> None:
+    """A same-root re-selection changes the bound row/version, not the content.
+
+    publish_day_profile's idempotency decides on the rendered payload alone.
+    Without forcing a new version here, a reaffirmed choice (a new
+    EditorialSelection version for the same already-featured root) would leave
+    the manifest pointing at the stale selection row even though this publish
+    resolved against a newer one.
+    """
+    store, golden = _publish_past_the_golden_collision(session, tmp_path)
+    golden_event = _golden_event(session, golden)
+    wikidata_event = _wikidata_event(session)
+    _feature(session, candidates=[golden_event, wikidata_event], chosen=wikidata_event)
+    first = publish_wikidata_event(session, store=store)
+    assert first.status == "published"
+    first_manifest = session.get(PublicationManifest, first.manifest_id)
+    assert first_manifest is not None
+    first_selection_id = first_manifest.metadata_json.get(
+        "featured_event_selection_id"
+    )
+    assert first_selection_id is not None
+
+    # A human reaffirms the *same* headline with a different reviewer identity
+    # -- a new EditorialSelection version, same outcome, so the rendered
+    # section is byte-identical.
+    _feature(
+        session,
+        candidates=[golden_event, wikidata_event],
+        chosen=wikidata_event,
+        reviewer="test-human-2",
+    )
+
+    second = publish_wikidata_event(session, store=store)
+
+    assert second.status == "published"
+    assert second.manifest_id != first.manifest_id
+    second_manifest = session.get(PublicationManifest, second.manifest_id)
+    assert second_manifest is not None
+    second_selection_id = second_manifest.metadata_json.get(
+        "featured_event_selection_id"
+    )
+    assert second_selection_id is not None
+    assert second_selection_id != first_selection_id
+    # The rendered content is unchanged -- only the binding moved.
+    first_payload = store.read(first_manifest.storage_uri, first_manifest.content_hash)
+    second_payload = store.read(
+        second_manifest.storage_uri, second_manifest.content_hash
+    )
+    assert (
+        first_payload["sections"]["recorded_on_this_date"]
+        == second_payload["sections"]["recorded_on_this_date"]
+    )

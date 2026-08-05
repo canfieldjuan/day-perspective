@@ -1393,6 +1393,17 @@ def _surviving_recorded_statements(
     human has since rejected drops out even though the old artifact still
     names it.
 
+    Deliberately a flat list, not grouped by event: only two of an event's
+    published predicates (occurrence and, when present, coordinates) carry an
+    ``Event``/``EventTime``/``EventLocation`` link at all -- the rest (name,
+    magnitude, depth, type, ...) have no column tying them back to an event, by
+    design (D044's alternatives): that mapping is source-specific rendering
+    knowledge this module deliberately does not carry for a foreign source.
+    Grouping by event from this data would silently drop every unlinked
+    predicate for a carried-forward event, which is a worse defect than the
+    ordering limitation this function accepts (see the caller for the
+    ordering this implies when a date carries more than two admitted events).
+
     ``exclude_root_ids`` are the current candidate's own roots -- already
     freshly rendered by the caller -- so its predicates are never duplicated
     between its own fresh statements and this function's carried-forward ones.
@@ -1758,6 +1769,14 @@ def publish_wikidata_event(
                 if item.resolved_claim_id is not None
             },
         )
+        # Only a two-way split: featured-vs-not. A date with more than two
+        # admitted events, where the featured one is neither this candidate nor
+        # first in the prior artifact's order, is not reachable through any
+        # real publisher in this codebase today (only one real Wikidata entity
+        # exists, alongside USGS's single golden event) and is deliberately not
+        # handled precisely here -- see the module-level note on
+        # `_surviving_recorded_statements` for why a per-event grouping fix is
+        # deferred rather than approximated.
         if featured_root == identity_resolved.id:
             recorded_statements = [*statements, *surviving_statements]
             recorded_evidence = [*evidence, *surviving_evidence]
@@ -1814,6 +1833,20 @@ def publish_wikidata_event(
             session, manifest_id=previous_manifest.id
         ) + recorded_evidence
 
+    # publish_day_profile's idempotency decides purely on the rendered payload's
+    # content hash. A human can reaffirm or replace the current featured choice
+    # for the *same* root -- a new EditorialSelection version with the same
+    # outcome -- which changes nothing about the rendered section or its order.
+    # Without this, that republish would be treated as a no-op and the manifest
+    # would keep pointing at the stale selection row/version even though this
+    # publish resolved against a newer one.
+    metadata_binding_changed = bool(featured_metadata) and previous_manifest is not None and (
+        previous_manifest.metadata_json.get("featured_event_selection_id")
+        != featured_metadata.get("featured_event_selection_id")
+        or previous_manifest.metadata_json.get("featured_event_selection_version")
+        != featured_metadata.get("featured_event_selection_version")
+    )
+
     profile = publish_day_profile(
         session,
         store=store,
@@ -1834,7 +1867,7 @@ def publish_wikidata_event(
             else 1
         ),
         manifest_metadata={"wikidata_entity_id": qid, **featured_metadata},
-        force_new_version=force_new_version,
+        force_new_version=force_new_version or metadata_binding_changed,
     )
     return WikidataPublishOutcome(
         status="published",
