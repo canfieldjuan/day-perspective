@@ -1749,3 +1749,63 @@ def test_featuring_a_prior_event_whose_predicates_are_all_rejected_fails_closed(
     first_manifest_after = session.get(PublicationManifest, first.manifest_id)
     assert first_manifest_after is not None
     assert first_manifest_after.content_hash == hash_before
+
+
+@pytest.mark.integration
+def test_a_non_featured_admitted_event_whose_predicates_are_all_rejected_fails_closed(
+    session: Session, tmp_path: Path
+) -> None:
+    """The surviving-evidence check covers every admitted event, not only
+    whichever one happens to be featured.
+
+    Golden is admitted but not featured here (Wikidata is). If golden's own
+    recorded predicates have all since been rejected, carrying it forward
+    would silently drop its evidence from the successor manifest -- making it
+    invisible to `events_behind_manifest` on every later publish attempt, so a
+    future third candidate would never be checked against an event the date
+    had genuinely admitted.
+    """
+    store, golden = _publish_past_the_golden_collision(session, tmp_path)
+    golden_event = _golden_event(session, golden)
+    wikidata_event = _wikidata_event(session)
+    _feature(session, candidates=[golden_event, wikidata_event], chosen=wikidata_event)
+    first = publish_wikidata_event(session, store=store)
+    assert first.status == "published"
+    first_manifest = session.get(PublicationManifest, first.manifest_id)
+    assert first_manifest is not None
+    hash_before = first_manifest.content_hash
+
+    golden_manifest = session.get(PublicationManifest, golden.publication_manifest_id)
+    assert golden_manifest is not None
+    golden_roots = list(
+        session.scalars(
+            select(PublicationStatementEvidence.resolved_claim_id).where(
+                PublicationStatementEvidence.publication_manifest_id
+                == golden_manifest.id,
+                PublicationStatementEvidence.statement_path.startswith(
+                    "/sections/recorded_on_this_date/", autoescape=True
+                ),
+                PublicationStatementEvidence.resolved_claim_id.is_not(None),
+            )
+        )
+    )
+    assert golden_roots
+    for root_id in golden_roots:
+        record_editorial_selection(
+            session,
+            profile_date=GOLDEN_DATE,
+            section_key="recorded_on_this_date",
+            resolved_claim_id=root_id,
+            status=EditorialSelectionStatus.REJECTED,
+            display_rank=None,
+            rationale="Rejecting this golden predicate for this test.",
+            reviewed_by="test-human",
+        )
+    session.flush()
+
+    outcome = publish_wikidata_event(session, store=store)
+
+    assert outcome.status == "featured_event_required"
+    first_manifest_after = session.get(PublicationManifest, first.manifest_id)
+    assert first_manifest_after is not None
+    assert first_manifest_after.content_hash == hash_before

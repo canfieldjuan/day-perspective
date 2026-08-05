@@ -1766,15 +1766,10 @@ def publish_wikidata_event(
         if outcome is not None:
             return outcome
         candidate_roots = [identity_resolved.id]
-        # Maps each candidate identity root back to its event, so a featured
-        # root that turns out to be one of the "other" events can be checked
-        # for surviving content below.
-        root_owner: dict[UUID, UUID] = {identity_resolved.id: event.id}
         for other_event_id in sorted(other_events, key=str):
             other_event = session.get(Event, other_event_id)
             if other_event is not None:
                 candidate_roots.append(other_event.resolved_claim_id)
-                root_owner[other_event.resolved_claim_id] = other_event_id
         try:
             featured_root = resolve_featured_event(
                 session,
@@ -1812,22 +1807,28 @@ def publish_wikidata_event(
                 if item.resolved_claim_id is not None
             },
         )
-        if featured_root != identity_resolved.id and not _event_has_surviving_evidence(
-            session,
-            event_id=root_owner.get(featured_root),
-            surviving_root_ids={
-                item.resolved_claim_id
-                for item in surviving_evidence
-                if item.resolved_claim_id is not None
-            },
+        surviving_root_ids = {
+            item.resolved_claim_id
+            for item in surviving_evidence
+            if item.resolved_claim_id is not None
+        }
+        if any(
+            not _event_has_surviving_evidence(
+                session, event_id=other_event_id, surviving_root_ids=surviving_root_ids
+            )
+            for other_event_id in other_events
         ):
-            # The featured pick and per-predicate rejections are independent
-            # governance decisions: a human can feature event A and, later and
-            # separately, reject every one of A's own recorded predicates. If
-            # nothing of A survives, featuring it would bind the manifest to
-            # an event it does not actually publish -- fail closed instead
-            # rather than let a resolved featured root outrun the predicate
-            # governance that decides what is actually on the page.
+            # Featuring and per-predicate rejection are independent governance
+            # decisions: a human can reject every one of an admitted event's
+            # own recorded predicates -- whether or not that event is the
+            # featured one -- without ever touching its adjudication or
+            # featured-event standing. If nothing of an admitted event
+            # survives, carrying it forward silently drops its evidence from
+            # the successor manifest, which makes it invisible to
+            # `events_behind_manifest` on every later publish attempt -- a
+            # future candidate would then never be checked against an event
+            # the date had genuinely admitted. Fail closed instead, for every
+            # `other_events` member, not only whichever one is featured.
             return WikidataPublishOutcome(
                 status="featured_event_required",
                 occurrence_date=occurrence_date,
