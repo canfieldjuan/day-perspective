@@ -1118,3 +1118,23 @@ def resolve_featured_event(
             f"selections among {len(candidates)} candidates; exactly one is required."
         )
     return selected[0]
+
+
+def current_featured_event_selection(
+    session: Session, *, profile_date: date, root_id: UUID
+) -> EditorialSelection | None:
+    """The current featured-event decision row for one identity root, or None.
+
+    Lets a publisher bind the exact selection *row and version* it relied on to
+    the manifest it publishes (G3b), so a later, newer featured decision cannot
+    be misattributed to a manifest that was published before it existed.
+    """
+    return session.scalar(
+        select(EditorialSelection)
+        .where(
+            EditorialSelection.profile_date == profile_date,
+            EditorialSelection.section_key == FEATURED_EVENT_SECTION,
+            EditorialSelection.resolved_claim_id == root_id,
+        )
+        .order_by(EditorialSelection.decision_version.desc())
+    )

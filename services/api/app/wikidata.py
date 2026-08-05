@@ -22,14 +22,17 @@ from app.governance import (
     EditorialSelection,
     EditorialSelectionStatus,
     EventIdentityAdjudication,
+    FeaturedEventUnresolved,
     IdentityAdjudicationDecision,
     LicenseInput,
     assert_release_publication_eligible,
+    current_featured_event_selection,
     events_behind_manifest,
     is_human_reviewer,
     latest_identity_adjudication,
     record_identity_adjudication,
     register_release_license,
+    resolve_featured_event,
 )
 from app.models import (
     Claim,
@@ -793,7 +796,12 @@ class WikidataPublishOutcome:
     distinct-event. ``blocked_by_adjudication`` means a human has already decided,
     and their decision was not ``distinct_event``: the collision stands, and
     ``adjudication_id`` points at the decision that says so rather than asking the
-    same question again with a fresh review task.
+    same question again with a fresh review task. ``featured_event_required``
+    means a human ``distinct_event`` decision (D042) admits this candidate
+    alongside another already-published event, but nobody has yet chosen which of
+    the date's events is featured (D043); the pass publishes nothing rather than
+    pick a headline itself (``colliding_manifest_id`` names the manifest that
+    could not be safely extended).
     """
 
     status: str
@@ -1314,6 +1322,83 @@ def _carried_forward_evidence(
     return carried
 
 
+def _surviving_recorded_statements(
+    session: Session,
+    *,
+    store: PublishedProfileStore,
+    manifest: PublicationManifest,
+    profile_date: date,
+    exclude_root_ids: set[UUID],
+) -> tuple[list[dict[str, Any]], list[PublicationStatementEvidenceInput]]:
+    """A prior manifest's *other* recorded-event statements that are still selected.
+
+    Rebuilt from current governance, not copied blindly (D042/D043): a
+    predicate withdrawn since that manifest published must not survive into the
+    successor merely because it appeared in the old artifact. The statement
+    content itself is read back from the prior artifact -- the only place this
+    module has a foreign source's own rendering of its own predicates -- but
+    *which* predicates survive is decided fresh, from the current
+    ``recorded_on_this_date`` editorial selections for this date, so a root a
+    human has since rejected drops out even though the old artifact still
+    names it.
+
+    ``exclude_root_ids`` are the current candidate's own roots -- already
+    freshly rendered by the caller -- so its predicates are never duplicated
+    between its own fresh statements and this function's carried-forward ones.
+    """
+    prior_payload = store.read(manifest.storage_uri, manifest.content_hash)
+    prior_sections = prior_payload.get("sections")
+    prior_statements = (
+        prior_sections.get("recorded_on_this_date")
+        if isinstance(prior_sections, dict)
+        else None
+    )
+    if not isinstance(prior_statements, list):
+        return [], []
+    evidence_by_path = {
+        row.statement_path: row
+        for row in session.scalars(
+            select(PublicationStatementEvidence).where(
+                PublicationStatementEvidence.publication_manifest_id == manifest.id,
+                PublicationStatementEvidence.statement_path.startswith(
+                    "/sections/recorded_on_this_date/", autoescape=True
+                ),
+            )
+        )
+    }
+    latest_selected: dict[UUID, EditorialSelection] = {}
+    for selection in session.scalars(
+        select(EditorialSelection)
+        .where(
+            EditorialSelection.profile_date == profile_date,
+            EditorialSelection.section_key == "recorded_on_this_date",
+        )
+        .order_by(EditorialSelection.decision_version.desc())
+    ):
+        if selection.resolved_claim_id is not None:
+            latest_selected.setdefault(selection.resolved_claim_id, selection)
+
+    surviving_statements: list[dict[str, Any]] = []
+    surviving_evidence: list[PublicationStatementEvidenceInput] = []
+    for index, statement in enumerate(prior_statements):
+        row = evidence_by_path.get(f"/sections/recorded_on_this_date/{index}")
+        if row is None or row.resolved_claim_id is None:
+            continue
+        if row.resolved_claim_id in exclude_root_ids:
+            continue
+        decision = latest_selected.get(row.resolved_claim_id)
+        if decision is None or decision.status != EditorialSelectionStatus.SELECTED.value:
+            continue
+        surviving_statements.append(statement)
+        surviving_evidence.append(
+            PublicationStatementEvidenceInput(
+                statement_path=row.statement_path,
+                resolved_claim_id=row.resolved_claim_id,
+            )
+        )
+    return surviving_statements, surviving_evidence
+
+
 def publish_wikidata_event(
     session: Session,
     *,
@@ -1561,6 +1646,82 @@ def publish_wikidata_event(
         else None
     )
 
+    # Other canonical events the prior manifest already admits, besides this
+    # candidate's own. Non-empty exactly when a human has adjudicated a genuine
+    # identity collision distinct (D042): the successor must retain every
+    # admitted event, never replace one with another, and must carry exactly
+    # one featured choice among them (D043). No standing rule exists yet
+    # (G3b-2), so an unresolved choice fails closed rather than publish an
+    # arbitrary headline.
+    other_events = (
+        events_behind_manifest(session, manifest=previous_manifest) - {event.id}
+        if previous_manifest is not None
+        else set()
+    )
+    recorded_statements = statements
+    recorded_evidence = evidence
+    featured_metadata: dict[str, Any] = {}
+    if other_events:
+        # other_events is only ever non-empty when previous_manifest is not
+        # None (see its definition immediately above).
+        assert previous_manifest is not None
+        candidate_roots = [identity_resolved.id]
+        for other_event_id in sorted(other_events, key=str):
+            other_event = session.get(Event, other_event_id)
+            if other_event is not None:
+                candidate_roots.append(other_event.resolved_claim_id)
+        try:
+            featured_root = resolve_featured_event(
+                session,
+                profile_date=occurrence_date,
+                candidate_root_ids=candidate_roots,
+            )
+        except FeaturedEventUnresolved:
+            return WikidataPublishOutcome(
+                status="featured_event_required",
+                occurrence_date=occurrence_date,
+                colliding_manifest_id=previous_manifest.id,
+            )
+        # At least two candidate roots are always supplied here, so the
+        # resolver never returns None (that is only for zero candidates).
+        assert featured_root is not None
+        featured_selection = current_featured_event_selection(
+            session, profile_date=occurrence_date, root_id=featured_root
+        )
+        if featured_selection is None:
+            raise ValueError(
+                "A featured event was resolved but has no recorded selection."
+            )
+        featured_metadata = {
+            "featured_event_selection_id": str(featured_selection.id),
+            "featured_event_selection_version": featured_selection.decision_version,
+        }
+        surviving_statements, surviving_evidence = _surviving_recorded_statements(
+            session,
+            store=store,
+            manifest=previous_manifest,
+            profile_date=occurrence_date,
+            exclude_root_ids={
+                item.resolved_claim_id
+                for item in evidence
+                if item.resolved_claim_id is not None
+            },
+        )
+        if featured_root == identity_resolved.id:
+            recorded_statements = [*statements, *surviving_statements]
+            recorded_evidence = [*evidence, *surviving_evidence]
+        else:
+            recorded_statements = [*surviving_statements, *statements]
+            recorded_evidence = [*surviving_evidence, *evidence]
+        recorded_evidence = [
+            PublicationStatementEvidenceInput(
+                statement_path=f"/sections/recorded_on_this_date/{index}",
+                resolved_claim_id=item.resolved_claim_id,
+                derived_value_id=item.derived_value_id,
+            )
+            for index, item in enumerate(recorded_evidence)
+        ]
+
     source_attribution = {
         "name": source.name,
         "publisher": source.publisher,
@@ -1571,7 +1732,7 @@ def publish_wikidata_event(
             "schema_version": "1",
             "date": occurrence_date.isoformat(),
             "profile_type": profile_type.value,
-            "sections": {"recorded_on_this_date": statements},
+            "sections": {"recorded_on_this_date": recorded_statements},
             "section_states": {"recorded_on_this_date": {"status": "available"}},
             "source_attribution": source_attribution,
         }
@@ -1588,7 +1749,7 @@ def publish_wikidata_event(
             "profile_type": profile_type.value,
             "sections": {
                 **(base_sections if isinstance(base_sections, dict) else {}),
-                "recorded_on_this_date": statements,
+                "recorded_on_this_date": recorded_statements,
             },
             "section_states": {
                 **(base_states if isinstance(base_states, dict) else {}),
@@ -1598,9 +1759,9 @@ def publish_wikidata_event(
         }
         if isinstance(base.get("quality"), dict):
             payload["quality"] = base["quality"]
-        evidence = _carried_forward_evidence(
+        recorded_evidence = _carried_forward_evidence(
             session, manifest_id=previous_manifest.id
-        ) + evidence
+        ) + recorded_evidence
 
     profile = publish_day_profile(
         session,
@@ -1608,7 +1769,7 @@ def publish_wikidata_event(
         profile_date=occurrence_date,
         profile_type=profile_type,
         payload=payload,
-        statement_evidence=evidence,
+        statement_evidence=recorded_evidence,
         methodology_id=methodology.id,
         supersedes_manifest_id=(
             previous_manifest.id if previous_manifest is not None else None
@@ -1621,7 +1782,7 @@ def publish_wikidata_event(
             if previous_manifest is not None
             else 1
         ),
-        manifest_metadata={"wikidata_entity_id": qid},
+        manifest_metadata={"wikidata_entity_id": qid, **featured_metadata},
         force_new_version=force_new_version,
     )
     return WikidataPublishOutcome(

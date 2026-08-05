@@ -1370,3 +1370,76 @@ gap where no human has chosen — the SHA-256 tiebreak — and binds the chosen
 identity to the published manifest so `derive_review_status` can see it. This
 slice deliberately stops short of that: nothing yet calls the writer in
 production, and G4 does not begin until G3b lands.
+
+## D044: Featuring one event must not erase the other (G3b-1)
+
+**Context:** D042 lets a human `distinct_event` decision admit a second event
+onto a date the archive already publishes a recorded event for. D043 gives that
+date exactly one featured headline. Neither closed the gap the operator's G3b
+completion clarification (issue #79) named: `publish_wikidata_event`
+(`services/api/app/wikidata.py`) built `recorded_on_this_date` from only the
+*newly* published candidate's own statements and spliced that section wholesale
+into the payload, silently dropping the previously published event's statements
+the moment a human's `distinct_event` decision let the new one through. The
+bypass this arc built was real, but the publisher immediately undid the
+invariant it existed to protect: two admitted events, one of them erased on
+sight.
+
+This is not a display defect. `events_behind_manifest` derives the admitted set
+from a manifest's own recorded-section evidence (D042's design). If publishing
+B drops A's evidence from the manifest, a later candidate C is checked only
+against B — `distinct_event(C, A)` never runs, because the guard no longer
+believes A is behind the date at all. A collision the archive once knew about
+becomes invisible to the very guard meant to protect it.
+
+**Decision:** `publish_wikidata_event` now derives `other_events` — the events
+the date's prior manifest admits besides the current candidate's own
+(`events_behind_manifest(prior) - {candidate_event.id}`). When empty (first
+publish, context-only prior, or an idempotent republish of the candidate's own
+event), behavior is unchanged. When non-empty, the pass requires an *existing*
+current featured-event selection across every admitted identity root
+(`resolve_featured_event`) before it will publish at all: a multi-event date
+with no featured choice on record fails closed with a new
+`featured_event_required` outcome rather than pick a headline itself (D038 — no
+standing rule exists yet; that is G3b-2). Once resolved, the successor's
+`recorded_on_this_date` is the featured event's own freshly rendered statements
+plus every other admitted event's *currently selected* statements, carried
+forward from the prior manifest's own artifact and evidence — not the prior
+manifest's section copied wholesale. A predicate a human has since rejected in
+`recorded_on_this_date` drops out of the successor even though the old artifact
+still names it (`_surviving_recorded_statements`). The exact featured-selection
+row and its version are bound into the new manifest's `metadata_json`
+(`featured_event_selection_id` / `_version`), immutable for that manifest
+version once written.
+
+**Mechanism:** `_surviving_recorded_statements` (`wikidata.py`) reads the prior
+manifest's own serialized `recorded_on_this_date` statements — the only place
+this module has a foreign source's own rendering of its own predicates — and
+keeps only the ones whose resolved-claim root still carries a current
+`SELECTED` decision in this date's `recorded_on_this_date` section, excluding
+the current candidate's own roots so its freshly rendered statements are never
+duplicated against its own carried-forward copy. The featured event's
+statements are ordered first in the merged section; the other admitted event's
+surviving statements follow.
+
+**Alternatives considered:** Trusting the prior artifact's `recorded_on_this_date`
+section as-is for the non-featured event(s) — rejected: a predicate withdrawn
+since that manifest published would survive forever, because nothing rebuilding
+the section would ever re-derive it. Fabricating a deterministic featured
+default here — rejected; that is explicitly G3b-2's job (D043's standing-rule
+gap), and doing it here would mean two PRs disagreeing about which one owns the
+tiebreak. A registry of per-source statement renderers so an arbitrary foreign
+event's predicates could be re-synthesized from scratch — rejected as premature:
+exactly two sources exist today, the prior artifact already holds the only
+rendering either one has produced, and the correctness gap was about *which*
+predicates survive, not how they are rendered.
+
+**Consequences:** A date with two adjudicated-distinct events and an existing
+human featured choice now publishes both; switching the human choice publishes
+a new manifest version retaining both, headline first. A third candidate is
+still checked against every event the date actually admits, closing the
+collision-safety gap the operator's clarification raised. `derive_review_status`
+does not yet consume the featured-selection binding this slice writes, the
+published contract does not yet expose typed multi-event grouping, and
+attribution is still a single `source_attribution` block — all explicitly
+G3b-2 (#79), which remains open. G4 does not begin until G3b-2 merges.
