@@ -1015,10 +1015,16 @@ def _collision_adjudication(
     evidence yields no decisions at all -- which would make "every event is
     adjudicated distinct" vacuously true over an empty set, and bypass the guard
     precisely when the collision is least understood.
+
+    Excludes the event itself from the manifest's events before checking (G3b-1):
+    once a manifest legitimately carries this event alongside another, this same
+    check runs again on every later publish attempt to that manifest, and a
+    self-pair would otherwise read as an unresolved adjudication against
+    ourselves.
     """
     if event is None:
         return False, None
-    others = events_behind_manifest(session, manifest=manifest)
+    others = events_behind_manifest(session, manifest=manifest) - {event.id}
     if not others:
         return False, None
     decisions = [
@@ -1050,6 +1056,51 @@ def _collision_adjudication(
         None,
     )
     return False, blocking
+
+
+def _collision_outcome_if_blocked(
+    session: Session,
+    *,
+    event: Event | None,
+    manifest: PublicationManifest,
+    identity_claim: Claim,
+    qid: str,
+    occurrence_date: date,
+) -> WikidataPublishOutcome | None:
+    """``None`` to proceed past this manifest's collision; else the outcome to
+    return instead.
+
+    Shared by a brand-new candidate's collision check and the revalidation of
+    events already carried onto a manifest that also contains our own event
+    (G3b-1): a ``distinct_event`` decision can be superseded later by
+    ``merge``/``supersede``/``deferred``, and that later decision must reach the
+    same durable-adjudication rules the original guard applied, not be skipped
+    merely because the manifest already includes this event.
+    """
+    bypass, blocking = _collision_adjudication(session, event=event, manifest=manifest)
+    if bypass:
+        return None
+    if blocking is not None:
+        return WikidataPublishOutcome(
+            status="blocked_by_adjudication",
+            occurrence_date=occurrence_date,
+            colliding_manifest_id=manifest.id,
+            adjudication_id=blocking.id,
+        )
+    task = _ensure_merge_review_task(
+        session,
+        identity_claim=identity_claim,
+        qid=qid,
+        occurrence_date=occurrence_date,
+        colliding_manifest_id=manifest.id,
+        colliding_events=events_behind_manifest(session, manifest=manifest),
+    )
+    return WikidataPublishOutcome(
+        status="deferred_to_merge_review",
+        occurrence_date=occurrence_date,
+        colliding_manifest_id=manifest.id,
+        merge_review_task_id=task.id,
+    )
 
 
 def resolve_merge_review(
@@ -1493,33 +1544,16 @@ def publish_wikidata_event(
         # A human may have already ruled that these are two different events that
         # happen to share a date. That decision -- pair-specific, current, and
         # theirs -- is the only thing that lets a second recorded event publish.
-        bypass, blocking = _collision_adjudication(
-            session, event=event, manifest=collision
+        outcome = _collision_outcome_if_blocked(
+            session,
+            event=event,
+            manifest=collision,
+            identity_claim=claims["candidate_event_identity"],
+            qid=qid,
+            occurrence_date=occurrence_date,
         )
-        if not bypass:
-            if blocking is not None:
-                return WikidataPublishOutcome(
-                    status="blocked_by_adjudication",
-                    occurrence_date=occurrence_date,
-                    colliding_manifest_id=collision.id,
-                    adjudication_id=blocking.id,
-                )
-            task = _ensure_merge_review_task(
-                session,
-                identity_claim=claims["candidate_event_identity"],
-                qid=qid,
-                occurrence_date=occurrence_date,
-                colliding_manifest_id=collision.id,
-                colliding_events=events_behind_manifest(
-                    session, manifest=collision
-                ),
-            )
-            return WikidataPublishOutcome(
-                status="deferred_to_merge_review",
-                occurrence_date=occurrence_date,
-                colliding_manifest_id=collision.id,
-                merge_review_task_id=task.id,
-            )
+        if outcome is not None:
+            return outcome
 
     # Publication requires the resolved event (G2a).
     if event is None or identity_resolved is None or resolved_occurrence is None:
@@ -1665,6 +1699,23 @@ def publish_wikidata_event(
         # other_events is only ever non-empty when previous_manifest is not
         # None (see its definition immediately above).
         assert previous_manifest is not None
+        # Re-check the collision guard even though this manifest already
+        # carries our own event: the earlier check above is skipped whenever
+        # _manifest_is_wikidata_event is true, but a distinct_event decision
+        # that once admitted these other events can be superseded later by a
+        # human recording merge/supersede/deferred for the same pair. Without
+        # this, a stale decision would go unenforced on every later republish
+        # that merely carries the other event forward (G3b-1 round 1).
+        outcome = _collision_outcome_if_blocked(
+            session,
+            event=event,
+            manifest=previous_manifest,
+            identity_claim=claims["candidate_event_identity"],
+            qid=qid,
+            occurrence_date=occurrence_date,
+        )
+        if outcome is not None:
+            return outcome
         candidate_roots = [identity_resolved.id]
         for other_event_id in sorted(other_events, key=str):
             other_event = session.get(Event, other_event_id)

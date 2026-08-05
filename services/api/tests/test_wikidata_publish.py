@@ -1576,3 +1576,57 @@ def test_single_event_publication_writes_no_feature_governance_row(
         )
         == 0
     )
+
+
+@pytest.mark.integration
+def test_a_superseded_distinct_event_decision_blocks_a_later_republish(
+    session: Session, tmp_path: Path
+) -> None:
+    """A distinct_event decision can be withdrawn after the events already publish.
+
+    Once A and B are legitimately admitted together, a later republish attempt
+    (for whichever event) must recheck the collision guard, not merely carry the
+    other event forward because it was already on the manifest. Superseding the
+    original `distinct_event(A, B)` with `deferred` must be enforced on the very
+    next publish attempt, exactly as it would be for a brand-new candidate.
+    """
+    store, golden = _publish_past_the_golden_collision(session, tmp_path)
+    golden_event = _golden_event(session, golden)
+    wikidata_event = _wikidata_event(session)
+    _feature(session, candidates=[golden_event, wikidata_event], chosen=wikidata_event)
+    first = publish_wikidata_event(session, store=store)
+    assert first.status == "published"
+    first_manifest = session.get(PublicationManifest, first.manifest_id)
+    assert first_manifest is not None
+    hash_before = first_manifest.content_hash
+
+    # A human reconsiders and withdraws the earlier distinct_event decision.
+    superseding = record_identity_adjudication(
+        session,
+        event_a_id=golden_event.id,
+        event_b_id=wikidata_event.id,
+        decision=IdentityAdjudicationDecision.DEFERRED,
+        reviewer="test-human",
+        rationale="Reconsidering; not settled that these are distinct after all.",
+    )
+    session.flush()
+
+    outcome = publish_wikidata_event(session, store=store)
+
+    assert outcome.status == "blocked_by_adjudication"
+    assert outcome.adjudication_id == superseding.id
+    # Nothing published: the prior successor is untouched.
+    first_manifest_after = session.get(PublicationManifest, first.manifest_id)
+    assert first_manifest_after is not None
+    assert first_manifest_after.content_hash == hash_before
+    assert (
+        session.scalar(
+            select(func.count())
+            .select_from(PublicationManifest)
+            .where(
+                PublicationManifest.profile_date == GOLDEN_DATE,
+                PublicationManifest.id.notin_([golden.publication_manifest_id]),
+            )
+        )
+        == 1
+    )
