@@ -35,6 +35,7 @@ from app.models import (
     PipelineRun,
     ProfileType,
     PublicationManifest,
+    PublicationRecordedEvent,
     PublicationStatementEvidence,
     PublicationStatus,
     PublicationTier,
@@ -1429,6 +1430,23 @@ def _acquire_publication_lock(
     )
 
 
+@dataclass(frozen=True)
+class RecordedEventBinding:
+    """One canonical event a publication admits, and its place in the section.
+
+    Passed into publication rather than written afterwards: the manifest becomes
+    discoverable the moment publication commits, so a binding written in a later
+    transaction leaves a window where the date exists with its admitted event set
+    missing -- and the collision guard's fallback silently under-reports exactly
+    then.
+    """
+
+    event_id: UUID
+    is_featured: bool
+    featured_selection_id: UUID | None
+    statement_count: int
+
+
 def publish_day_profile(
     session: Session,
     *,
@@ -1437,6 +1455,7 @@ def publish_day_profile(
     profile_type: ProfileType,
     payload: dict[str, Any],
     statement_evidence: Iterable[PublicationStatementEvidenceInput],
+    recorded_events: Iterable[RecordedEventBinding] = (),
     supersedes_manifest_id: UUID | None = None,
     supersedes_day_profile_id: UUID | None = None,
     methodology_id: UUID | None = None,
@@ -1584,6 +1603,21 @@ def publish_day_profile(
                         evidence_snapshot_hash=item.snapshot_hash,
                     )
                     for item in snapshotted_evidence
+                ]
+            )
+            # The admitted event set is part of what this version records, so it
+            # commits with the manifest rather than after it.
+            session.add_all(
+                [
+                    PublicationRecordedEvent(
+                        publication_manifest_id=manifest.id,
+                        event_id=binding.event_id,
+                        is_featured=binding.is_featured,
+                        featured_selection_id=binding.featured_selection_id,
+                        display_order=order,
+                        statement_count=binding.statement_count,
+                    )
+                    for order, binding in enumerate(recorded_events)
                 ]
             )
             session.flush()

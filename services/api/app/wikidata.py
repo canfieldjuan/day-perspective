@@ -30,7 +30,6 @@ from app.governance import (
     is_human_reviewer,
     latest_identity_adjudication,
     record_identity_adjudication,
-    record_published_events,
     register_release_license,
     resolve_featured_event,
 )
@@ -47,6 +46,7 @@ from app.models import (
     Methodology,
     PipelineRun,
     PublicationManifest,
+    PublicationRecordedEvent,
     PublicationStatementEvidence,
     PublicationStatus,
     QualityCheck,
@@ -64,6 +64,7 @@ from app.models import (
 from app.services import (
     PublicationStatementEvidenceInput,
     PublishedProfileStore,
+    RecordedEventBinding,
     canonical_json_bytes,
     content_hash,
     create_claim,
@@ -1307,35 +1308,44 @@ def _latest_recorded_selections(
     return latest
 
 
-def _retained_recorded_statements(
+def _retained_recorded_groups(
     session: Session,
     *,
     store: PublishedProfileStore,
     manifest: PublicationManifest,
     profile_date: date,
     rebuilt_key_prefix: str,
-) -> tuple[list[dict[str, Any]], list[UUID]]:
-    """The prior version's recorded statements for events this pass is *not* rebuilding.
+) -> list[tuple[UUID, list[dict[str, Any]], list[UUID]]]:
+    """The prior version's recorded statements, grouped by the event they describe.
 
-    Re-checked against the current editorial selections rather than copied. An
-    artifact that preserved a predicate merely because the previous version
-    carried it would keep asserting something nobody currently stands behind,
-    which is the difference between an archive and a cache.
+    Grouped, not concatenated, because the featured event has to lead. A flat
+    carry-over would put whichever event came first in the previous version at
+    the top of the next one, so a reader could see the page lead with A while the
+    manifest records B as featured -- the artifact contradicting its own binding.
 
-    ``rebuilt_key_prefix`` names the resolution keyspace this pass regenerates
-    from scratch -- its own entity's. Retaining those too would publish every one
-    of this event's statements twice on a republication, which is not a display
-    quirk: it changes the content hash, so an otherwise idempotent republish
-    would mint a new version every time it ran.
+    Boundaries come from the previous version's own `statement_count` per event.
+    Versions published before that binding existed carry a single event, which is
+    derivable, and anything genuinely ambiguous is dropped rather than guessed:
+    losing a statement is recoverable on the next publish, attributing it to the
+    wrong event is not.
+
+    Statements are re-checked against current editorial selections rather than
+    copied, so a predicate a human has since withdrawn cannot survive by having
+    appeared in the previous artifact. ``rebuilt_key_prefix`` names the
+    resolution keyspace this pass regenerates from scratch -- retaining those too
+    would publish this event's statements twice, changing the content hash and
+    minting a new version on every otherwise-idempotent republish.
 
     Scoped to the recorded-event section deliberately; the general revalidation
     of every carried section is #78 and stays deferred.
     """
     payload = store.read(manifest.storage_uri, manifest.content_hash)
     sections = payload.get("sections")
-    prior = sections.get("recorded_on_this_date") if isinstance(sections, dict) else None
+    prior = (
+        sections.get("recorded_on_this_date") if isinstance(sections, dict) else None
+    )
     if not isinstance(prior, list):
-        return [], []
+        return []
     roots_by_index: dict[int, UUID] = {}
     for row in session.scalars(
         select(PublicationStatementEvidence).where(
@@ -1347,6 +1357,24 @@ def _retained_recorded_statements(
         tail = row.statement_path.rsplit("/", 1)[-1]
         if tail.isdigit() and row.resolved_claim_id is not None:
             roots_by_index[int(tail)] = row.resolved_claim_id
+
+    bindings = list(
+        session.scalars(
+            select(PublicationRecordedEvent)
+            .where(PublicationRecordedEvent.publication_manifest_id == manifest.id)
+            .order_by(PublicationRecordedEvent.display_order)
+        )
+    )
+    if bindings:
+        spans = [(row.event_id, row.statement_count) for row in bindings]
+    else:
+        # Published before versions recorded their admitted set. The inference is
+        # only unambiguous for a single event; more than one has no boundaries.
+        inferred = events_behind_manifest(session, manifest=manifest)
+        if len(inferred) != 1:
+            return []
+        spans = [(next(iter(inferred)), len(prior))]
+
     latest = _latest_recorded_selections(session, profile_date=profile_date)
     rebuilt = {
         root_id
@@ -1357,21 +1385,28 @@ def _retained_recorded_statements(
         )
         if isinstance(key, str) and key.startswith(rebuilt_key_prefix)
     }
-    statements: list[dict[str, Any]] = []
-    roots: list[UUID] = []
-    for index, statement in enumerate(prior):
-        root = roots_by_index.get(index)
-        if root is None or root in rebuilt or not isinstance(statement, dict):
-            continue
-        selection = latest.get(root)
-        if (
-            selection is None
-            or selection.status != EditorialSelectionStatus.SELECTED.value
-        ):
-            continue
-        statements.append(statement)
-        roots.append(root)
-    return statements, roots
+
+    groups: list[tuple[UUID, list[dict[str, Any]], list[UUID]]] = []
+    cursor = 0
+    for event_id, count in spans:
+        statements: list[dict[str, Any]] = []
+        roots: list[UUID] = []
+        for index in range(cursor, min(cursor + count, len(prior))):
+            statement = prior[index]
+            root = roots_by_index.get(index)
+            if root is None or root in rebuilt or not isinstance(statement, dict):
+                continue
+            selection = latest.get(root)
+            if (
+                selection is None
+                or selection.status != EditorialSelectionStatus.SELECTED.value
+            ):
+                continue
+            statements.append(statement)
+            roots.append(root)
+        cursor += count
+        groups.append((event_id, statements, roots))
+    return groups
 
 
 def _carried_forward_evidence(
@@ -1649,25 +1684,22 @@ def publish_wikidata_event(
     # leads. Dropping the others would not only lose them from the page -- it
     # would lose their identities from the manifest, and the collision guard
     # checks a later candidate against exactly that set.
-    admitted_ids: list[UUID] = [event.id]
-    retained_statements: list[dict[str, Any]] = []
-    retained_roots: list[UUID] = []
+    retained_groups: list[tuple[UUID, list[dict[str, Any]], list[UUID]]] = []
     if previous_manifest is not None:
-        retained_statements, retained_roots = _retained_recorded_statements(
+        retained_groups = _retained_recorded_groups(
             session,
             store=store,
             manifest=previous_manifest,
             profile_date=occurrence_date,
             rebuilt_key_prefix=f"wikidata:{qid}:",
         )
-        for other_id in sorted(
-            events_behind_manifest(session, manifest=previous_manifest), key=str
-        ):
-            if other_id != event.id:
-                admitted_ids.append(other_id)
+    groups: list[tuple[UUID, list[dict[str, Any]], list[UUID]]] = [
+        (event.id, statements, own_roots),
+        *[group for group in retained_groups if group[0] != event.id],
+    ]
 
     identity_roots: dict[UUID, UUID] = {}
-    for event_id in admitted_ids:
+    for event_id, _statements, _roots in groups:
         admitted = session.get(Event, event_id)
         if admitted is None:
             raise ValueError(
@@ -1682,33 +1714,50 @@ def publish_wikidata_event(
     featured_root = resolve_featured_event(
         session,
         profile_date=occurrence_date,
-        candidate_root_ids=[identity_roots[event_id] for event_id in admitted_ids],
+        candidate_root_ids=[identity_roots[event_id] for event_id, _s, _r in groups],
     )
     featured_event_id = next(
-        event_id
-        for event_id, root in identity_roots.items()
-        if root == featured_root
+        event_id for event_id, root in identity_roots.items() if root == featured_root
     )
     featured_selection = (
         current_featured_selection(
             session, profile_date=occurrence_date, root_id=featured_root
         )
-        if featured_root is not None and len(admitted_ids) > 1
+        if featured_root is not None and len(groups) > 1
         else None
     )
 
-    if featured_event_id == event.id:
-        ordered_statements = statements + retained_statements
-        ordered_roots = own_roots + retained_roots
-    else:
-        ordered_statements = retained_statements + statements
-        ordered_roots = retained_roots + own_roots
+    # The headline leads the section. Ordering the whole retained block ahead of
+    # or behind the rebuilt event would put whichever event happened to come
+    # first in the previous version at the top, so the page could lead with one
+    # event while the manifest records another as featured.
+    ordered_groups = sorted(groups, key=lambda group: group[0] != featured_event_id)
+    ordered_statements = [
+        statement for _event_id, statements, _roots in ordered_groups
+        for statement in statements
+    ]
+    ordered_roots = [
+        root for _event_id, _statements, roots in ordered_groups for root in roots
+    ]
     evidence = [
         PublicationStatementEvidenceInput(
             statement_path=f"/sections/recorded_on_this_date/{index}",
             resolved_claim_id=root,
         )
         for index, root in enumerate(ordered_roots)
+    ]
+    recorded_events = [
+        RecordedEventBinding(
+            event_id=event_id,
+            is_featured=event_id == featured_event_id,
+            featured_selection_id=(
+                None
+                if featured_selection is None or event_id != featured_event_id
+                else featured_selection.id
+            ),
+            statement_count=len(statements),
+        )
+        for event_id, statements, _roots in ordered_groups
     ]
 
     source_attribution = {
@@ -1759,6 +1808,7 @@ def publish_wikidata_event(
         profile_type=profile_type,
         payload=payload,
         statement_evidence=evidence,
+        recorded_events=recorded_events,
         methodology_id=methodology.id,
         supersedes_manifest_id=(
             previous_manifest.id if previous_manifest is not None else None
@@ -1773,20 +1823,6 @@ def publish_wikidata_event(
         ),
         manifest_metadata={"wikidata_entity_id": qid},
         force_new_version=force_new_version,
-    )
-    # The version remembers which events it admitted and which it led with, so
-    # the admitted set never has to be guessed back out of surviving statements.
-    published_manifest = session.get(
-        PublicationManifest, profile.publication_manifest_id
-    )
-    if published_manifest is None:  # pragma: no cover - just published
-        raise ValueError("The published manifest could not be read back.")
-    record_published_events(
-        session,
-        manifest=published_manifest,
-        event_ids=admitted_ids,
-        featured_event_id=featured_event_id,
-        featured_selection_id=None if featured_selection is None else featured_selection.id,
     )
     return WikidataPublishOutcome(
         status="published",

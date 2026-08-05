@@ -37,6 +37,7 @@ from app.models import (
     LegalReviewStatus,
     PipelineRun,
     PublicationManifest,
+    PublicationRecordedEvent,
     PublicationStatementEvidence,
     QualityCheck,
     ResolvedClaim,
@@ -876,104 +877,6 @@ def adjudicated_distinct(
         and current.decision == IdentityAdjudicationDecision.DISTINCT_EVENT.value
         and is_human_reviewer(current.reviewer)
     )
-
-
-class PublicationRecordedEvent(Base):
-    """A canonical event a published version admitted to its recorded section.
-
-    The manifest's own memory of which events it published, and which one it
-    featured. Without it the admitted set has to be inferred from whichever
-    statement roots happen to resolve to an event, and a non-featured event
-    whose statements are less structured simply disappears -- taking its identity
-    with it, so a later candidate could be cleared against a date it was never
-    judged against.
-
-    ``featured_selection_id`` pins the exact editorial decision this version
-    published under, not merely the winning root: a later decision must not be
-    able to change what an immutable artifact is understood to have claimed.
-    """
-
-    __tablename__ = "publication_recorded_events"
-
-    publication_manifest_id: Mapped[UUID] = mapped_column(
-        PGUUID(as_uuid=True),
-        ForeignKey("publication_manifests.id", ondelete="RESTRICT"),
-        primary_key=True,
-    )
-    event_id: Mapped[UUID] = mapped_column(
-        PGUUID(as_uuid=True),
-        ForeignKey("events.id", ondelete="RESTRICT"),
-        primary_key=True,
-    )
-    is_featured: Mapped[bool] = mapped_column(Boolean, default=False)
-    featured_selection_id: Mapped[UUID | None] = mapped_column(
-        PGUUID(as_uuid=True),
-        ForeignKey("editorial_selections.id", ondelete="RESTRICT"),
-    )
-    display_order: Mapped[int] = mapped_column(Integer)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=_utcnow
-    )
-
-    __table_args__ = (
-        CheckConstraint(
-            "display_order >= 0", name="publication_recorded_event_order"
-        ),
-        CheckConstraint(
-            "is_featured OR featured_selection_id IS NULL",
-            name="publication_recorded_event_selection_on_featured",
-        ),
-        # A version has one headline. Enforced here rather than trusted to the
-        # writer, because "which event did this artifact lead with" is a claim
-        # the archive makes to a reader.
-        Index(
-            "publication_recorded_events_one_featured",
-            "publication_manifest_id",
-            unique=True,
-            postgresql_where=text("is_featured"),
-        ),
-    )
-
-
-def record_published_events(
-    session: Session,
-    *,
-    manifest: PublicationManifest,
-    event_ids: Sequence[UUID],
-    featured_event_id: UUID,
-    featured_selection_id: UUID | None,
-) -> None:
-    """Bind the admitted event set, and the headline, to one published version.
-
-    Idempotent: republishing identical content returns the same manifest by
-    content hash, and re-binding it must not fail or duplicate.
-    """
-    if featured_event_id not in set(event_ids):
-        raise ValueError(
-            "The featured event must be one of the events this version publishes."
-        )
-    existing = set(
-        session.scalars(
-            select(PublicationRecordedEvent.event_id).where(
-                PublicationRecordedEvent.publication_manifest_id == manifest.id
-            )
-        )
-    )
-    for order, event_id in enumerate(event_ids):
-        if event_id in existing:
-            continue
-        session.add(
-            PublicationRecordedEvent(
-                publication_manifest_id=manifest.id,
-                event_id=event_id,
-                is_featured=event_id == featured_event_id,
-                featured_selection_id=(
-                    featured_selection_id if event_id == featured_event_id else None
-                ),
-                display_order=order,
-            )
-        )
-    session.flush()
 
 
 def events_behind_manifest(

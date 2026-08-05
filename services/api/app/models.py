@@ -9,15 +9,18 @@ from typing import Any
 from geoalchemy2 import Geometry
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     Date,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     Numeric,
     String,
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.dialects.postgresql import JSONB, UUID
@@ -877,6 +880,60 @@ class PublicationStatementEvidence(Base):
     evidence_snapshot: Mapped[dict[str, Any]] = mapped_column(JSONB)
     evidence_snapshot_hash: Mapped[str] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class PublicationRecordedEvent(Base):
+    """A canonical event a published version admitted to its recorded section.
+
+    The version's own memory of which events it published, which one it
+    featured, and how many statements each contributed. Without it the admitted
+    set has to be inferred from whichever statement roots happen to resolve to
+    an event -- and the inference only recognises events whose statements root on
+    identity, primary `EventTime` provenance, or `EventLocation` provenance, so a
+    co-published event whose statements do not simply disappears, taking its
+    identity out of the collision check with it.
+
+    Written inside the publication transaction, alongside statement evidence and
+    before coverage points at the manifest, so a date is never discoverable with
+    its admitted set missing.
+
+    `featured_selection_id` pins the exact editorial decision this version
+    published under: a later decision must not change what an immutable artifact
+    is understood to have claimed. `statement_count` records how much of the
+    recorded section each event contributed, so a successor can regroup the
+    retained statements by event instead of guessing at boundaries.
+    """
+
+    __tablename__ = "publication_recorded_events"
+
+    publication_manifest_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("publication_manifests.id", ondelete="RESTRICT"), primary_key=True
+    )
+    event_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("events.id", ondelete="RESTRICT"), primary_key=True
+    )
+    is_featured: Mapped[bool] = mapped_column(Boolean, default=False)
+    featured_selection_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("editorial_selections.id", ondelete="RESTRICT")
+    )
+    display_order: Mapped[int] = mapped_column(Integer)
+    statement_count: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        CheckConstraint("display_order >= 0", name="publication_recorded_event_order"),
+        CheckConstraint("statement_count >= 0", name="publication_recorded_event_statement_count"),
+        CheckConstraint(
+            "is_featured OR featured_selection_id IS NULL",
+            name="publication_recorded_event_selection_on_featured",
+        ),
+        Index(
+            "publication_recorded_events_one_featured",
+            "publication_manifest_id",
+            unique=True,
+            postgresql_where=text("is_featured"),
+        ),
+    )
 
 
 class BatchRunStatus(str, Enum):

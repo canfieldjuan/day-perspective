@@ -21,10 +21,12 @@ first, choose the headline second.
 
 from __future__ import annotations
 
+import uuid
 from pathlib import Path
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, text
+from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from app.coverage import rebuild_coverage_index
@@ -37,10 +39,26 @@ from app.governance import (
     record_editorial_selection,
     record_featured_event_selection,
 )
-from app.models import Event, PublicationManifest, PublicationStatementEvidence
-from app.services import LocalFilesystemPublishedProfileStore
-from app.wikidata import publish_wikidata_event, resolve_merge_review
+from app.models import (
+    Event,
+    EventTime,
+    ProfileType,
+    PublicationManifest,
+    PublicationStatementEvidence,
+)
+from app.services import (
+    LocalFilesystemPublishedProfileStore,
+    PublicationStatementEvidenceInput,
+    RecordedEventBinding,
+    publish_day_profile,
+)
+from app.wikidata import (
+    _retained_recorded_groups,
+    publish_wikidata_event,
+    resolve_merge_review,
+)
 
+from .test_identity_adjudication import _make_event
 from .test_usgs_vertical_slice import publish as publish_golden
 from .test_wikidata_publish import (
     GOLDEN_DATE,
@@ -300,3 +318,148 @@ def test_a_single_event_date_writes_no_feature_governance_row(
         ).first()
         is None
     )
+
+
+@pytest.mark.integration
+def test_the_admitted_set_commits_with_the_manifest(
+    session: Session, tmp_path: Path
+) -> None:
+    """The binding is part of publication, not a follow-up write.
+
+    ``publish_day_profile`` commits and indexes coverage before returning, so the
+    manifest is discoverable the moment it comes back. A binding written after
+    that leaves a window where the date exists with its admitted event set
+    missing -- and ``events_behind_manifest`` falls back to the inference this
+    table was added to replace, silently under-reporting the very set the
+    collision guard checks against.
+
+    Read on a separate connection, which sees only committed state.
+    """
+    store, usgs, wikidata = _admit_both(session, tmp_path)
+    _feature(session, chosen=wikidata, candidates=[usgs, wikidata])
+
+    outcome = publish_wikidata_event(session, store=store)
+
+    engine = session.get_bind()
+    assert isinstance(engine, Engine)
+    with engine.connect() as connection:
+        bound = {
+            row[0]
+            for row in connection.execute(
+                text(
+                    "SELECT event_id FROM publication_recorded_events "
+                    "WHERE publication_manifest_id = :manifest"
+                ),
+                {"manifest": outcome.manifest_id},
+            )
+        }
+    assert bound == {usgs.id, wikidata.id}
+
+
+@pytest.mark.integration
+def test_retained_statements_are_grouped_per_event_so_the_headline_can_lead(
+    session: Session, tmp_path: Path
+) -> None:
+    """The page must not lead with one event while the binding names another.
+
+    Carried forward as one flat block, two retained events keep whichever came
+    first in the previous version at the top regardless of the headline, so the
+    reader sees a lead that contradicts the manifest. Grouping is what lets the
+    featured event move to the front.
+    """
+    first = _make_event(session, key="first-retained")
+    second = _make_event(session, key="second-retained")
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+    prior = _publish_two_event_prior(session, store, first=first, second=second)
+
+    groups = _retained_recorded_groups(
+        session,
+        store=store,
+        manifest=prior,
+        profile_date=GOLDEN_DATE,
+        rebuilt_key_prefix="wikidata:nothing:",
+    )
+
+    # Grouped per event, in the order the prior version recorded them.
+    assert [group[0] for group in groups] == [first.id, second.id]
+    assert all(len(group[1]) == 1 for group in groups)
+    # And the headline can therefore lead, whichever event it is.
+    ordered = sorted(groups, key=lambda group: group[0] != second.id)
+    assert ordered[0][0] == second.id
+
+
+def _publish_two_event_prior(
+    session: Session,
+    store: LocalFilesystemPublishedProfileStore,
+    *,
+    first: Event,
+    second: Event,
+) -> PublicationManifest:
+    """A prior version that already admitted two events, in a known order."""
+    roots: list[uuid.UUID] = []
+    for event in (first, second):
+        occurrence = session.scalar(
+            select(EventTime.provenance_resolved_claim_id).where(
+                EventTime.event_id == event.id, EventTime.is_primary.is_(True)
+            )
+        )
+        assert occurrence is not None
+        roots.append(occurrence)
+        record_editorial_selection(
+            session,
+            profile_date=GOLDEN_DATE,
+            section_key="recorded_on_this_date",
+            resolved_claim_id=occurrence,
+            status=EditorialSelectionStatus.SELECTED,
+            display_rank=None,
+            rationale="Selected for the prior version.",
+            reviewed_by=HUMAN,
+        )
+    session.flush()
+    profile = publish_day_profile(
+        session,
+        store=store,
+        profile_date=GOLDEN_DATE,
+        profile_type=ProfileType.STANDARD_STATISTICAL,
+        payload={
+            "schema_version": "1",
+            "date": GOLDEN_DATE.isoformat(),
+            "profile_type": ProfileType.STANDARD_STATISTICAL.value,
+            "sections": {
+                "recorded_on_this_date": [
+                    {
+                        "statement_id": f"prior-{index}",
+                        "statement": f"Prior recorded event {index}.",
+                        "details": {},
+                        "provenance_note": "development fixture",
+                    }
+                    for index in range(2)
+                ]
+            },
+            "section_states": {"recorded_on_this_date": {"status": "available"}},
+        },
+        statement_evidence=[
+            PublicationStatementEvidenceInput(
+                statement_path=f"/sections/recorded_on_this_date/{index}",
+                resolved_claim_id=root,
+            )
+            for index, root in enumerate(roots)
+        ],
+        recorded_events=[
+            RecordedEventBinding(
+                event_id=first.id,
+                is_featured=True,
+                featured_selection_id=None,
+                statement_count=1,
+            ),
+            RecordedEventBinding(
+                event_id=second.id,
+                is_featured=False,
+                featured_selection_id=None,
+                statement_count=1,
+            ),
+        ],
+    )
+    manifest = session.get(PublicationManifest, profile.publication_manifest_id)
+    assert manifest is not None
+    return manifest

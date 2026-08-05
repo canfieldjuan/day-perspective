@@ -16,7 +16,14 @@ candidate could be cleared against a date nobody judged it against.
 
 `featured_selection_id` pins the exact editorial decision the version published
 under. Recording only the winning root would let a later decision change what an
-immutable artifact is understood to have claimed.
+immutable artifact is understood to have claimed. `statement_count` records how
+much of the section each event contributed, so a successor can regroup retained
+statements by event and keep the featured event leading.
+
+Written inside the publication transaction, beside the statement evidence and
+before coverage points at the manifest: a binding written afterwards leaves a
+window where the date is discoverable with its admitted set missing, and the
+guard's fallback under-reports precisely then.
 """
 
 from __future__ import annotations
@@ -58,6 +65,13 @@ def upgrade() -> None:
             nullable=True,
         ),
         sa.Column("display_order", sa.Integer(), nullable=False),
+        # How much of the recorded section each event contributed, so a
+        # successor can regroup the retained statements by event rather than
+        # guess at boundaries and risk attributing one event's statement to
+        # another.
+        sa.Column(
+            "statement_count", sa.Integer(), nullable=False, server_default="0"
+        ),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
@@ -66,6 +80,10 @@ def upgrade() -> None:
         ),
         sa.CheckConstraint(
             "display_order >= 0", name="publication_recorded_event_order"
+        ),
+        sa.CheckConstraint(
+            "statement_count >= 0",
+            name="publication_recorded_event_statement_count",
         ),
         # Only the featured row carries the selection it was chosen by.
         sa.CheckConstraint(
