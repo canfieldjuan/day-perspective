@@ -1648,18 +1648,6 @@ def publish_wikidata_event(
         own_roots.append(resolved.id)
         roots_by_release.setdefault(lineage_release.id, set()).add(resolved.id)
 
-    # Publication consumes the human editorial-ranking stage. Each selected root is
-    # gated against its *own* source release -- licensing, pipeline, quality, and
-    # editorial -- so a root resolved from a newer release cannot bypass that
-    # release's gates (docs/PRODUCT_CONTRACT.md source-release gate).
-    for release_id, roots in roots_by_release.items():
-        assert_release_publication_eligible(
-            session,
-            source_release_id=release_id,
-            profile_date=occurrence_date,
-            resolved_root_ids_by_section={"recorded_on_this_date": roots},
-        )
-
     previous_manifest = session.scalar(
         select(PublicationManifest)
         .where(
@@ -1759,6 +1747,37 @@ def publish_wikidata_event(
         )
         for event_id, statements, _roots in ordered_groups
     ]
+
+    # Publication consumes the human editorial-ranking stage. Every root this
+    # version publishes is gated against its *own* source release -- licensing,
+    # pipeline, quality, and editorial -- so a root resolved from a newer release
+    # cannot bypass that release's gates (docs/PRODUCT_CONTRACT.md source-release
+    # gate).
+    #
+    # Retained roots are gated too. They were eligible when first published, and
+    # that is not the same as being eligible now: a release can be restricted, a
+    # pipeline run can stop being successful, a required quality check can be
+    # revoked. Republishing them under this version means this version asserts
+    # them, so this version has to clear the gate for them.
+    for retained_root in dict.fromkeys(
+        root for _event_id, _statements, roots in retained_groups for root in roots
+    ):
+        resolved_retained = session.get(ResolvedClaim, retained_root)
+        if resolved_retained is None:
+            raise ValueError(
+                f"Retained recorded root {retained_root} no longer exists."
+            )
+        _lineage_claim, retained_release = _resolution_lineage(
+            session, resolved=resolved_retained
+        )
+        roots_by_release.setdefault(retained_release.id, set()).add(retained_root)
+    for release_id, roots in roots_by_release.items():
+        assert_release_publication_eligible(
+            session,
+            source_release_id=release_id,
+            profile_date=occurrence_date,
+            resolved_root_ids_by_section={"recorded_on_this_date": roots},
+        )
 
     source_attribution = {
         "name": source.name,

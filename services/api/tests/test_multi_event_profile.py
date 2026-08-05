@@ -553,3 +553,100 @@ def test_the_golden_publisher_binds_its_recorded_event(
     )
     assert [row.is_featured for row in rows] == [True]
     assert rows[0].statement_count > 0
+
+
+@pytest.mark.integration
+def test_an_empty_recorded_section_may_not_erase_an_admitted_event(
+    session: Session, tmp_path: Path
+) -> None:
+    """Dropping every event is still dropping.
+
+    The exemption for empty recorded sections exists so context-only profiles
+    keep publishing. Applied before checking what the date already admits, it
+    becomes the widest possible drop: a successor with no recorded section and
+    no bindings leaves ``events_behind_manifest`` empty, and the collision guard
+    forgets the date entirely.
+    """
+    first = _make_event(session, key="admitted-before-erasure")
+    second = _make_event(session, key="also-admitted")
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+    _publish_two_event_prior(session, store, first=first, second=second)
+
+    with pytest.raises(ValueError, match="would drop"):
+        publish_day_profile(
+            session,
+            store=store,
+            profile_date=GOLDEN_DATE,
+            profile_type=ProfileType.STANDARD_STATISTICAL,
+            payload={
+                "schema_version": "1",
+                "date": GOLDEN_DATE.isoformat(),
+                "profile_type": ProfileType.STANDARD_STATISTICAL.value,
+                "sections": {
+                    "recorded_on_this_date": [],
+                    "typical_day_in_this_year": [
+                        {
+                            "statement_id": "context",
+                            "statement": "Context that would bury the events.",
+                            "details": {},
+                            "provenance_note": "development fixture",
+                        }
+                    ],
+                },
+                "section_states": {
+                    "typical_day_in_this_year": {"status": "available"}
+                },
+            },
+            statement_evidence=[
+                PublicationStatementEvidenceInput(
+                    statement_path="/sections/typical_day_in_this_year/0",
+                    resolved_claim_id=first.resolved_claim_id,
+                )
+            ],
+            force_new_version=True,
+        )
+
+
+@pytest.mark.integration
+def test_an_empty_recorded_section_is_fine_where_nothing_was_admitted(
+    session: Session, tmp_path: Path
+) -> None:
+    """The other side: context-only dates must keep publishing.
+
+    Most of the archive is context. A rule that refused every empty recorded
+    section would stop the archive republishing rather than protect anything.
+    """
+    event = _make_event(session, key="context-only-date")
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+
+    profile = publish_day_profile(
+        session,
+        store=store,
+        profile_date=GOLDEN_DATE,
+        profile_type=ProfileType.STANDARD_STATISTICAL,
+        payload={
+            "schema_version": "1",
+            "date": GOLDEN_DATE.isoformat(),
+            "profile_type": ProfileType.STANDARD_STATISTICAL.value,
+            "sections": {
+                "recorded_on_this_date": [],
+                "typical_day_in_this_year": [
+                    {
+                        "statement_id": "context",
+                        "statement": "Annual context only.",
+                        "details": {},
+                        "provenance_note": "development fixture",
+                    }
+                ],
+            },
+            "section_states": {"typical_day_in_this_year": {"status": "available"}},
+        },
+        statement_evidence=[
+            PublicationStatementEvidenceInput(
+                statement_path="/sections/typical_day_in_this_year/0",
+                resolved_claim_id=event.resolved_claim_id,
+            )
+        ],
+    )
+
+    assert profile.publication_manifest_id is not None

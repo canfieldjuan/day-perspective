@@ -1474,12 +1474,13 @@ def _validate_recorded_event_bindings(
     loudly, which is recoverable, rather than publishing a version that forgets
     one of them, which is not.
     """
-    sections = payload.get("sections")
-    recorded = (
-        sections.get(RECORDED_EVENT_SECTION) if isinstance(sections, dict) else None
-    )
-    if not isinstance(recorded, list) or not recorded:
-        return
+    # Deliberately not short-circuiting on an empty recorded section. Dropping
+    # every event is still dropping, and an exemption applied before looking at
+    # what the date already admits is the widest possible one: a successor with
+    # no recorded section and no bindings leaves the admitted set empty and the
+    # guard forgets the date. What the section contains is irrelevant; what
+    # matters is whether this version still accounts for the events the current
+    # one admitted.
     current = session.scalar(
         select(PublicationManifest)
         .where(
