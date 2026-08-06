@@ -502,3 +502,119 @@ def test_a_third_event_adjudicated_against_only_one_incumbent_is_refused(
         session.scalar(select(func.count()).select_from(PublicationManifest))
         == manifests_before
     )
+
+
+@pytest.mark.integration
+def test_a_refused_publication_records_no_standing_decision(
+    session: Session, tmp_path: Path
+) -> None:
+    """The rollback proof's other side: a refusal that *returns* rather than raises.
+
+    ``featured_event_required`` is an ordinary return value, and the CLI commits
+    the session on every non-exception path. So a standing decision written
+    before that gate becomes permanent editorial history for a publication that
+    never happened — and the next run would read it as the standing choice.
+
+    The exception path was already covered; this is the path a caller actually
+    takes when the archive simply declines to publish.
+    """
+    store, golden = _publish_past_the_golden_collision(session, tmp_path)
+    golden_event = _golden_event(session, golden)
+    rows_before = _featured_rows(session)
+
+    # Every one of the prior admitted event's recorded predicates is withdrawn,
+    # so nothing of it survives into a successor and publication must refuse.
+    for root in session.scalars(
+        select(PublicationStatementEvidence.resolved_claim_id).where(
+            PublicationStatementEvidence.publication_manifest_id
+            == golden.publication_manifest_id,
+            PublicationStatementEvidence.statement_path.startswith(
+                "/sections/recorded_on_this_date/", autoescape=True
+            ),
+            PublicationStatementEvidence.resolved_claim_id.is_not(None),
+        )
+    ):
+        record_editorial_selection(
+            session,
+            profile_date=GOLDEN_DATE,
+            section_key="recorded_on_this_date",
+            resolved_claim_id=root,
+            status=EditorialSelectionStatus.REJECTED,
+            display_rank=None,
+            rationale="Withdrawn by a person after the first publication.",
+            reviewed_by="test-human",
+        )
+    session.flush()
+
+    outcome = publish_wikidata_event(session, store=store)
+
+    assert outcome.status == "featured_event_required"
+    assert _featured_rows(session) == rows_before, (
+        "a decision was recorded for a publication that never happened"
+    )
+    assert not session.scalars(
+        select(EditorialSelection).where(
+            EditorialSelection.section_key == FEATURED_EVENT_SECTION,
+            EditorialSelection.reviewed_by == STANDING_FEATURED_EVENT_RULE,
+        )
+    ).all()
+    # And the golden event is untouched by the refusal.
+    assert golden_event.id is not None
+
+
+@pytest.mark.integration
+def test_a_changed_candidate_set_republishes_without_force_new_version(
+    session: Session, tmp_path: Path
+) -> None:
+    """A grown candidate set republishes on its own, without being forced.
+
+    The earlier three-event test passed ``force_new_version=True``, which meant
+    it never showed that an ordinary publish handles a grown set. This one drops
+    that crutch and pins the end state: the latest manifest describes the
+    candidate set actually evaluated, and all three events remain behind it.
+
+    What this does *not* prove is the widened ``metadata_binding_changed``
+    check. Under the current design a candidate-set change requires an evidence
+    change, which changes the rendered payload and mints a version regardless —
+    this test passes with the narrow check too, verified by reverting it. The
+    widened comparison is defence-in-depth for a future publisher that decouples
+    content from candidates, not a fix for a case reachable today.
+    """
+    store, golden = _publish_past_the_golden_collision(session, tmp_path)
+    golden_event = _golden_event(session, golden)
+    wikidata_event = _wikidata_event(session)
+    first = publish_wikidata_event(session, store=store)
+    assert first.status == "published"
+    rebuild_coverage_index(session)
+    session.flush()
+    first_manifest = session.get(PublicationManifest, first.manifest_id)
+    assert first_manifest is not None
+    winner_key = first_manifest.metadata_json["featured_event_identity_key"]
+    pair_fingerprint = first_manifest.metadata_json[
+        "featured_event_candidate_set_fingerprint"
+    ]
+
+    third = _admit_a_third_event(
+        session,
+        store,
+        losing_against=_score_for(winner_key),
+        adjudicate_against=[golden_event, wikidata_event],
+    )
+
+    # No force_new_version: the publish must decide for itself that the changed
+    # provenance is worth a new version.
+    second = publish_wikidata_event(session, store=store)
+
+    assert second.status == "published"
+    assert second.manifest_id != first.manifest_id
+    manifest = session.get(PublicationManifest, second.manifest_id)
+    assert manifest is not None
+    assert manifest.metadata_json[
+        "featured_event_candidate_set_fingerprint"
+    ] != pair_fingerprint
+    assert manifest.metadata_json["featured_event_identity_key"] == winner_key
+    assert events_behind_manifest(session, manifest=manifest) == {
+        golden_event.id,
+        wikidata_event.id,
+        third.id,
+    }
