@@ -333,6 +333,62 @@ export function isPublishedProfileResponse(
         isSectionKey(key) &&
         Array.isArray(statements) &&
         statements.every((statement) => isProfileStatement(statement))
-    )
+    ) &&
+    hasCoherentEventGroups(sections.recorded_on_this_date)
+  );
+}
+
+/**
+ * Exactly one event leads, and the group keys agree with themselves.
+ *
+ * Per-statement validation cannot see this: two groups can each be perfectly
+ * well formed and both claim `featured`. The renderer would then give both lead
+ * treatment, and the page shows two headlines with nothing telling a reader
+ * which event the date is actually about — the single question D046 exists to
+ * answer.
+ *
+ * Checked only among statements that declare a group. A section carrying none
+ * is a profile published before typed grouping; it renders flat and there is no
+ * invariant to check.
+ */
+function hasCoherentEventGroups(statements: unknown): boolean {
+  if (!Array.isArray(statements)) {
+    return true;
+  }
+  const groups = new Map<string, ProfileStatementEventGroup>();
+  for (const statement of statements) {
+    const record = asRecord(statement);
+    if (record === undefined || record.event_group === undefined) {
+      continue;
+    }
+    const group = readEventGroup(record.event_group);
+    if (group === null) {
+      return false;
+    }
+    const seen = groups.get(group.event_group_key);
+    if (seen === undefined) {
+      groups.set(group.event_group_key, group);
+      continue;
+    }
+    // One key must describe one event, or grouping by it means nothing.
+    if (
+      seen.event_title !== group.event_title ||
+      seen.featured !== group.featured ||
+      seen.event_order !== group.event_order
+    ) {
+      return false;
+    }
+  }
+  if (groups.size === 0) {
+    return true;
+  }
+  const featured = [...groups.values()].filter((group) => group.featured);
+  if (featured.length !== 1) {
+    return false;
+  }
+  // The headline is also the one the payload orders first, so a renderer
+  // sorting by either field reaches the same event.
+  return [...groups.values()].every(
+    (group) => group.featured === (group.event_order === 0)
   );
 }

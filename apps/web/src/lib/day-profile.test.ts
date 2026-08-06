@@ -409,3 +409,115 @@ describe("source attributions at the response boundary", () => {
     ).toBe(false);
   });
 });
+
+describe("the single-featured-group invariant is checked across the section", () => {
+  const statement = (id: string, group: unknown) => ({
+    statement_id: id,
+    statement: `Statement ${id}.`,
+    event_group: group
+  });
+
+  const envelope = (statements: unknown[]) => ({
+    status: "published",
+    date: "1964-03-27",
+    profile_type: "standard_statistical",
+    manifest_id: "manifest-featured",
+    content_hash: "a".repeat(64),
+    profile: {
+      schema_version: "1",
+      date: "1964-03-27",
+      profile_type: "standard_statistical",
+      sections: { recorded_on_this_date: statements },
+      section_states: {}
+    }
+  });
+
+  const featured = {
+    event_group_key: "g0",
+    event_title: "The featured event",
+    featured: true,
+    event_order: 0,
+    predicate_order: 0
+  };
+  const secondary = {
+    event_group_key: "g1",
+    event_title: "A second event",
+    featured: false,
+    event_order: 1,
+    predicate_order: 0
+  };
+
+  it("accepts one featured group leading the others", () => {
+    expect(
+      isPublishedProfileResponse(
+        envelope([statement("a", featured), statement("b", secondary)]),
+        "1964-03-27"
+      )
+    ).toBe(true);
+  });
+
+  it("rejects two groups both claiming to be featured", () => {
+    // Per-statement checks pass here: each group is individually well formed.
+    // The renderer would give both lead treatment, so the page shows two
+    // headlines and no way for a reader to tell which event the date is about.
+    expect(
+      isPublishedProfileResponse(
+        envelope([
+          statement("a", featured),
+          statement("b", { ...secondary, featured: true })
+        ]),
+        "1964-03-27"
+      )
+    ).toBe(false);
+  });
+
+  it("rejects a section with no featured group at all", () => {
+    expect(
+      isPublishedProfileResponse(
+        envelope([
+          statement("a", { ...featured, featured: false, event_order: 1 }),
+          statement("b", { ...secondary, event_order: 2 })
+        ]),
+        "1964-03-27"
+      )
+    ).toBe(false);
+  });
+
+  it("rejects a featured group that is not first in the published order", () => {
+    expect(
+      isPublishedProfileResponse(
+        envelope([
+          statement("a", { ...featured, event_order: 1 }),
+          statement("b", { ...secondary, event_order: 0 })
+        ]),
+        "1964-03-27"
+      )
+    ).toBe(false);
+  });
+
+  it("rejects one group key describing two different events", () => {
+    expect(
+      isPublishedProfileResponse(
+        envelope([
+          statement("a", featured),
+          statement("b", { ...featured, event_title: "A different title" })
+        ]),
+        "1964-03-27"
+      )
+    ).toBe(false);
+  });
+
+  it("leaves a section with no grouping alone", () => {
+    // Profiles published before typed grouping carry none; the renderer falls
+    // back to flat and the invariant has nothing to check.
+    expect(
+      isPublishedProfileResponse(
+        envelope([
+          { statement_id: "a", statement: "Ungrouped." },
+          { statement_id: "b", statement: "Also ungrouped." }
+        ]),
+        "1964-03-27"
+      )
+    ).toBe(true);
+  });
+});
