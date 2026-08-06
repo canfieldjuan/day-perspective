@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 
 import type { PublishedDayProfile } from "@day-perspective/contracts";
-import { DAY_PROFILE_SECTIONS } from "@/src/lib/day-profile";
+import { DAY_PROFILE_SECTIONS, readEventGroup } from "@/src/lib/day-profile";
 import { deriveEvidenceClass } from "@/src/lib/evidence-class";
 import { EvidencePanel } from "./EvidencePanel";
 
@@ -25,6 +25,78 @@ type ProfileSectionsProps = {
   publicationManifestId?: string;
   publicationContentHash?: string;
 };
+
+type EventGroup = {
+  key: string;
+  title: string;
+  featured: boolean;
+  order: number;
+  statements: import("@day-perspective/contracts").ProfileStatement[];
+};
+
+/**
+ * Group recorded statements by the event they describe.
+ *
+ * Reads the typed metadata the payload carries rather than inferring boundaries
+ * from array position — a reader should not have to notice that the sentences
+ * changed subject to work out where one event ends.
+ *
+ * Returns null when grouping would tell the reader nothing: any other section,
+ * or a recorded section whose statements do not all declare an event. Falling
+ * back keeps profiles published before typed grouping rendering exactly as they
+ * did, and a partially-attributed section renders flat rather than stranding
+ * some statements outside a group.
+ *
+ * Uses `readEventGroup` — the same predicate the response boundary validates
+ * with, so the two cannot disagree about what a usable group is. It stays used
+ * here rather than trusting the boundary to have run: the fallback costs the
+ * reader the grouping, while a property access on a malformed group costs them
+ * the whole page.
+ */
+function groupByEvent(
+  sectionKey: string,
+  statements: import("@day-perspective/contracts").ProfileStatement[]
+): EventGroup[] | null {
+  if (sectionKey !== "recorded_on_this_date") return null;
+  if (statements.length === 0) return null;
+  const declared = statements.map((statement) =>
+    readEventGroup(statement.event_group)
+  );
+  if (declared.some((group) => group === null)) {
+    return null;
+  }
+  const groups = new Map<string, EventGroup>();
+  statements.forEach((statement, index) => {
+    const group = declared[index]!;
+    const existing = groups.get(group.event_group_key);
+    if (existing) {
+      existing.statements.push(statement);
+      return;
+    }
+    groups.set(group.event_group_key, {
+      key: group.event_group_key,
+      title: group.event_title,
+      featured: group.featured,
+      order: group.event_order,
+      statements: [statement]
+    });
+  });
+  // The published sequence lives in event_order; the key is opaque by contract,
+  // so sorting on it would order secondary events by an accident of hashing.
+  const ordered = Array.from(groups.values()).sort((left, right) => {
+    if (left.featured !== right.featured) return left.featured ? -1 : 1;
+    if (left.order !== right.order) return left.order - right.order;
+    return left.key.localeCompare(right.key);
+  });
+  for (const group of ordered) {
+    group.statements.sort(
+      (left, right) =>
+        (left.event_group?.predicate_order ?? 0) -
+        (right.event_group?.predicate_order ?? 0)
+    );
+  }
+  return ordered;
+}
 
 export function ProfileSections({
   availability,
@@ -107,7 +179,12 @@ export function ProfileSections({
           >
             <h2 id={headingId}>{section.title}</h2>
             {populated ? (
-              statements.map((statement, statementIndex) => {
+              (() => {
+              const renderStatement = (
+                statement: import("@day-perspective/contracts").ProfileStatement,
+                statementIndex: number,
+                isLead: boolean
+              ) => {
                 const evidenceClass = deriveEvidenceClass(section.key, statement);
                 const disputed =
                   (statement.provenance?.dissenting_claims.length ?? 0) > 0;
@@ -117,8 +194,6 @@ export function ProfileSections({
                       profileYear || "the year"
                     )
                   : null;
-                const isLead =
-                  section.key === leadSectionKey && statementIndex === 0;
 
                 return (
                 <article
@@ -165,7 +240,49 @@ export function ProfileSections({
                   ) : null}
                 </article>
                 );
-              })
+              };
+              const groups = groupByEvent(section.key, statements);
+              return groups ? (
+                groups.map((group, groupIndex) => (
+                  <React.Fragment key={group.key}>
+                    {groupIndex === 1 ? (
+                      <p className="stratum__group-lede">
+                        Also recorded on this date
+                      </p>
+                    ) : null}
+                    <div
+                      className={
+                        group.featured
+                          ? "event-group event-group--featured"
+                          : "event-group"
+                      }
+                      data-event-group={group.key}
+                      data-featured={group.featured ? "true" : "false"}
+                      data-testid={"event-group-" + group.key}
+                    >
+                      <h3 className="event-group__title">{group.title}</h3>
+                      {group.statements.map((statement, index) =>
+                        renderStatement(
+                          statement,
+                          index,
+                          group.featured && index === 0
+                        )
+                      )}
+                    </div>
+                  </React.Fragment>
+                ))
+              ) : (
+                <>
+                  {statements.map((statement, statementIndex) =>
+                    renderStatement(
+                      statement,
+                      statementIndex,
+                      section.key === leadSectionKey && statementIndex === 0
+                    )
+                  )}
+                </>
+              );
+            })()
             ) : (
               <>
                 {availability === "published" &&
