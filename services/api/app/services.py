@@ -980,14 +980,30 @@ def _collect_direct_sources(
 ) -> None:
     """Gather the ``source`` block of every release a snapshot rests on directly.
 
-    ``lineage`` is skipped on purpose. A release derived from an earlier one is
-    still evidence for the statement, but its ancestors are a chain, not a list
-    of publishers standing behind the page; naming them at page level would
-    credit sources the profile never read. That chain stays visible in the
-    statement's own provenance, which is authoritative.
+    Two things inside a published snapshot are evidence-shaped without being
+    support, and both are skipped.
+
+    A ``dissenting`` evidence entry is a claim the resolution **rejected**,
+    recorded so a reader can see it was considered. Crediting its publisher
+    would name a source as standing behind the very claim it disputed, which
+    inverts the record rather than summarising it.
+
+    ``lineage`` is ancestry. A release derived from an earlier one is evidence;
+    the release it was derived from is a chain, and naming it at page level
+    credits a publisher the profile never read. It is skipped wherever it
+    appears rather than at one expected depth -- it currently sits inside the
+    ``release`` object, and a guard that assumes a nesting level stops working
+    silently when the shape moves.
+
+    Both remain in per-statement provenance, which is authoritative. This is
+    only the page-level summary of it.
     """
     if isinstance(node, dict):
+        if node.get("stance") == "dissenting":
+            return
         for key, value in node.items():
+            if key == "lineage":
+                continue
             if key == "source_release" and isinstance(value, dict):
                 source = value.get("source")
                 if isinstance(source, dict) and source.get("id"):
@@ -996,10 +1012,6 @@ def _collect_direct_sources(
                         "publisher": str(source.get("publisher") or ""),
                         "url": str(source.get("canonical_url") or ""),
                     }
-                for nested_key, nested in value.items():
-                    if nested_key != "lineage":
-                        _collect_direct_sources(nested, collected)
-                continue
             _collect_direct_sources(value, collected)
     elif isinstance(node, list):
         for item in node:
