@@ -332,3 +332,21 @@ describe("malformed or partial grouping degrades instead of breaking", () => {
     expect(groups).toEqual(["featured01", "secondary1", "aaa-sorts-first"]);
   });
 });
+
+describe("an empty recorded section is a quiet date, not a grouped one", () => {
+  it("shows the quiet-date seam rather than a grouped or flat statement list", () => {
+    // "Every statement declares a group" is vacuously true of an empty array,
+    // so an empty section can look fully grouped to a naive check. A
+    // context-only profile publishes exactly this, and it must reach the seam.
+    const profile = multiEventProfile();
+    profile.sections.recorded_on_this_date = [];
+
+    const { container } = renderProfile(profile);
+
+    expect(container.querySelectorAll("[data-event-group]").length).toBe(0);
+    expect(
+      screen.getByText("No reviewed event is published for this date.")
+    ).toBeTruthy();
+    expect(screen.queryByText("Also recorded on this date")).toBeNull();
+  });
+});

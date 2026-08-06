@@ -856,3 +856,31 @@ describe("cross-group invariants respect the partial-grouping fallback", () => {
     ).toBe(true);
   });
 });
+
+describe("an empty recorded section passes the boundary", () => {
+  it("accepts recorded_on_this_date: [] without demanding a featured group", () => {
+    // A context-only profile publishes this. The cross-group invariants have
+    // nothing to check, and requiring a headline would reject a valid page.
+    expect(
+      isPublishedProfileResponse(
+        {
+          status: "published",
+          date: "1964-03-27",
+          profile_type: "standard_statistical",
+          manifest_id: "manifest-empty-recorded",
+          content_hash: "f".repeat(64),
+          profile: {
+            schema_version: "1",
+            date: "1964-03-27",
+            profile_type: "standard_statistical",
+            sections: { recorded_on_this_date: [] },
+            section_states: {
+              recorded_on_this_date: { status: "available" }
+            }
+          }
+        },
+        "1964-03-27"
+      )
+    ).toBe(true);
+  });
+});
