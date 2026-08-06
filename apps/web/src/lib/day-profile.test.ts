@@ -200,3 +200,80 @@ describe("publication tier validation", () => {
     ).toBe(false);
   });
 });
+
+describe("event-group metadata at the response boundary", () => {
+  const profileWith = (eventGroup: unknown) => ({
+    status: "published",
+    date: "1964-03-27",
+    profile_type: "standard_statistical",
+    manifest_id: "manifest-event-group",
+    content_hash: "e".repeat(64),
+    profile: {
+      schema_version: "1",
+      date: "1964-03-27",
+      profile_type: "standard_statistical",
+      sections: {
+        recorded_on_this_date: [
+          {
+            statement_id: "s1",
+            statement: "USGS names the record X.",
+            ...(eventGroup === undefined ? {} : { event_group: eventGroup })
+          }
+        ]
+      },
+      section_states: {}
+    }
+  });
+
+  const WELL_FORMED = {
+    event_group_key: "group1",
+    event_title: "1964 Alaska earthquake",
+    featured: true,
+    event_order: 0,
+    predicate_order: 0
+  };
+
+  it("accepts a complete event group", () => {
+    expect(
+      isPublishedProfileResponse(profileWith(WELL_FORMED), "1964-03-27")
+    ).toBe(true);
+  });
+
+  it("accepts a statement published before typed grouping existed", () => {
+    expect(isPublishedProfileResponse(profileWith(undefined), "1964-03-27")).toBe(
+      true
+    );
+  });
+
+  it("rejects a null event group", () => {
+    expect(isPublishedProfileResponse(profileWith(null), "1964-03-27")).toBe(
+      false
+    );
+  });
+
+  it("rejects an event group missing its key", () => {
+    const withoutKey: Record<string, unknown> = { ...WELL_FORMED };
+    delete withoutKey.event_group_key;
+    expect(isPublishedProfileResponse(profileWith(withoutKey), "1964-03-27")).toBe(
+      false
+    );
+  });
+
+  it("rejects an event group whose order is not a number", () => {
+    expect(
+      isPublishedProfileResponse(
+        profileWith({ ...WELL_FORMED, event_order: "0" }),
+        "1964-03-27"
+      )
+    ).toBe(false);
+  });
+
+  it("rejects an event group whose featured flag is not a boolean", () => {
+    expect(
+      isPublishedProfileResponse(
+        profileWith({ ...WELL_FORMED, featured: "true" }),
+        "1964-03-27"
+      )
+    ).toBe(false);
+  });
+});

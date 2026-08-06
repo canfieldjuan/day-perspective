@@ -299,3 +299,61 @@ describe("grouping stays navigable", () => {
     ).toBeNull();
   });
 });
+
+describe("malformed or partial grouping degrades instead of breaking", () => {
+  it("renders flat when a statement carries a null event group", () => {
+    const profile = multiEventProfile();
+    // A payload can carry null where a group is expected. Guarding only
+    // `undefined` lets it through to a property access that throws, and a
+    // published profile turns into a blank page.
+    (profile.sections.recorded_on_this_date as ProfileStatement[])[2] = {
+      ...(profile.sections.recorded_on_this_date as ProfileStatement[])[2],
+      event_group: null as unknown as ProfileStatement["event_group"]
+    };
+
+    const { container } = renderProfile(profile);
+
+    expect(container.querySelectorAll("[data-event-group]").length).toBe(0);
+    // Every statement is still on the page; only the grouping is withheld.
+    expect(screen.getByText("Wikidata records this event as X.")).toBeTruthy();
+    expect(screen.getByText("USGS names the record X.")).toBeTruthy();
+  });
+
+  it("renders flat when a group is missing its fields", () => {
+    const profile = multiEventProfile();
+    (profile.sections.recorded_on_this_date as ProfileStatement[])[0] = {
+      ...(profile.sections.recorded_on_this_date as ProfileStatement[])[0],
+      event_group: { featured: true } as unknown as ProfileStatement["event_group"]
+    };
+
+    const { container } = renderProfile(profile);
+
+    expect(container.querySelectorAll("[data-event-group]").length).toBe(0);
+    expect(screen.getByText("Wikidata records this event as X.")).toBeTruthy();
+  });
+
+  it("orders secondary events by their published order, not by the opaque key", () => {
+    const profile = multiEventProfile();
+    const third = {
+      event_group_key: "aaa-sorts-first",
+      event_title: "A third recorded event",
+      featured: false,
+      event_order: 2
+    };
+    // The keys are chosen so alphabetical order and published order disagree:
+    // "aaa-sorts-first" precedes "secondary1", but the API published it second.
+    (profile.sections.recorded_on_this_date as ProfileStatement[]).push(
+      statement("third-title", "A third source names the record X.", {
+        ...third,
+        predicate_order: 0
+      })
+    );
+
+    const { container } = renderProfile(profile);
+
+    const groups = Array.from(
+      container.querySelectorAll("[data-event-group]")
+    ).map((node) => node.getAttribute("data-event-group"));
+    expect(groups).toEqual(["featured01", "secondary1", "aaa-sorts-first"]);
+  });
+});

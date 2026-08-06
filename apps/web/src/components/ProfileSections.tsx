@@ -30,8 +30,38 @@ type EventGroup = {
   key: string;
   title: string;
   featured: boolean;
+  order: number;
   statements: import("@day-perspective/contracts").ProfileStatement[];
 };
+
+/**
+ * Read a statement's event group, or null when it does not declare a usable one.
+ *
+ * A payload that reaches this component has normally passed the response
+ * boundary, which rejects a malformed group outright. This stays defensive
+ * anyway: the alternative to a null check here is a property access on null,
+ * which replaces a published profile with a blank page. Grouping is a way of
+ * presenting statements, and losing it should cost the reader the grouping, not
+ * the statements.
+ */
+function readEventGroup(
+  statement: import("@day-perspective/contracts").ProfileStatement
+): import("@day-perspective/contracts").ProfileStatementEventGroup | null {
+  const group = statement.event_group;
+  if (group === undefined || group === null || typeof group !== "object") {
+    return null;
+  }
+  if (typeof group.event_group_key !== "string" || group.event_group_key === "") {
+    return null;
+  }
+  if (typeof group.event_title !== "string" || group.event_title === "") {
+    return null;
+  }
+  if (typeof group.featured !== "boolean") return null;
+  if (!Number.isFinite(group.event_order)) return null;
+  if (!Number.isFinite(group.predicate_order)) return null;
+  return group;
+}
 
 /**
  * Group recorded statements by the event they describe.
@@ -52,26 +82,31 @@ function groupByEvent(
 ): EventGroup[] | null {
   if (sectionKey !== "recorded_on_this_date") return null;
   if (statements.length === 0) return null;
-  if (statements.some((statement) => statement.event_group === undefined)) {
+  const declared = statements.map((statement) => readEventGroup(statement));
+  if (declared.some((group) => group === null)) {
     return null;
   }
   const groups = new Map<string, EventGroup>();
-  for (const statement of statements) {
-    const group = statement.event_group!;
+  statements.forEach((statement, index) => {
+    const group = declared[index]!;
     const existing = groups.get(group.event_group_key);
     if (existing) {
       existing.statements.push(statement);
-      continue;
+      return;
     }
     groups.set(group.event_group_key, {
       key: group.event_group_key,
       title: group.event_title,
       featured: group.featured,
+      order: group.event_order,
       statements: [statement]
     });
-  }
+  });
+  // The published sequence lives in event_order; the key is opaque by contract,
+  // so sorting on it would order secondary events by an accident of hashing.
   const ordered = Array.from(groups.values()).sort((left, right) => {
     if (left.featured !== right.featured) return left.featured ? -1 : 1;
+    if (left.order !== right.order) return left.order - right.order;
     return left.key.localeCompare(right.key);
   });
   for (const group of ordered) {
