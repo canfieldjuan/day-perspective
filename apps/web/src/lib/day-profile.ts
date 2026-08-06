@@ -394,49 +394,51 @@ function hasCoherentEventGroups(statements: unknown): boolean {
   if (groups.size === 0) {
     return true;
   }
-  // Contiguity is checked only when grouping will actually be used to render.
-  // A partially grouped section falls back to flat, so its sequence is never
-  // read, and failing the profile there would replace a readable page with an
-  // error over an ordering nothing consults.
-  if (declared === statements.length && !hasContiguousPredicates(statements)) {
+
+  // Every remaining property is a property of the *set* of groups, and every
+  // one of them is gated on the same condition: the section is fully grouped,
+  // so grouping will actually render. A partially grouped section falls back to
+  // flat (C-3.5.5), which reads none of these, and enforcing them there turns a
+  // contract-valid payload into an error page.
+  //
+  // The gate is written once, here, rather than repeated per check. Three
+  // consecutive review rounds found exactly one invariant left outside it —
+  // featured count, then the featured/order correlation, then uniqueness —
+  // because a per-check condition is something a new check can silently forget
+  // to include. Anything added below this line is gated by construction.
+  if (declared !== statements.length) {
+    return true;
+  }
+
+  // Exactly one headline. The featured event's statements can be the ungrouped
+  // ones in a partial section, which is why this cannot run above the gate.
+  if ([...groups.values()].filter((group) => group.featured).length !== 1) {
     return false;
   }
-  // Requiring a featured group applies only to a fully grouped section. The
-  // featured event's own statements can legitimately be ungrouped —
-  // `events_by_source_release` omits a release that produced two events on one
-  // date rather than guessing — leaving a section whose only declared group is
-  // a secondary one. That renders flat, which is readable and honest; failing
-  // the profile would turn a safe degradation into an error page.
-  const featured = [...groups.values()].filter((group) => group.featured);
-  if (declared === statements.length && featured.length !== 1) {
+
+  // The headline is also the group the payload orders first, so a renderer
+  // sorting by `featured` and one sorting by `event_order` reach the same
+  // event. Without it C-3.5.3 and C-3.5.4 can demand different first groups.
+  if (
+    ![...groups.values()].every(
+      (group) => group.featured === (group.event_order === 0)
+    )
+  ) {
     return false;
   }
-  // Distinct groups must not share an `event_order`. A tie falls through to the
-  // opaque-key comparator, so a duplicate does not fail — it renders the events
-  // in hash order, which is the one ordering the contract forbids. Uniqueness
-  // is a different property from contiguity: gaps stay allowed, ties do not.
+
+  // Distinct groups must not share an `event_order`: a tie has no defined
+  // order, so it falls through to the opaque-key comparator, which C-3.5.4
+  // forbids. Uniqueness is a different property from contiguity — gaps are
+  // honest, because the publisher enumerates admitted events and one may
+  // contribute no attributable statement, so `event_order` is NOT required to
+  // run 0..m-1.
   const orders = [...groups.values()].map((group) => group.event_order);
   if (new Set(orders).size !== orders.length) {
     return false;
   }
-  // `event_order` is deliberately NOT required to be contiguous across groups,
-  // even though the publisher assigns it with `enumerate`. It enumerates the
-  // *admitted events*, while a group exists only for an event that contributed
-  // an attributable statement (`wikidata.py:1559-1562`) — so an admitted event
-  // whose statements could not be attributed leaves a real gap in an otherwise
-  // honest payload. Requiring 0..m-1 here would reject it. Only the property
-  // the publisher actually guarantees is checked: the featured group is 0.
-  // The headline is also the one the payload orders first, so a renderer
-  // sorting by either field reaches the same event. Gated with the other
-  // cross-group invariants (C-3.5.1): a partially grouped section renders
-  // flat, so nothing reads the correlation, and enforcing it there rejects a
-  // payload the contract calls valid.
-  if (declared !== statements.length) {
-    return true;
-  }
-  return [...groups.values()].every(
-    (group) => group.featured === (group.event_order === 0)
-  );
+
+  return hasContiguousPredicates(statements);
 }
 
 /**

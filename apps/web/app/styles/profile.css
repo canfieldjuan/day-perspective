@@ -170,6 +170,15 @@
   max-width: 34ch;
 }
 
+/* C-3.5.3 asks the lead for larger type *and* a full-width rule. The type was
+   here; the rule was not, in flat rendering as well as grouped. It sits on the
+   article rather than the text so it spans the measure instead of stopping at
+   the 34ch the headline is set to. */
+.profile-statement[data-lead="true"] {
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 0.9rem;
+}
+
 .day-layout {
   display: grid;
   gap: 1rem;

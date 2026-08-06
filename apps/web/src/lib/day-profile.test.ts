@@ -975,3 +975,126 @@ describe("the featured/order correlation is a cross-group invariant", () => {
     ).toBe(false);
   });
 });
+
+describe("no cross-group invariant escapes the grouping gate", () => {
+  const partial = (group: unknown) => ({
+    status: "published",
+    date: "1964-03-27",
+    profile_type: "standard_statistical",
+    manifest_id: "manifest-gate-sweep",
+    content_hash: "7".repeat(64),
+    profile: {
+      schema_version: "1",
+      date: "1964-03-27",
+      profile_type: "standard_statistical",
+      sections: {
+        recorded_on_this_date: [
+          { statement_id: "u", statement: "Ungrouped." },
+          { statement_id: "a", statement: "A.", event_group: group },
+          {
+            statement_id: "b",
+            statement: "B.",
+            event_group: {
+              event_group_key: "g1",
+              event_title: "Another event",
+              featured: false,
+              event_order: 1,
+              predicate_order: 0
+            }
+          }
+        ]
+      },
+      section_states: {}
+    }
+  });
+
+  it("tolerates duplicate event_order in a partially grouped section", () => {
+    // The renderer falls back to flat, so no ordering is read. Every other
+    // cross-group invariant is already gated; this one was not.
+    expect(
+      isPublishedProfileResponse(
+        partial({
+          event_group_key: "g0",
+          event_title: "One event",
+          featured: false,
+          event_order: 1,
+          predicate_order: 0
+        }),
+        "1964-03-27"
+      )
+    ).toBe(true);
+  });
+
+  it("tolerates a non-contiguous predicate order in a partially grouped section", () => {
+    expect(
+      isPublishedProfileResponse(
+        partial({
+          event_group_key: "g0",
+          event_title: "One event",
+          featured: false,
+          event_order: 2,
+          predicate_order: 5
+        }),
+        "1964-03-27"
+      )
+    ).toBe(true);
+  });
+
+  it("still rejects duplicate event_order when the section is fully grouped", () => {
+    expect(
+      isPublishedProfileResponse(
+        {
+          status: "published",
+          date: "1964-03-27",
+          profile_type: "standard_statistical",
+          manifest_id: "manifest-gate-full",
+          content_hash: "6".repeat(64),
+          profile: {
+            schema_version: "1",
+            date: "1964-03-27",
+            profile_type: "standard_statistical",
+            sections: {
+              recorded_on_this_date: [
+                {
+                  statement_id: "a",
+                  statement: "A.",
+                  event_group: {
+                    event_group_key: "g0",
+                    event_title: "The featured event",
+                    featured: true,
+                    event_order: 0,
+                    predicate_order: 0
+                  }
+                },
+                {
+                  statement_id: "b",
+                  statement: "B.",
+                  event_group: {
+                    event_group_key: "g1",
+                    event_title: "One secondary",
+                    featured: false,
+                    event_order: 1,
+                    predicate_order: 0
+                  }
+                },
+                {
+                  statement_id: "c",
+                  statement: "C.",
+                  event_group: {
+                    event_group_key: "g2",
+                    event_title: "Another secondary",
+                    featured: false,
+                    event_order: 1,
+                    predicate_order: 0
+                  }
+                }
+              ]
+            },
+            section_states: {}
+          }
+        },
+        "1964-03-27"
+      )
+    ).toBe(false);
+  });
+});
