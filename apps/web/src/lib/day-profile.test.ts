@@ -200,3 +200,75 @@ describe("publication tier validation", () => {
     ).toBe(false);
   });
 });
+
+describe("source attributions at the response boundary", () => {
+  const envelope = (attributions: unknown) => ({
+    status: "published",
+    date: "1964-03-27",
+    profile_type: "standard_statistical",
+    manifest_id: "manifest-attributions",
+    content_hash: "c".repeat(64),
+    profile: {
+      schema_version: "1",
+      date: "1964-03-27",
+      profile_type: "standard_statistical",
+      sections: { evidence_notes: [] },
+      section_states: {},
+      source_attributions: attributions
+    }
+  });
+
+  const COMPLETE = {
+    name: "USGS earthquake catalog",
+    publisher: "United States Geological Survey",
+    url: "https://earthquake.usgs.gov/"
+  };
+
+  it("accepts a complete attribution list", () => {
+    expect(isPublishedProfileResponse(envelope([COMPLETE]), "1964-03-27")).toBe(
+      true
+    );
+  });
+
+  it("accepts an empty list", () => {
+    expect(isPublishedProfileResponse(envelope([]), "1964-03-27")).toBe(true);
+  });
+
+  it("accepts a source whose publisher and URL are genuinely unknown", () => {
+    // Both columns are nullable upstream and the publisher emits "" for them.
+    // Failing the profile here would discard a page of honest evidence because
+    // one source has no recorded URL; the renderer degrades instead.
+    expect(
+      isPublishedProfileResponse(
+        envelope([{ ...COMPLETE, publisher: "", url: "" }]),
+        "1964-03-27"
+      )
+    ).toBe(true);
+  });
+
+  it("rejects an attribution with no name", () => {
+    // `Source.name` is not nullable, so an empty name is a corrupt payload
+    // rather than absent metadata.
+    expect(
+      isPublishedProfileResponse(
+        envelope([{ ...COMPLETE, name: "" }]),
+        "1964-03-27"
+      )
+    ).toBe(false);
+  });
+
+  it("rejects a non-string field", () => {
+    expect(
+      isPublishedProfileResponse(
+        envelope([{ ...COMPLETE, url: 4 }]),
+        "1964-03-27"
+      )
+    ).toBe(false);
+  });
+
+  it("rejects a list that is not a list", () => {
+    expect(
+      isPublishedProfileResponse(envelope({ ...COMPLETE }), "1964-03-27")
+    ).toBe(false);
+  });
+});

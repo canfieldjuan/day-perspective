@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -27,7 +28,9 @@ from app.governance import (
     LicenseInput,
     assert_release_publication_eligible,
     evaluate_featured_event,
+    event_group_key,
     events_behind_manifest,
+    events_by_source_release,
     is_human_reviewer,
     latest_identity_adjudication,
     record_identity_adjudication,
@@ -69,6 +72,7 @@ from app.services import (
     create_source_release,
     publish_day_profile,
     resolve_claim,
+    sources_supporting_evidence,
 )
 
 __all__ = [
@@ -1498,6 +1502,101 @@ def _event_has_surviving_evidence(
     )
 
 
+def _grouped_recorded_statements(
+    session: Session,
+    *,
+    statements: list[dict[str, Any]],
+    evidence: list[PublicationStatementEvidenceInput],
+    featured_event_id: UUID,
+    event_ids: Sequence[UUID],
+) -> list[dict[str, Any]]:
+    """Stamp each recorded statement with the event it describes.
+
+    Grouping stated rather than positional. A renderer that inferred groups from
+    array order would be guessing where one event ends, and the guess breaks as
+    soon as a date holds three events or one of them contributes a single
+    statement.
+
+    Attribution runs through source-release lineage, which every publisher has,
+    rather than identity or occurrence provenance, which only some statements
+    root on. A statement whose release cannot be tied to exactly one event is
+    left ungrouped: rendering it outside a group is a visible gap, while filing
+    it under the wrong event tells a reader that a different thing happened.
+
+    The featured event is ``event_order`` 0 and leads; ``predicate_order`` runs
+    from 0 within each group, so a group stays ordered when rendered alone.
+    """
+    owners = events_by_source_release(session, event_ids=event_ids)
+    titles: dict[UUID, tuple[str, str]] = {}
+    for event_id in event_ids:
+        event = session.get(Event, event_id)
+        identity = (
+            None if event is None else session.get(ResolvedClaim, event.resolved_claim_id)
+        )
+        if event is None or identity is None:
+            continue
+        titles[event_id] = (
+            event_group_key(identity.canonical_key),
+            event.canonical_title,
+        )
+
+    attributed: list[UUID | None] = []
+    for item in evidence:
+        owner: UUID | None = None
+        if item.resolved_claim_id is not None:
+            resolved = session.get(ResolvedClaim, item.resolved_claim_id)
+            if resolved is not None:
+                claim, _release = _resolution_lineage(session, resolved=resolved)
+                owner = owners.get(claim.source_release_id)
+        attributed.append(owner)
+
+    ordering = [featured_event_id] + [
+        event_id for event_id in event_ids if event_id != featured_event_id
+    ]
+    event_order = {event_id: index for index, event_id in enumerate(ordering)}
+    predicate_counter: dict[UUID, int] = {}
+    grouped: list[dict[str, Any]] = []
+    for statement, owner in zip(statements, attributed, strict=True):
+        if owner is None or owner not in titles:
+            grouped.append(statement)
+            continue
+        key, title = titles[owner]
+        position = predicate_counter.get(owner, 0)
+        predicate_counter[owner] = position + 1
+        grouped.append(
+            {
+                **statement,
+                "event_group": {
+                    "event_group_key": key,
+                    "event_title": title,
+                    "featured": owner == featured_event_id,
+                    "event_order": event_order.get(owner, len(ordering)),
+                    "predicate_order": position,
+                },
+            }
+        )
+    return grouped
+
+
+def _source_attributions(
+    session: Session, *, evidence: Sequence[PublicationStatementEvidenceInput]
+) -> list[dict[str, str]]:
+    """Every source whose evidence supports this profile.
+
+    A singular attribution names whichever publisher wrote last, which on a
+    multi-source date is not a summary but a false claim -- and false in the
+    direction that flatters the most recent contributor. Statement-level
+    provenance stays authoritative; this is the page-level summary of it.
+
+    Derived from the evidence being published rather than from the admitted
+    events. Enrichment carries a prior profile's annual context forward, and
+    those sections rest on publishers this pass never resolved -- deriving from
+    events alone would name the event's publishers and drop theirs, which is the
+    same false claim the singular field made, only one size larger.
+    """
+    return sources_supporting_evidence(session, evidence)
+
+
 def publish_wikidata_event(
     session: Session,
     *,
@@ -1847,6 +1946,23 @@ def publish_wikidata_event(
         else:
             recorded_statements = [*surviving_statements, *statements]
             recorded_evidence = [*surviving_evidence, *evidence]
+        admitted_event_ids = [event.id, *sorted(other_events, key=str)]
+        recorded_statements = _grouped_recorded_statements(
+            session,
+            statements=recorded_statements,
+            evidence=recorded_evidence,
+            featured_event_id=(
+                event.id
+                if featured_root == identity_resolved.id
+                else next(
+                    other_id
+                    for other_id in other_events
+                    if (other := session.get(Event, other_id)) is not None
+                    and other.resolved_claim_id == featured_root
+                )
+            ),
+            event_ids=admitted_event_ids,
+        )
         recorded_evidence = [
             PublicationStatementEvidenceInput(
                 statement_path=f"/sections/recorded_on_this_date/{index}",
@@ -1856,11 +1972,19 @@ def publish_wikidata_event(
             for index, item in enumerate(recorded_evidence)
         ]
 
-    source_attribution = {
-        "name": source.name,
-        "publisher": source.publisher,
-        "url": f"https://www.wikidata.org/wiki/{qid}",
-    }
+    if not other_events:
+        # One event is still an event. Publishing the same shape means a renderer
+        # never has to branch on whether grouping is present.
+        admitted_event_ids = [event.id]
+        recorded_statements = _grouped_recorded_statements(
+            session,
+            statements=recorded_statements,
+            evidence=recorded_evidence,
+            featured_event_id=event.id,
+            event_ids=admitted_event_ids,
+        )
+
+    payload: dict[str, Any]
     if previous_manifest is None:
         payload = {
             "schema_version": "1",
@@ -1868,7 +1992,6 @@ def publish_wikidata_event(
             "profile_type": profile_type.value,
             "sections": {"recorded_on_this_date": recorded_statements},
             "section_states": {"recorded_on_this_date": {"status": "available"}},
-            "source_attribution": source_attribution,
         }
     else:
         # Enrich the existing profile rather than replace it: carry every prior
@@ -1889,13 +2012,20 @@ def publish_wikidata_event(
                 **(base_states if isinstance(base_states, dict) else {}),
                 "recorded_on_this_date": {"status": "available"},
             },
-            "source_attribution": source_attribution,
         }
         if isinstance(base.get("quality"), dict):
             payload["quality"] = base["quality"]
         recorded_evidence = _carried_forward_evidence(
             session, manifest_id=previous_manifest.id
         ) + recorded_evidence
+
+    # Derived last, from the evidence the profile actually publishes -- carried
+    # forward included. Deriving it before the carry-forward merge above would
+    # attribute only what this pass resolved and silently drop the publishers
+    # behind every section it inherited.
+    payload["source_attributions"] = _source_attributions(
+        session, evidence=recorded_evidence
+    )
 
     # publish_day_profile's idempotency decides purely on the rendered payload's
     # content hash. A human can reaffirm or replace the current featured choice
