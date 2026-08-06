@@ -1580,3 +1580,63 @@ still fires when a feature genuinely cannot be resolved.
 Typed event grouping in the published contract and multi-source attribution are
 deliberately **not** here. They change public contracts and rendering, which is a
 separate review surface (G3b-2b, G3b-2c) regardless of how many lines remain.
+
+## D047: A statement says which event it belongs to, and a page says which sources it rests on
+
+**Context:** D044 made a date able to publish several canonical events, and D046
+decided which one leads. The recorded section stayed a flat array whose only
+grouping signal was order — the featured event's statements first. G3b-1's own
+publisher comment recorded that per-event grouping was "deliberately not handled
+precisely" and deferred.
+
+Position is not semantics. A renderer grouping by "everything until one looks
+different" is guessing, and the guess fails as soon as a date holds three events
+or an event contributes a single statement. Meanwhile the page carried one
+`source_attribution`, naming whichever publisher wrote last — on a USGS-plus-
+Wikidata date that is not a summary but a false claim, and false in the direction
+that flatters the most recent contributor.
+
+**Decision:** Every recorded statement carries typed `event_group` metadata, and
+a profile lists **every** source its evidence rests on.
+
+**Mechanism:** `event_group` carries `event_group_key`, `event_title`,
+`featured`, `event_order` and `predicate_order`. The key is a digest of the
+event's identity resolution rather than a database row id: stable across
+republication, and meaningful to a browser without publishing an internal
+identifier that invites being treated as an address. Exactly one group is
+`featured` and is `event_order` 0; `predicate_order` runs from 0 **within** each
+group, so a group stays ordered when rendered alone, collapsed or reordered.
+
+Attribution runs through **source-release lineage** — a statement's evidence
+traces to the release it came from, and an event's identity resolution traces to
+a release too. This is the part that was actually blocking the deferral: matching
+on identity or occurrence provenance only works for statements rooted on those
+relations, and USGS publishes title, magnitude and depth through none of them, so
+half its section would have been unattributable. A release that produced two
+events on one date is **omitted rather than guessed**: an unattributed statement
+renders ungrouped, which is a visible gap, while a misattributed one tells a
+reader that a different thing happened.
+
+Single-event profiles publish the same shape with one featured group. A
+conditional shape would make every renderer branch on whether grouping exists,
+and the branch nobody exercises is the one that breaks.
+
+`source_attributions` lists each contributing source once. The singular
+`source_attribution` is retired from new payloads and kept in the contract as
+deprecated so artifacts published before this still typecheck. Statement-level
+provenance remains authoritative; this is only the page-level summary of it.
+
+**Alternatives considered:** A second parallel structure holding grouped events
+— it would duplicate the recorded section and the two could disagree, which is
+the defect MD1 was cut for. Grouping by identity or occurrence provenance — works
+for Wikidata, silently loses most USGS statements. Exposing the event's UUID as
+the group key — stable, but publishes an internal identifier and tempts callers
+to treat it as an address.
+
+**Consequences:** A renderer can group deterministically without inferring
+anything from array position, which is what G3b-2c builds on. Proven by
+`services/api/tests/test_event_group_contract.py`: every statement declares its
+event, statements of one event share a key and never interleave, exactly one
+group is featured and leads, `predicate_order` is contiguous per group,
+single-event profiles carry the same shape, a multi-source profile lists several
+sources and no longer claims one, and a single-source profile still names its one.

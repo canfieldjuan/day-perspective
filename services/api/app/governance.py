@@ -1233,6 +1233,64 @@ def featured_candidate_fingerprint(
     ).hexdigest()
 
 
+def event_group_key(identity_canonical_key: str) -> str:
+    """A stable, opaque handle for the event a statement describes.
+
+    Derived from the event's identity resolution rather than its database id:
+    the key has to survive republication and mean the same thing to a reader's
+    browser, without publishing internal row identifiers that mean nothing
+    outside this database and would invite being treated as addresses.
+    """
+    return hashlib.sha256(
+        canonical_json_bytes({"identity_key": identity_canonical_key})
+    ).hexdigest()[:16]
+
+
+def events_by_source_release(
+    session: Session, *, event_ids: Sequence[UUID]
+) -> dict[UUID, UUID]:
+    """Which event each source release produced, for the given events.
+
+    Statements are attributed to events through this: a recorded statement's
+    evidence traces to the release it came from, and an event's identity
+    resolution traces to a release too. Matching on identity or occurrence
+    provenance instead would only work for publishers that root a statement on
+    exactly those relations -- USGS publishes title, magnitude and depth through
+    none of them, so half its section would be unattributable.
+
+    A release that somehow produced two events on one date is ambiguous, and is
+    omitted rather than guessed: an unattributed statement renders ungrouped,
+    while a misattributed one tells a reader the wrong event happened.
+    """
+    owners: dict[UUID, UUID] = {}
+    ambiguous: set[UUID] = set()
+    for event_id in event_ids:
+        event = session.get(Event, event_id)
+        if event is None:
+            continue
+        identity = session.get(ResolvedClaim, event.resolved_claim_id)
+        if identity is None:
+            continue
+        claim = session.scalar(
+            select(Claim)
+            .join(ResolvedClaimEvidence, ResolvedClaimEvidence.claim_id == Claim.id)
+            .where(
+                ResolvedClaimEvidence.resolved_claim_id == identity.id,
+                ResolvedClaimEvidence.stance == "supporting",
+            )
+            .order_by(Claim.id)
+        )
+        if claim is None:
+            continue
+        if claim.source_release_id in owners:
+            ambiguous.add(claim.source_release_id)
+            continue
+        owners[claim.source_release_id] = event_id
+    for release_id in ambiguous:
+        owners.pop(release_id, None)
+    return owners
+
+
 def evaluate_featured_event(
     session: Session,
     *,
