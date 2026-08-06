@@ -360,10 +360,14 @@ vocabulary: `day-arrival`, `day-nav`, `stratum-<section_key>`,
 `publication-integrity`, `state-panel`, `loading-line`,
 `travel-shell`, `era-live`, `era-horizon`,
 `event-group-<event_group_key>`, `source-attributions`. Event groups also
-carry the `data-event-group` (the key) and `data-featured` attributes for
-ordering and emphasis assertions; these are structural, so a spec asserting
-which event **leads** uses `data-featured`, not the group's position in the
-DOM. The fragile heading-parent walk
+carry `data-event-group` (the key) and `data-featured`. These prove different
+things and neither substitutes for the other: `data-featured` proves **which**
+group the payload marks as the headline, and the **DOM order** of
+`[data-event-group]` proves the rendered sequence — that the featured group
+comes first (C-3.5.3) and the rest follow `event_order` (C-3.5.4). A renderer
+can copy `featured` onto the correct group while leaving all of them in payload
+array order, so a spec that checks only the attribute passes on exactly the bug
+those clauses exist to prevent. Assert both. The fragile heading-parent walk
 in `full-stack-golden.spec.ts:33-35` is replaced by
 `stratum-evidence_notes` in slice B2. No spec asserts animation frames.
 
