@@ -29,6 +29,7 @@ from app.governance import (
     LicenseInput,
     ReviewDecisionValue,
     assert_release_publication_eligible,
+    events_behind_manifest,
     lineage_root_ids,
     record_claim_review,
     record_editorial_selection,
@@ -1110,6 +1111,28 @@ def _public_quality_provenance(
     }
 
 
+class MultiEventDateRequiresCombinedPublisher(ValueError):
+    """The golden publisher cannot republish a date that also holds another event.
+
+    This publisher rebuilds ``recorded_on_this_date`` from its own statements
+    alone. On a date that has since admitted another publisher's canonical event
+    (D042), doing so would mint a successor carrying only USGS evidence --
+    ``events_behind_manifest`` would infer only the USGS event, and the collision
+    guard would stop believing the co-published one was ever there. A later
+    candidate would then be judged against USGS alone, and a ``distinct_event``
+    decision a human actually made would never run.
+
+    Carrying and revalidating another source's statements is not this
+    publisher's job: it knows how to render USGS content, not Wikidata's.
+    Updating USGS content on an already multi-event date is therefore blocked
+    until a source-agnostic multi-event republisher exists.
+
+    Safe inability is better than successful amnesia.
+    """
+
+    code = "multi_event_date_requires_combined_publisher"
+
+
 def publish_golden_profile(
     session: Session,
     *,
@@ -1387,6 +1410,26 @@ def publish_golden_profile(
         )
         .order_by(PublicationManifest.version.desc())
     )
+    if previous_manifest is not None:
+        golden_event = session.scalar(
+            select(Event).where(
+                Event.resolved_claim_id == resolved["event_identity"].id
+            )
+        )
+        co_published = events_behind_manifest(
+            session, manifest=previous_manifest
+        ) - ({golden_event.id} if golden_event is not None else set())
+        if co_published:
+            raise MultiEventDateRequiresCombinedPublisher(
+                f"{MultiEventDateRequiresCombinedPublisher.code}: "
+                f"{GOLDEN_DATE.isoformat()} also publishes recorded event(s) "
+                f"{sorted(str(event_id) for event_id in co_published)}, which "
+                "this publisher cannot preserve. Republish through a publisher "
+                "that owns the date's full admitted set; minting a version that "
+                "carries only USGS evidence would drop those events from the "
+                "collision guard."
+            )
+
     from app.models import DayProfile
 
     previous_profile = (
