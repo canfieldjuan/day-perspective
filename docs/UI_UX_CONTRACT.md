@@ -71,15 +71,43 @@ Top to bottom:
 
 Within a stratum, statements use the document register: statement text in
 body serif at full measure; class chip + caveat line (C-4); provenance
-affordance (C-9). **Lead-statement emphasis:** the payload is a flat
-statement array with no event or group identifier (the golden artifact
-renders one earthquake as eight independent statements), so event
-grouping is NOT derivable and the UI must never claim an event count.
-Instead, when `recorded_on_this_date` is non-empty its first statement
-(publisher order) takes the lead treatment — larger statement type and
-full-width rule — and the remainder render in the standard register. A
-payload-level grouping signal is deferred to backend coordination
-(logged on issue #18).
+affordance (C-9).
+
+**C-3.5 Lead emphasis and event grouping.** The payload-level grouping
+signal this section previously deferred now exists, so the rule changes
+from "grouping is not derivable" to "grouping is read, never inferred".
+
+1. **Grouped rendering** applies to `recorded_on_this_date` only, and only
+   when **every** statement in it carries `event_group` (`event_group_key`,
+   `event_title`, `featured`, `event_order`, `predicate_order`). Each
+   distinct `event_group_key` renders as one group: an `h3` carrying
+   `event_title`, then that group's statements in `predicate_order`. Groups
+   render in `event_order`, and `data-event-group` / `data-featured` are the
+   structural selectors (C-11).
+2. **The featured group leads.** Exactly one group is `featured` and it is
+   `event_order` 0. Its first statement takes the lead treatment — larger
+   statement type and full-width rule — and every other group renders in the
+   standard register beneath a non-heading label, "Also recorded on this
+   date". The label is deliberately not a heading: it introduces the event
+   titles rather than competing with them in the outline (C-10).
+3. **Ordering is read from the payload, never from array position.** Sort on
+   `event_order` and `predicate_order`. `event_group_key` is opaque — it is a
+   digest, so ordering by it smuggles in hash order and is a defect, not a
+   fallback.
+4. **Flat rendering is retained**, unchanged, for any recorded section where
+   some or no statement declares a group — which includes every profile
+   published before this signal existed. There, the first statement in
+   publisher order takes the lead treatment as before. A partially-grouped
+   section renders flat rather than stranding statements outside a group.
+5. **The UI still must never claim an event count.** Rendering the groups a
+   payload declares is not the same as asserting how many events a date held;
+   no copy states or implies a total.
+6. **Single-event dates render as one featured group**, not as a special
+   case. The shape does not change with the number of events, so the branch
+   nobody exercises does not exist.
+
+Issue #18's deferral of a payload-level grouping signal is discharged by
+this amendment.
 
 ## C-4 Evidence classes
 
@@ -227,6 +255,17 @@ payload-level grouping signal is deferred to backend coordination
    unavailable — start/end of the public range"); the arrival
    announcement "Arrived at {date}."; the skip link "Skip to main
    content".
+6. **Event grouping and attribution (C-3.5).** The secondary-event label
+   is **"Also recorded on this date"**, rendered as a non-heading. Event
+   group titles are payload `event_title` values and are never composed in
+   the UI — a date-shaped or event-naming literal in JSX is a review
+   blocker (repo `CLAUDE.md` §12). The attribution line reads **"Source: "**
+   for one source and **"Sources: "** for several, entries separated by
+   "; ", each rendered as "{name}, published by {publisher}" — the link
+   wraps the name only. A source whose URL is unknown is named without a
+   link, and one whose publisher is unknown drops the "published by"
+   clause entirely; neither absence is rendered as an empty link or a
+   dangling clause.
 
 ## C-9 Evidence interaction
 
@@ -267,7 +306,12 @@ strings (C-8). Structural locators use `data-testid` from this fixed
 vocabulary: `day-arrival`, `day-nav`, `stratum-<section_key>`,
 `statement`, `evidence-chip`, `evidence-panel`,
 `publication-integrity`, `state-panel`, `loading-line`,
-`travel-shell`, `era-live`, `era-horizon`. The fragile heading-parent walk
+`travel-shell`, `era-live`, `era-horizon`,
+`event-group-<event_group_key>`, `source-attributions`. Event groups also
+carry the `data-event-group` (the key) and `data-featured` attributes for
+ordering and emphasis assertions; these are structural, so a spec asserting
+which event **leads** uses `data-featured`, not the group's position in the
+DOM. The fragile heading-parent walk
 in `full-stack-golden.spec.ts:33-35` is replaced by
 `stratum-evidence_notes` in slice B2. No spec asserts animation frames.
 
