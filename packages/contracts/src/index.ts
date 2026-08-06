@@ -30,9 +30,19 @@ export type DayProfileSectionKey = (typeof DAY_PROFILE_SECTION_KEYS)[number];
  * the same thing to a browser without publishing an internal identifier that
  * invites being treated as an address.
  *
- * Exactly one group on a profile carries `featured: true`, and that group is
- * `event_order` 0. `predicate_order` runs from 0 within each group, so a group
- * stays correctly ordered when rendered on its own.
+ * On a **fully grouped** recorded section, exactly one group carries
+ * `featured: true`, and that group — and only that group — is `event_order` 0.
+ * `predicate_order` runs from 0 within each group, so a group stays correctly
+ * ordered when rendered on its own. `event_order` is unique across groups but
+ * need not be contiguous.
+ *
+ * A **partially grouped** section may declare no featured group at all, and
+ * that is a valid response rather than a malformed one. The publisher omits
+ * this metadata for a statement whose owning event cannot be resolved, and
+ * nothing makes the featured event immune: an ambiguous source release can own
+ * it, leaving only secondary groups declared. Such a section renders flat
+ * (UI_UX_CONTRACT C-3.5.5), so consumers must apply the cross-group invariants
+ * above only when every statement in the section carries a group.
  */
 export interface ProfileStatementEventGroup {
   event_group_key: string;
