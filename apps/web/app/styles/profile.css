@@ -288,3 +288,55 @@
     opacity: 1;
   }
 }
+
+/* Recorded events grouped by the event they describe (G3b-2c).
+   A date can hold more than one adjudicated-distinct event, with exactly one
+   featured. The grouping is what lets a reader tell them apart without working
+   out where one event ends by noticing the sentences changed subject. */
+.event-group + .event-group {
+  margin-top: 1.4rem;
+}
+
+.event-group__title {
+  color: var(--ink-muted, #56514b);
+  font-size: 0.82rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  margin: 0 0 0.6rem;
+  text-transform: uppercase;
+}
+
+/* The featured event carries the section's emphasis; the others are present and
+   legible rather than hidden or visually demoted into looking like footnotes. */
+.event-group--featured .event-group__title {
+  color: var(--ink, #1f1c19);
+}
+
+.stratum__group-lede {
+  border-top: 1px solid var(--line);
+  color: var(--ink-muted, #56514b);
+  font-size: 0.9rem;
+  font-weight: 600;
+  margin: 1.6rem 0 0.9rem;
+  padding-top: 1rem;
+}
+
+/* Only the featured group's first statement takes the lead treatment. Without
+   this the secondary event's opening line would compete with the headline at
+   the same type size. */
+.event-group:not(.event-group--featured) .profile-statement[data-lead="true"]
+  > .statement-text {
+  font-size: 1rem;
+  line-height: 1.55;
+  max-width: none;
+}
+
+@media (max-width: 40rem) {
+  .event-group + .event-group {
+    margin-top: 1.1rem;
+  }
+
+  .stratum__group-lede {
+    margin-top: 1.2rem;
+  }
+}

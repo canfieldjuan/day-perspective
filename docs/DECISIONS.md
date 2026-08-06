@@ -1640,3 +1640,60 @@ event, statements of one event share a key and never interleave, exactly one
 group is featured and leads, `predicate_order` is contiguous per group,
 single-event profiles carry the same shape, a multi-source profile lists several
 sources and no longer claims one, and a single-source profile still names its one.
+
+## D048: A reader should not have to work out where one event ends
+
+**Context:** D047 gave every recorded statement typed `event_group` metadata, but
+the page still rendered the section as a flat run of statements. On a date
+holding two adjudicated-distinct events that is four sentences about one
+earthquake followed by four about a different one, with nothing between them. A
+reader would have to notice that the sentences changed subject.
+
+**Decision:** The recorded section renders **grouped by event**, featured first
+with the section's lead emphasis, the rest introduced as *"Also recorded on this
+date"* — present and legible rather than demoted into looking like footnotes.
+The page names every source it rests on.
+
+**Mechanism:** `groupByEvent` (`apps/web/src/components/ProfileSections.tsx`)
+reads the payload's typed metadata rather than inferring boundaries from array
+position, orders featured-first, and sorts within a group by `predicate_order`.
+
+It returns `null` — rendering flat — for any non-recorded section, and for a
+recorded section where **any** statement lacks `event_group`. Profiles published
+before typed grouping therefore render exactly as they did, and a partially
+attributed section renders flat rather than stranding some statements outside a
+group. Grouping half a section is worse than not grouping it: the ungrouped
+remainder reads as belonging to whichever group precedes it.
+
+Both paths share **one** statement renderer, so grouped and ungrouped rendering
+cannot drift apart. The provenance control stays per statement — a reader asking
+"why can the app say this?" is asking about a sentence, not about a page.
+
+Event titles are `h3`, one level under the section's `h2`. A skipped level would
+leave a hole in the heading outline for anyone navigating by it, and the featured
+event is the one most likely to be jumped to. *"Also recorded on this date"* is a
+label rather than a heading, so it does not compete in the outline with the event
+titles it introduces.
+
+Attribution renders `Sources:` when several contribute and `Source:` when one
+genuinely does. The client and the payload validator both carry
+`source_attributions`, validated as strictly as the singular field it replaces: a
+malformed credit fails the profile rather than reaching a reader as a broken link.
+
+**Alternatives considered:** Inferring groups from array position — works until a
+date holds three events or one contributes a single statement, and fails silently
+when it fails. Rendering secondary events collapsed by default — hides published
+evidence behind an interaction, which is the opposite of what an evidence-first
+archive owes a reader. Keeping the singular attribution in the UI while the
+payload lists several — the page would keep making the claim the payload had
+just stopped making.
+
+**Consequences:** A multi-event date is readable as two distinct events with one
+headline. Proven by `apps/web/src/components/EventGroups.test.tsx` (14 tests):
+groups are separated with no statement in the wrong one, each is named and
+ordered featured-first, the featured group carries the lead emphasis rather than
+merely the first statement, every statement keeps its evidence control, a
+single-event date announces no secondary section and reads as before, several
+sources are all named while one still reads naturally, and the heading outline
+has no skipped level — that last one verified by reverting the level and watching
+it fail.

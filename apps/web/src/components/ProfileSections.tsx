@@ -19,17 +19,77 @@ type ProfileSectionsProps = {
   sections?: PublishedDayProfile["sections"];
   sectionStates?: PublishedDayProfile["section_states"];
   sourceAttribution?: PublishedDayProfile["source_attribution"];
+  sourceAttributions?: PublishedDayProfile["source_attributions"];
   quality?: PublishedDayProfile["quality"];
   profileDate?: string;
   publicationManifestId?: string;
   publicationContentHash?: string;
 };
 
+type EventGroup = {
+  key: string;
+  title: string;
+  featured: boolean;
+  statements: import("@day-perspective/contracts").ProfileStatement[];
+};
+
+/**
+ * Group recorded statements by the event they describe.
+ *
+ * Reads the typed metadata the payload carries rather than inferring boundaries
+ * from array position — a reader should not have to notice that the sentences
+ * changed subject to work out where one event ends.
+ *
+ * Returns null when grouping would tell the reader nothing: any other section,
+ * or a recorded section whose statements do not all declare an event. Falling
+ * back keeps profiles published before typed grouping rendering exactly as they
+ * did, and a partially-attributed section renders flat rather than stranding
+ * some statements outside a group.
+ */
+function groupByEvent(
+  sectionKey: string,
+  statements: import("@day-perspective/contracts").ProfileStatement[]
+): EventGroup[] | null {
+  if (sectionKey !== "recorded_on_this_date") return null;
+  if (statements.length === 0) return null;
+  if (statements.some((statement) => statement.event_group === undefined)) {
+    return null;
+  }
+  const groups = new Map<string, EventGroup>();
+  for (const statement of statements) {
+    const group = statement.event_group!;
+    const existing = groups.get(group.event_group_key);
+    if (existing) {
+      existing.statements.push(statement);
+      continue;
+    }
+    groups.set(group.event_group_key, {
+      key: group.event_group_key,
+      title: group.event_title,
+      featured: group.featured,
+      statements: [statement]
+    });
+  }
+  const ordered = Array.from(groups.values()).sort((left, right) => {
+    if (left.featured !== right.featured) return left.featured ? -1 : 1;
+    return left.key.localeCompare(right.key);
+  });
+  for (const group of ordered) {
+    group.statements.sort(
+      (left, right) =>
+        (left.event_group?.predicate_order ?? 0) -
+        (right.event_group?.predicate_order ?? 0)
+    );
+  }
+  return ordered;
+}
+
 export function ProfileSections({
   availability,
   sections,
   sectionStates,
   sourceAttribution,
+  sourceAttributions,
   quality,
   profileDate,
   publicationManifestId,
@@ -43,10 +103,22 @@ export function ProfileSections({
     typeof evidenceStatement?.details?.quality_grade === "string"
       ? evidenceStatement.details.quality_grade
       : quality?.grade;
+  // A profile published before typed attribution carries only the singular
+  // field. Normalising here means the render path has one shape to handle, and
+  // the plural wins when both are present.
+  const attributions =
+    sourceAttributions && sourceAttributions.length > 0
+      ? sourceAttributions
+      : sourceAttribution
+        ? [sourceAttribution]
+        : [];
   const showIntegrity =
     availability === "published" &&
     Boolean(
-      quality || sourceAttribution || publicationManifestId || publicationContentHash
+      quality ||
+        attributions.length > 0 ||
+        publicationManifestId ||
+        publicationContentHash
     );
 
   return (
@@ -89,7 +161,12 @@ export function ProfileSections({
           >
             <h2 id={headingId}>{section.title}</h2>
             {populated ? (
-              statements.map((statement, statementIndex) => {
+              (() => {
+              const renderStatement = (
+                statement: import("@day-perspective/contracts").ProfileStatement,
+                statementIndex: number,
+                isLead: boolean
+              ) => {
                 const evidenceClass = deriveEvidenceClass(section.key, statement);
                 const disputed =
                   (statement.provenance?.dissenting_claims.length ?? 0) > 0;
@@ -99,8 +176,6 @@ export function ProfileSections({
                       profileYear || "the year"
                     )
                   : null;
-                const isLead =
-                  section.key === leadSectionKey && statementIndex === 0;
 
                 return (
                 <article
@@ -147,7 +222,49 @@ export function ProfileSections({
                   ) : null}
                 </article>
                 );
-              })
+              };
+              const groups = groupByEvent(section.key, statements);
+              return groups ? (
+                groups.map((group, groupIndex) => (
+                  <React.Fragment key={group.key}>
+                    {groupIndex === 1 ? (
+                      <p className="stratum__group-lede">
+                        Also recorded on this date
+                      </p>
+                    ) : null}
+                    <div
+                      className={
+                        group.featured
+                          ? "event-group event-group--featured"
+                          : "event-group"
+                      }
+                      data-event-group={group.key}
+                      data-featured={group.featured ? "true" : "false"}
+                      data-testid={"event-group-" + group.key}
+                    >
+                      <h3 className="event-group__title">{group.title}</h3>
+                      {group.statements.map((statement, index) =>
+                        renderStatement(
+                          statement,
+                          index,
+                          group.featured && index === 0
+                        )
+                      )}
+                    </div>
+                  </React.Fragment>
+                ))
+              ) : (
+                <>
+                  {statements.map((statement, statementIndex) =>
+                    renderStatement(
+                      statement,
+                      statementIndex,
+                      section.key === leadSectionKey && statementIndex === 0
+                    )
+                  )}
+                </>
+              );
+            })()
             ) : (
               <>
                 {availability === "published" &&
@@ -182,11 +299,17 @@ export function ProfileSections({
                     {quality.explanation}
                   </p>
                 ) : null}
-                {sourceAttribution ? (
-                  <p>
-                    Source:{" "}
-                    <a href={sourceAttribution.url}>{sourceAttribution.name}</a>,
-                    published by {sourceAttribution.publisher}.
+                {attributions.length > 0 ? (
+                  <p data-testid="source-attributions">
+                    {attributions.length === 1 ? "Source: " : "Sources: "}
+                    {attributions.map((entry, index) => (
+                      <React.Fragment key={entry.url + entry.name}>
+                        {index > 0 ? "; " : ""}
+                        <a href={entry.url}>{entry.name}</a>, published by{" "}
+                        {entry.publisher}
+                      </React.Fragment>
+                    ))}
+                    .
                   </p>
                 ) : null}
                 {publicationManifestId ? (

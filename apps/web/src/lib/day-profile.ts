@@ -258,6 +258,27 @@ export function isPublishedProfileResponse(
     }
   }
 
+  // Validated with the same strictness as the singular field it replaces. An
+  // attribution the page renders as a source link is a claim about who stands
+  // behind the content, so a malformed entry must fail the profile rather than
+  // reach a reader as a broken or empty credit.
+  if (profile.source_attributions !== undefined) {
+    if (!Array.isArray(profile.source_attributions)) {
+      return false;
+    }
+    for (const entry of profile.source_attributions) {
+      const attribution = asRecord(entry);
+      if (
+        attribution === undefined ||
+        typeof attribution.name !== "string" ||
+        typeof attribution.publisher !== "string" ||
+        typeof attribution.url !== "string"
+      ) {
+        return false;
+      }
+    }
+  }
+
   const sections = asRecord(profile.sections);
   return (
     sections !== undefined &&
