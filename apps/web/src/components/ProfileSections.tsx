@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 
 import type { PublishedDayProfile } from "@day-perspective/contracts";
-import { DAY_PROFILE_SECTIONS } from "@/src/lib/day-profile";
+import { DAY_PROFILE_SECTIONS, readEventGroup } from "@/src/lib/day-profile";
 import { deriveEvidenceClass } from "@/src/lib/evidence-class";
 import { EvidencePanel } from "./EvidencePanel";
 
@@ -35,35 +35,6 @@ type EventGroup = {
 };
 
 /**
- * Read a statement's event group, or null when it does not declare a usable one.
- *
- * A payload that reaches this component has normally passed the response
- * boundary, which rejects a malformed group outright. This stays defensive
- * anyway: the alternative to a null check here is a property access on null,
- * which replaces a published profile with a blank page. Grouping is a way of
- * presenting statements, and losing it should cost the reader the grouping, not
- * the statements.
- */
-function readEventGroup(
-  statement: import("@day-perspective/contracts").ProfileStatement
-): import("@day-perspective/contracts").ProfileStatementEventGroup | null {
-  const group = statement.event_group;
-  if (group === undefined || group === null || typeof group !== "object") {
-    return null;
-  }
-  if (typeof group.event_group_key !== "string" || group.event_group_key === "") {
-    return null;
-  }
-  if (typeof group.event_title !== "string" || group.event_title === "") {
-    return null;
-  }
-  if (typeof group.featured !== "boolean") return null;
-  if (!Number.isFinite(group.event_order)) return null;
-  if (!Number.isFinite(group.predicate_order)) return null;
-  return group;
-}
-
-/**
  * Group recorded statements by the event they describe.
  *
  * Reads the typed metadata the payload carries rather than inferring boundaries
@@ -75,6 +46,12 @@ function readEventGroup(
  * back keeps profiles published before typed grouping rendering exactly as they
  * did, and a partially-attributed section renders flat rather than stranding
  * some statements outside a group.
+ *
+ * Uses `readEventGroup` — the same predicate the response boundary validates
+ * with, so the two cannot disagree about what a usable group is. It stays used
+ * here rather than trusting the boundary to have run: the fallback costs the
+ * reader the grouping, while a property access on a malformed group costs them
+ * the whole page.
  */
 function groupByEvent(
   sectionKey: string,
@@ -82,7 +59,9 @@ function groupByEvent(
 ): EventGroup[] | null {
   if (sectionKey !== "recorded_on_this_date") return null;
   if (statements.length === 0) return null;
-  const declared = statements.map((statement) => readEventGroup(statement));
+  const declared = statements.map((statement) =>
+    readEventGroup(statement.event_group)
+  );
   if (declared.some((group) => group === null)) {
     return null;
   }

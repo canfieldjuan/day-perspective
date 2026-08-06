@@ -277,3 +277,63 @@ describe("event-group metadata at the response boundary", () => {
     ).toBe(false);
   });
 });
+
+describe("empty event-group identifiers are not a usable group", () => {
+  const envelopeWith = (eventGroup: unknown) => ({
+    status: "published",
+    date: "1964-03-27",
+    profile_type: "standard_statistical",
+    manifest_id: "manifest-empty-group",
+    content_hash: "f".repeat(64),
+    profile: {
+      schema_version: "1",
+      date: "1964-03-27",
+      profile_type: "standard_statistical",
+      sections: {
+        recorded_on_this_date: [
+          {
+            statement_id: "s1",
+            statement: "USGS names the record X.",
+            event_group: eventGroup
+          }
+        ]
+      },
+      section_states: {}
+    }
+  });
+
+  const COMPLETE = {
+    event_group_key: "group1",
+    event_title: "1964 Alaska earthquake",
+    featured: true,
+    event_order: 0,
+    predicate_order: 0
+  };
+
+  it("rejects an empty group key", () => {
+    // The renderer already treats this as unusable and drops grouping for the
+    // whole section. Accepting it here turns a bad payload into a silently
+    // ungrouped page instead of the API-error state.
+    expect(
+      isPublishedProfileResponse(
+        envelopeWith({ ...COMPLETE, event_group_key: "" }),
+        "1964-03-27"
+      )
+    ).toBe(false);
+  });
+
+  it("rejects an empty event title", () => {
+    expect(
+      isPublishedProfileResponse(
+        envelopeWith({ ...COMPLETE, event_title: "" }),
+        "1964-03-27"
+      )
+    ).toBe(false);
+  });
+
+  it("still accepts a group whose strings are present", () => {
+    expect(
+      isPublishedProfileResponse(envelopeWith(COMPLETE), "1964-03-27")
+    ).toBe(true);
+  });
+});

@@ -5,6 +5,7 @@ import {
   type DayProfileSectionKey,
   type ProfileNotPublished,
   type ProfileStatement,
+  type ProfileStatementEventGroup,
   type PublishedProfileResponse
 } from "@day-perspective/contracts";
 
@@ -152,26 +153,37 @@ function isStatementProvenance(value: unknown): boolean {
 }
 
 /**
- * A statement's event group is either absent or complete.
+ * Read a complete event group out of a value, or null if it is not one.
  *
- * Absent is normal — profiles published before typed grouping carry no group,
- * and the section renders flat. A present-but-malformed group is a payload that
- * does not match the contract, and it is rejected here for the same reason a
- * malformed `provenance` is: the boundary is where a wrong shape becomes an
- * API error rather than something the render path has to survive.
+ * The single definition of what a usable group is, used by both the response
+ * boundary and the renderer. They previously carried a copy each and drifted:
+ * the renderer rejected an empty `event_group_key` while the boundary accepted
+ * it, so one empty string passed validation and then silently removed every
+ * event boundary on the page instead of raising the API-error state.
+ *
+ * An empty key or title is not a usable group. A key that identifies nothing
+ * cannot group statements, and a title that names nothing cannot head a group
+ * for a reader — the two failure modes this metadata exists to prevent.
  */
-function isEventGroup(value: unknown): boolean {
+export function readEventGroup(
+  value: unknown
+): ProfileStatementEventGroup | null {
   const group = asRecord(value);
-  return (
-    group !== undefined &&
-    typeof group.event_group_key === "string" &&
-    typeof group.event_title === "string" &&
-    typeof group.featured === "boolean" &&
-    typeof group.event_order === "number" &&
-    Number.isFinite(group.event_order) &&
-    typeof group.predicate_order === "number" &&
-    Number.isFinite(group.predicate_order)
-  );
+  if (
+    group === undefined ||
+    typeof group.event_group_key !== "string" ||
+    group.event_group_key === "" ||
+    typeof group.event_title !== "string" ||
+    group.event_title === "" ||
+    typeof group.featured !== "boolean" ||
+    typeof group.event_order !== "number" ||
+    !Number.isFinite(group.event_order) ||
+    typeof group.predicate_order !== "number" ||
+    !Number.isFinite(group.predicate_order)
+  ) {
+    return null;
+  }
+  return group as unknown as ProfileStatementEventGroup;
 }
 
 function isProfileStatement(value: unknown): value is ProfileStatement {
@@ -180,7 +192,8 @@ function isProfileStatement(value: unknown): value is ProfileStatement {
     statement !== undefined &&
     typeof statement.statement_id === "string" &&
     typeof statement.statement === "string" &&
-    (statement.event_group === undefined || isEventGroup(statement.event_group)) &&
+    (statement.event_group === undefined ||
+      readEventGroup(statement.event_group) !== null) &&
     (statement.provenance_note === undefined || typeof statement.provenance_note === "string") &&
     (statement.details === undefined || asRecord(statement.details) !== undefined) &&
     (statement.provenance === undefined ||
