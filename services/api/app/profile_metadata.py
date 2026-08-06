@@ -28,14 +28,17 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.governance import (
+    FEATURED_EVENT_SECTION,
     EditorialSelection,
     EditorialSelectionStatus,
+    events_behind_manifest,
     is_human_reviewer,
 )
 from app.models import (
     Claim,
     DerivedValue,
     DerivedValueInput,
+    Event,
     PublicationManifest,
     PublicationStatementEvidence,
     QualityAssessment,
@@ -99,6 +102,49 @@ def _is_human(reviewer: str | None) -> bool:
     return is_human_reviewer(reviewer)
 
 
+def _featured_decision_is_human(
+    session: Session, *, manifest: PublicationManifest
+) -> bool:
+    """Whether a person chose this version's headline, per its own binding.
+
+    Only asked of multi-event profiles, where a headline is a real choice. The
+    answer comes from the selection row this manifest recorded, not from
+    whatever selection is current: an immutable artifact must not be able to
+    borrow a human decision made after it was published, which is exactly what
+    reading the live selection would allow.
+
+    Fails closed — treating the feature as rule-made — whenever the binding
+    cannot be trusted: absent, pointing at a row that no longer exists, naming a
+    version other than the one published, or naming an identity the manifest no
+    longer publishes. The modest claim is the safe one, and this field's whole
+    purpose is to not overstate who checked a page.
+    """
+    metadata = manifest.metadata_json or {}
+    selection_id = metadata.get("featured_event_selection_id")
+    selection_version = metadata.get("featured_event_selection_version")
+    if not selection_id or selection_version is None:
+        return False
+    try:
+        bound = session.get(EditorialSelection, UUID(str(selection_id)))
+    except ValueError:
+        return False
+    if bound is None or bound.decision_version != selection_version:
+        return False
+    if bound.status != EditorialSelectionStatus.SELECTED.value:
+        return False
+    if bound.section_key != FEATURED_EVENT_SECTION:
+        return False
+    # The featured identity must still be one this version publishes; a binding
+    # that names an event the manifest does not carry describes another page.
+    published_events = events_behind_manifest(session, manifest=manifest)
+    featured_event = session.scalar(
+        select(Event).where(Event.resolved_claim_id == bound.resolved_claim_id)
+    )
+    if featured_event is None or featured_event.id not in published_events:
+        return False
+    return _is_human(bound.reviewed_by)
+
+
 def derive_review_status(
     session: Session, *, manifest: PublicationManifest
 ) -> ReviewStatus:
@@ -138,6 +184,15 @@ def derive_review_status(
             or decision.status != EditorialSelectionStatus.SELECTED.value
             or not _is_human(decision.reviewed_by)
         ):
+            return ReviewStatus.AUTOMATED_ONLY
+
+    # On a date holding several events, which one leads is part of what the
+    # page asserts, and a deterministic rule choosing it is not a person having
+    # read the date. Every predicate can be human-selected while the headline
+    # was picked by a hash, and calling that reviewed would overstate exactly
+    # what this field exists to state honestly.
+    if len(events_behind_manifest(session, manifest=manifest)) > 1:
+        if not _featured_decision_is_human(session, manifest=manifest):
             return ReviewStatus.AUTOMATED_ONLY
     return ReviewStatus.HUMAN_REVIEWED
 

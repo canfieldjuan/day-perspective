@@ -1499,3 +1499,84 @@ because the guard blocks everything.
 The concurrency caveat is unchanged and deferred: this check reads before
 `publish_day_profile` takes its per-date lock, so it does not close the
 check-then-act window. That fix belongs in the publish spine.
+
+## D046: A deterministic default may choose the headline, but must never pass as a person choosing it
+
+**Context:** D043 made featuring one of a date's events a single choice a human
+records; D044 made publication keep every admitted event. Neither supplies a
+default, so a multi-event date with no human choice fails closed. Correct, but it
+would make the G4 operator pass hand-pick a headline for every date that happens
+to hold two events — and the alternative, letting the publisher pick, is worse:
+whichever event a query ordered first would become the archive's lead.
+
+**Decision:** Where no person has chosen, a **standing rule** picks the headline
+deterministically, records how it picked, and the profile reports itself as
+**automated rather than reviewed**. The rule fills a gap; it never impersonates
+a decision.
+
+    score = sha256(canonical_json({profile_date, identity_canonical_key}))
+    featured = the candidate with the smallest score
+
+The tiebreak is deliberately meaningless. Lexicographic `canonical_key` order
+would favour whichever source's prefix sorts first (keys are `wikidata:<QID>:…`),
+and `Event.created_at` would make ingestion order editorial policy. Neither the
+date nor the archive has evidence that one event mattered more than another, and
+the rule must not appear to claim otherwise (§12). Canonical JSON rather than a
+joined string, so an identity key containing the delimiter cannot make two
+candidates score alike.
+
+**Mechanism:** `evaluate_featured_event` (`services/api/app/governance.py`)
+returns a `FeaturedEventEvaluation` — algorithm version, candidate-set
+fingerprint, winning root and identity key, the exact selection row and version,
+its origin, and whether the decision changed. `publish_wikidata_event` binds that
+evaluation to every published version through `as_manifest_metadata()`.
+
+Three lifecycle rules, each because the obvious behaviour is wrong:
+
+* **A human's choice is never displaced**, checked on every evaluation rather
+  than only the first — the threat is a third event appearing later and the rule
+  quietly taking the headline back.
+* **A human's choice that stops qualifying fails closed.** Protecting it would
+  feature an event the date no longer admits; recomputing silently would replace
+  a person's decision with a machine's and present it as continuous. The date has
+  no honest headline until a person chooses again.
+* **Re-running over the same winner appends no history.** A candidate set
+  changing is not a decision; only the headline moving is.
+
+That last rule forces a distinction worth stating separately: **editorial history
+records when a decision changed; a manifest records what that version evaluated.**
+A losing new candidate therefore produces no new decision row and a new
+candidate-set fingerprint on the new version — and the previous version keeps the
+fingerprint it was published with. Immutable artifacts do not learn new facts.
+
+**Review status reads the binding, never the live selection.**
+`_featured_decision_is_human` (`profile_metadata.py`) resolves the selection this
+manifest recorded and fails closed to `automated_only` when the binding is
+absent, points at a missing row, names a different version, is not a featured
+selection, or names an identity the manifest no longer publishes. Reading the
+current selection instead would let yesterday's artifact borrow today's human
+decision.
+
+**Alternatives considered:** Letting the publisher take the first candidate —
+that is arbitrary order presented as editorial judgement. Adding the rule's
+identity to `_is_human` — the profile would then claim a person reviewed a
+headline a hash chose, which is the precise overstatement the review vocabulary
+was split to remove. Recording a rule decision on every evaluation — an audit
+trail that logs reads is not an audit trail.
+
+**Consequences:** A multi-event date is publishable without inventing a human
+decision, and says plainly that a rule chose. Proven by
+`test_featured_standing_rule.py` (14 tests, the tiebreak recomputed from this
+specification rather than pinned to captured output) and
+`test_featured_rule_publication.py` (the whole transaction: both events
+published, provenance bound, unchanged rerun idempotent, a losing third candidate
+changing the fingerprint but not the decision, a third event adjudicated against
+only one incumbent refused, and a failed publish leaving no decision behind).
+
+The G3b-1 test asserting that an unresolved multi-event date fails closed is
+superseded here and rewritten in place rather than removed: `featured_event_required`
+still fires when a feature genuinely cannot be resolved.
+
+Typed event grouping in the published contract and multi-source attribution are
+deliberately **not** here. They change public contracts and rendering, which is a
+separate review surface (G3b-2b, G3b-2c) regardless of how many lines remain.

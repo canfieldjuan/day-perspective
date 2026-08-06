@@ -45,6 +45,7 @@ from app.models import (
     SourceLineage,
     SourceRelease,
 )
+from app.services import canonical_json_bytes
 
 
 def _utcnow() -> datetime:
@@ -1118,6 +1119,240 @@ def resolve_featured_event(
             f"selections among {len(candidates)} candidates; exactly one is required."
         )
     return selected[0]
+
+
+#: The featured-event standing rule's algorithm identity. Recorded on every
+#: decision it makes and on every publication that relies on it, so a stored
+#: choice can be re-derived — or recognised as having come from a rule that no
+#: longer exists.
+STANDING_FEATURED_RULE_VERSION = "featured-event-sha256-v1"
+
+#: Where a featured choice came from. A profile's review status depends on this
+#: distinction, so it is recorded rather than inferred from the reviewer string
+#: at read time.
+FEATURED_ORIGIN_HUMAN = "human"
+FEATURED_ORIGIN_STANDING_RULE = "standing_rule"
+
+
+@dataclass(frozen=True)
+class FeaturedEventEvaluation:
+    """What was evaluated, what won, and which decision row says so.
+
+    Bound to every publication of a multi-event date, including the publications
+    where the rule changed nothing. Editorial history and publication provenance
+    answer different questions: history records *when the headline moved*, while
+    a manifest has to record *which candidates were considered for that version*.
+    Collapsing them would leave a successor claiming a candidate set that was
+    true two versions ago.
+    """
+
+    algorithm_version: str
+    profile_date: date
+    candidate_set_fingerprint: str
+    winning_root_id: UUID
+    winning_identity_key: str
+    selection_id: UUID
+    selection_version: int
+    selection_origin: str
+    decision_changed: bool
+
+    def as_manifest_metadata(self) -> dict[str, Any]:
+        """The evaluation, flattened for the manifest's immutable metadata."""
+        return {
+            "featured_event_algorithm_version": self.algorithm_version,
+            "featured_event_candidate_set_fingerprint": (
+                self.candidate_set_fingerprint
+            ),
+            "featured_event_identity_key": self.winning_identity_key,
+            "featured_event_selection_id": str(self.selection_id),
+            "featured_event_selection_version": self.selection_version,
+            "featured_event_selection_origin": self.selection_origin,
+        }
+
+
+def _featured_rule_score(profile_date: date, canonical_key: str) -> str:
+    """The deterministic, meaningless-by-design tiebreak.
+
+    Hashing the date together with the identity key gives a stable ordering that
+    claims nothing. The two obvious alternatives both smuggle in a claim:
+    lexicographic `canonical_key` order favours whichever source's prefix sorts
+    first, and `Event.created_at` makes ingestion order editorial policy. This
+    date is not evidence that one event mattered more than another, and the rule
+    must not imply it did (§12).
+    """
+    return hashlib.sha256(
+        canonical_json_bytes(
+            {"profile_date": profile_date.isoformat(), "identity_key": canonical_key}
+        )
+    ).hexdigest()
+
+
+def _featured_candidate_keys(
+    session: Session, *, candidate_root_ids: Sequence[UUID]
+) -> dict[UUID, str]:
+    keys: dict[UUID, str] = {}
+    for root_id, key in session.execute(
+        select(ResolvedClaim.id, ResolvedClaim.canonical_key).where(
+            ResolvedClaim.id.in_(set(candidate_root_ids))
+        )
+    ):
+        keys[root_id] = str(key)
+    missing = set(candidate_root_ids) - keys.keys()
+    if missing:
+        raise FeaturedEventUnresolved(
+            f"Featured-event candidates {sorted(str(root) for root in missing)} "
+            "are not resolved claims."
+        )
+    return keys
+
+
+def featured_candidate_fingerprint(
+    session: Session, *, profile_date: date, candidate_root_ids: Sequence[UUID]
+) -> str:
+    """A stable identifier for *which candidates* an evaluation considered.
+
+    Order-independent, because a set of candidates is not a listing of them: the
+    same date offering the same events must fingerprint identically however the
+    caller happened to order them, or a manifest would appear to describe a
+    different candidate set whenever a query's ordering shifted.
+
+    Built through ``canonical_json_bytes`` rather than joined with a delimiter,
+    so an identity key that happens to contain the delimiter cannot make two
+    different candidate sets fingerprint alike.
+    """
+    keys = _featured_candidate_keys(
+        session, candidate_root_ids=candidate_root_ids
+    )
+    return hashlib.sha256(
+        canonical_json_bytes(
+            {
+                "profile_date": profile_date.isoformat(),
+                "identity_keys": sorted(keys.values()),
+            }
+        )
+    ).hexdigest()
+
+
+def evaluate_featured_event(
+    session: Session,
+    *,
+    profile_date: date,
+    candidate_root_ids: Sequence[UUID],
+) -> FeaturedEventEvaluation | None:
+    """Decide a date's headline, and describe how it was decided.
+
+    Returns ``None`` when there is nothing to decide — fewer than two candidates
+    is not a choice. Otherwise it returns the evaluation to bind to the
+    publication, whether or not any new decision was recorded.
+
+    Three lifecycle rules, each because the obvious behaviour is wrong:
+
+    * **A human's standing choice is never displaced** (D038) — checked on every
+      evaluation, not only the first, because the threat is a third event
+      appearing later and the rule quietly taking the headline back.
+    * **A human's choice that is no longer eligible fails closed.** Protecting it
+      would feature an event the date no longer admits; silently recomputing
+      would replace a person's decision with a machine's and present it as
+      continuous. Neither is honest, so the date has no headline until a person
+      chooses again.
+    * **Re-running over the same winner writes no history.** The candidate set
+      changing is not a decision; only the headline moving is. Appending a row
+      per run would turn an audit trail into a log and make ``decision_version``
+      meaningless — which is exactly why the candidate set is recorded on the
+      *manifest* instead, where every version gets its own.
+    """
+    candidates: list[UUID] = []
+    for root_id in candidate_root_ids:
+        if root_id not in candidates:
+            candidates.append(root_id)
+    if len(candidates) < 2:
+        return None
+
+    keys = _featured_candidate_keys(session, candidate_root_ids=candidates)
+    fingerprint = featured_candidate_fingerprint(
+        session, profile_date=profile_date, candidate_root_ids=candidates
+    )
+    current = _latest_featured_selections(session, profile_date=profile_date)
+    human_choices = [
+        root_id
+        for root_id, selection in current.items()
+        if selection.status == EditorialSelectionStatus.SELECTED.value
+        and is_human_reviewer(selection.reviewed_by)
+    ]
+    for chosen in human_choices:
+        if chosen not in candidates:
+            raise FeaturedEventUnresolved(
+                f"{profile_date.isoformat()} has a human featured-event choice "
+                f"whose event is no longer eligible ({chosen}). The standing "
+                "rule does not silently replace a person's decision, and will "
+                "not present a recomputed default as a continuation of it; a "
+                "person must choose again among the current candidates."
+            )
+    if human_choices:
+        human_root = human_choices[0]
+        selection = current[human_root]
+        return FeaturedEventEvaluation(
+            algorithm_version=STANDING_FEATURED_RULE_VERSION,
+            profile_date=profile_date,
+            candidate_set_fingerprint=fingerprint,
+            winning_root_id=human_root,
+            winning_identity_key=keys[human_root],
+            selection_id=selection.id,
+            selection_version=selection.decision_version,
+            selection_origin=FEATURED_ORIGIN_HUMAN,
+            decision_changed=False,
+        )
+
+    winner = min(
+        candidates,
+        key=lambda root_id: _featured_rule_score(profile_date, keys[root_id]),
+    )
+    standing = current.get(winner)
+    if (
+        standing is not None
+        and standing.status == EditorialSelectionStatus.SELECTED.value
+        and standing.reviewed_by == STANDING_FEATURED_EVENT_RULE
+    ):
+        # Same winner as last time. The candidate set may have grown, but the
+        # headline has not moved, so no decision is appended -- the new set is
+        # recorded on the manifest this evaluation is bound to.
+        return FeaturedEventEvaluation(
+            algorithm_version=STANDING_FEATURED_RULE_VERSION,
+            profile_date=profile_date,
+            candidate_set_fingerprint=fingerprint,
+            winning_root_id=winner,
+            winning_identity_key=keys[winner],
+            selection_id=standing.id,
+            selection_version=standing.decision_version,
+            selection_origin=FEATURED_ORIGIN_STANDING_RULE,
+            decision_changed=False,
+        )
+
+    recorded = record_featured_event_selection(
+        session,
+        profile_date=profile_date,
+        candidate_root_ids=candidates,
+        chosen_root_id=winner,
+        reviewer=STANDING_FEATURED_EVENT_RULE,
+        rationale=(
+            f"{STANDING_FEATURED_RULE_VERSION}: smallest "
+            f"sha256(profile_date, identity_canonical_key) among "
+            f"{len(candidates)} candidates. winner={keys[winner]} "
+            f"candidate_set_fingerprint={fingerprint}. Deterministic ordering "
+            "only -- this asserts no significance for the chosen event."
+        ),
+    )
+    return FeaturedEventEvaluation(
+        algorithm_version=STANDING_FEATURED_RULE_VERSION,
+        profile_date=profile_date,
+        candidate_set_fingerprint=fingerprint,
+        winning_root_id=winner,
+        winning_identity_key=keys[winner],
+        selection_id=recorded.id,
+        selection_version=recorded.decision_version,
+        selection_origin=FEATURED_ORIGIN_STANDING_RULE,
+        decision_changed=True,
+    )
 
 
 def current_featured_event_selection(

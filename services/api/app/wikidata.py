@@ -26,13 +26,12 @@ from app.governance import (
     IdentityAdjudicationDecision,
     LicenseInput,
     assert_release_publication_eligible,
-    current_featured_event_selection,
+    evaluate_featured_event,
     events_behind_manifest,
     is_human_reviewer,
     latest_identity_adjudication,
     record_identity_adjudication,
     register_release_license,
-    resolve_featured_event,
 )
 from app.models import (
     Claim,
@@ -1771,7 +1770,13 @@ def publish_wikidata_event(
             if other_event is not None:
                 candidate_roots.append(other_event.resolved_claim_id)
         try:
-            featured_root = resolve_featured_event(
+            # Evaluates rather than merely resolves: where no person has chosen,
+            # the standing rule supplies a deterministic default so a date with
+            # two events is publishable without inventing a human decision. A
+            # human choice, present or newly ineligible, is handled inside --
+            # the rule never displaces one, and never silently succeeds one that
+            # has stopped qualifying.
+            evaluation = evaluate_featured_event(
                 session,
                 profile_date=occurrence_date,
                 candidate_root_ids=candidate_roots,
@@ -1783,19 +1788,13 @@ def publish_wikidata_event(
                 colliding_manifest_id=previous_manifest.id,
             )
         # At least two candidate roots are always supplied here, so the
-        # resolver never returns None (that is only for zero candidates).
-        assert featured_root is not None
-        featured_selection = current_featured_event_selection(
-            session, profile_date=occurrence_date, root_id=featured_root
-        )
-        if featured_selection is None:
-            raise ValueError(
-                "A featured event was resolved but has no recorded selection."
-            )
-        featured_metadata = {
-            "featured_event_selection_id": str(featured_selection.id),
-            "featured_event_selection_version": featured_selection.decision_version,
-        }
+        # evaluation never returns None (that is only for fewer than two).
+        assert evaluation is not None
+        featured_root = evaluation.winning_root_id
+        # Every published version records the candidate set *it* evaluated, even
+        # when the headline did not move: editorial history says when a decision
+        # changed, and a manifest has to say what this version considered.
+        featured_metadata = evaluation.as_manifest_metadata()
         surviving_statements, surviving_evidence = _surviving_recorded_statements(
             session,
             store=store,
