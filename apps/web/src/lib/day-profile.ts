@@ -401,8 +401,22 @@ function hasCoherentEventGroups(statements: unknown): boolean {
   if (declared === statements.length && !hasContiguousPredicates(statements)) {
     return false;
   }
+  // Requiring a featured group applies only to a fully grouped section. The
+  // featured event's own statements can legitimately be ungrouped —
+  // `events_by_source_release` omits a release that produced two events on one
+  // date rather than guessing — leaving a section whose only declared group is
+  // a secondary one. That renders flat, which is readable and honest; failing
+  // the profile would turn a safe degradation into an error page.
   const featured = [...groups.values()].filter((group) => group.featured);
-  if (featured.length !== 1) {
+  if (declared === statements.length && featured.length !== 1) {
+    return false;
+  }
+  // Distinct groups must not share an `event_order`. A tie falls through to the
+  // opaque-key comparator, so a duplicate does not fail — it renders the events
+  // in hash order, which is the one ordering the contract forbids. Uniqueness
+  // is a different property from contiguity: gaps stay allowed, ties do not.
+  const orders = [...groups.values()].map((group) => group.event_order);
+  if (new Set(orders).size !== orders.length) {
     return false;
   }
   // `event_order` is deliberately NOT required to be contiguous across groups,

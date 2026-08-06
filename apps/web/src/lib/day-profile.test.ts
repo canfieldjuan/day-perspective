@@ -731,3 +731,128 @@ describe("event_order gaps between groups are tolerated", () => {
     ).toBe(true);
   });
 });
+
+describe("cross-group invariants respect the partial-grouping fallback", () => {
+  const envelope = (statements: unknown[]) => ({
+    status: "published",
+    date: "1964-03-27",
+    profile_type: "standard_statistical",
+    manifest_id: "manifest-partial-invariants",
+    content_hash: "e".repeat(64),
+    profile: {
+      schema_version: "1",
+      date: "1964-03-27",
+      profile_type: "standard_statistical",
+      sections: { recorded_on_this_date: statements },
+      section_states: {}
+    }
+  });
+  const grouped = (id: string, group: unknown) => ({
+    statement_id: id,
+    statement: `Statement ${id}.`,
+    event_group: group
+  });
+  const ungrouped = (id: string) => ({
+    statement_id: id,
+    statement: `Statement ${id}.`
+  });
+
+  it("accepts a partial section whose only declared group is a secondary one", () => {
+    // The featured event's own statements can be ungrouped: attribution omits
+    // a release that produced two events on one date rather than guessing.
+    // The renderer falls back to flat, which is readable and honest. Demanding
+    // a featured group here turns that safe degradation into an error page.
+    expect(
+      isPublishedProfileResponse(
+        envelope([
+          ungrouped("a"),
+          grouped("b", {
+            event_group_key: "g1",
+            event_title: "A secondary event",
+            featured: false,
+            event_order: 1,
+            predicate_order: 0
+          })
+        ]),
+        "1964-03-27"
+      )
+    ).toBe(true);
+  });
+
+  it("still requires exactly one featured group when everything is grouped", () => {
+    expect(
+      isPublishedProfileResponse(
+        envelope([
+          grouped("a", {
+            event_group_key: "g1",
+            event_title: "A secondary event",
+            featured: false,
+            event_order: 1,
+            predicate_order: 0
+          })
+        ]),
+        "1964-03-27"
+      )
+    ).toBe(false);
+  });
+
+  it("rejects two distinct groups sharing one event_order", () => {
+    // Ties fall through to the opaque-key comparator, which is the ordering
+    // the contract forbids — so a duplicate reaches hash order rather than
+    // failing. Uniqueness is required; gaps stay allowed.
+    const lead = {
+      event_group_key: "g0",
+      event_title: "The featured event",
+      featured: true,
+      event_order: 0,
+      predicate_order: 0
+    };
+    expect(
+      isPublishedProfileResponse(
+        envelope([
+          grouped("a", lead),
+          grouped("b", {
+            event_group_key: "g1",
+            event_title: "One secondary event",
+            featured: false,
+            event_order: 1,
+            predicate_order: 0
+          }),
+          grouped("c", {
+            event_group_key: "g2",
+            event_title: "Another secondary event",
+            featured: false,
+            event_order: 1,
+            predicate_order: 0
+          })
+        ]),
+        "1964-03-27"
+      )
+    ).toBe(false);
+  });
+
+  it("still accepts distinct orders with a gap between them", () => {
+    const lead = {
+      event_group_key: "g0",
+      event_title: "The featured event",
+      featured: true,
+      event_order: 0,
+      predicate_order: 0
+    };
+    expect(
+      isPublishedProfileResponse(
+        envelope([
+          grouped("a", lead),
+          grouped("b", {
+            event_group_key: "g2",
+            event_title: "A later event",
+            featured: false,
+            event_order: 2,
+            predicate_order: 0
+          })
+        ]),
+        "1964-03-27"
+      )
+    ).toBe(true);
+  });
+});
