@@ -26,13 +26,12 @@ from app.governance import (
     IdentityAdjudicationDecision,
     LicenseInput,
     assert_release_publication_eligible,
-    current_featured_event_selection,
+    evaluate_featured_event,
     events_behind_manifest,
     is_human_reviewer,
     latest_identity_adjudication,
     record_identity_adjudication,
     register_release_license,
-    resolve_featured_event,
 )
 from app.models import (
     Claim,
@@ -1770,32 +1769,6 @@ def publish_wikidata_event(
             other_event = session.get(Event, other_event_id)
             if other_event is not None:
                 candidate_roots.append(other_event.resolved_claim_id)
-        try:
-            featured_root = resolve_featured_event(
-                session,
-                profile_date=occurrence_date,
-                candidate_root_ids=candidate_roots,
-            )
-        except FeaturedEventUnresolved:
-            return WikidataPublishOutcome(
-                status="featured_event_required",
-                occurrence_date=occurrence_date,
-                colliding_manifest_id=previous_manifest.id,
-            )
-        # At least two candidate roots are always supplied here, so the
-        # resolver never returns None (that is only for zero candidates).
-        assert featured_root is not None
-        featured_selection = current_featured_event_selection(
-            session, profile_date=occurrence_date, root_id=featured_root
-        )
-        if featured_selection is None:
-            raise ValueError(
-                "A featured event was resolved but has no recorded selection."
-            )
-        featured_metadata = {
-            "featured_event_selection_id": str(featured_selection.id),
-            "featured_event_selection_version": featured_selection.decision_version,
-        }
         surviving_statements, surviving_evidence = _surviving_recorded_statements(
             session,
             store=store,
@@ -1834,6 +1807,32 @@ def publish_wikidata_event(
                 occurrence_date=occurrence_date,
                 colliding_manifest_id=previous_manifest.id,
             )
+        try:
+            # Evaluates rather than merely resolves: where no person has chosen,
+            # the standing rule supplies a deterministic default so a date with
+            # two events is publishable without inventing a human decision. A
+            # human choice, present or newly ineligible, is handled inside --
+            # the rule never displaces one, and never silently succeeds one that
+            # has stopped qualifying.
+            evaluation = evaluate_featured_event(
+                session,
+                profile_date=occurrence_date,
+                candidate_root_ids=candidate_roots,
+            )
+        except FeaturedEventUnresolved:
+            return WikidataPublishOutcome(
+                status="featured_event_required",
+                occurrence_date=occurrence_date,
+                colliding_manifest_id=previous_manifest.id,
+            )
+        # At least two candidate roots are always supplied here, so the
+        # evaluation never returns None (that is only for fewer than two).
+        assert evaluation is not None
+        featured_root = evaluation.winning_root_id
+        # Every published version records the candidate set *it* evaluated, even
+        # when the headline did not move: editorial history says when a decision
+        # changed, and a manifest has to say what this version considered.
+        featured_metadata = evaluation.as_manifest_metadata()
         # Only a two-way split: featured-vs-not. A date with more than two
         # admitted events, where the featured one is neither this candidate nor
         # first in the prior artifact's order, is not reachable through any
@@ -1905,11 +1904,20 @@ def publish_wikidata_event(
     # Without this, that republish would be treated as a no-op and the manifest
     # would keep pointing at the stale selection row/version even though this
     # publish resolved against a newer one.
-    metadata_binding_changed = bool(featured_metadata) and previous_manifest is not None and (
-        previous_manifest.metadata_json.get("featured_event_selection_id")
-        != featured_metadata.get("featured_event_selection_id")
-        or previous_manifest.metadata_json.get("featured_event_selection_version")
-        != featured_metadata.get("featured_event_selection_version")
+    # Every field of the evaluation, not just the selection it resolved to. The
+    # candidate set can change while the headline does not -- another publisher
+    # adding a losing event -- and the rendered section is then byte-identical,
+    # so content-hash idempotency would treat the republish as a no-op and leave
+    # the current manifest claiming a candidate set that is no longer the one
+    # evaluated. Comparing the whole binding keeps publication provenance
+    # honest rather than merely stable.
+    metadata_binding_changed = (
+        bool(featured_metadata)
+        and previous_manifest is not None
+        and any(
+            previous_manifest.metadata_json.get(field) != value
+            for field, value in featured_metadata.items()
+        )
     )
 
     profile = publish_day_profile(

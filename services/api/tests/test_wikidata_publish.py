@@ -1396,32 +1396,45 @@ def _publish_past_the_golden_collision(
 
 
 @pytest.mark.integration
-def test_publish_past_a_collision_fails_closed_without_an_existing_featured_choice(
+def test_publish_past_a_collision_uses_the_standing_rule_when_nobody_has_chosen(
     session: Session, tmp_path: Path
 ) -> None:
-    """G3b-1: a human `distinct_event` decision is not enough by itself.
+    """Superseded behaviour, deliberately: this used to fail closed.
 
-    Before this slice, the bypass alone let the second event publish, silently
-    replacing the first (D042/D043). No standing rule exists yet (G3b-2), so an
-    unresolved multi-event date must fail closed rather than pick a headline.
+    Before G3b-2a there was no default, so a multi-event date with no human
+    choice refused to publish rather than pick a headline arbitrarily — the
+    right call while the only alternative was arbitrary. The standing rule now
+    supplies a deterministic, recorded choice, so the same setup publishes.
+
+    The invariant that survives is the one that mattered: the publisher still
+    never picks arbitrarily. It uses a human's choice, or a rule decision that
+    says which algorithm chose, among which candidates, and why. The full
+    provenance is asserted in ``test_featured_rule_publication.py``; what is
+    pinned here is that this exact setup no longer refuses.
+
+    ``featured_event_required`` has not gone away — it still fires when a
+    feature genuinely cannot be resolved, covered by
+    ``test_featuring_a_prior_event_whose_predicates_are_all_rejected_fails_closed``
+    below.
     """
     store, golden = _publish_past_the_golden_collision(session, tmp_path)
-    golden_manifest_before = session.get(
-        PublicationManifest, golden.publication_manifest_id
-    )
-    assert golden_manifest_before is not None
-    hash_before = golden_manifest_before.content_hash
+    golden_event = _golden_event(session, golden)
+    wikidata_event = _wikidata_event(session)
 
     outcome = publish_wikidata_event(session, store=store)
 
-    assert outcome.status == "featured_event_required"
-    assert outcome.colliding_manifest_id == golden.publication_manifest_id
-    # Nothing published: the golden manifest is untouched.
-    golden_after = session.get(
-        PublicationManifest, golden.publication_manifest_id
+    assert outcome.status == "published"
+    manifest = session.get(PublicationManifest, outcome.manifest_id)
+    assert manifest is not None
+    # Both events survive, and the headline came from the rule rather than from
+    # nobody.
+    assert events_behind_manifest(session, manifest=manifest) == {
+        golden_event.id,
+        wikidata_event.id,
+    }
+    assert (
+        manifest.metadata_json["featured_event_selection_origin"] == "standing_rule"
     )
-    assert golden_after is not None
-    assert golden_after.content_hash == hash_before
 
 
 @pytest.mark.integration
