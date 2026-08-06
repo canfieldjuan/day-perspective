@@ -81,16 +81,32 @@ from "grouping is not derivable" to "grouping is read, never inferred".
    `event_group` is payload, so it is untrusted until the response boundary
    has checked it — a present-but-malformed group (`null`, `{}`, a negative
    ordinal) must fail the profile into the API-error state, not reach the
-   renderer. The boundary checks: `event_group_key` and `event_title`
-   non-empty; `featured` boolean; `event_order` and `predicate_order` whole
-   and non-negative; exactly one group `featured` and it is `event_order` 0;
-   one key describing one event; and, when grouping will render,
-   `predicate_order` running 0..n-1 within each group. `event_order` is
-   **not** required to be contiguous across groups — the publisher
-   enumerates admitted events, and one that contributed no attributable
-   statement leaves a legitimate gap. No implementation may rely on the
-   fields below without this; the clause grants permission to render
-   grouping, not permission to trust it.
+   renderer.
+
+   **Per group, always:** `event_group_key` and `event_title` non-empty;
+   `featured` boolean; `event_order` and `predicate_order` whole and
+   non-negative; one key describing one event, so two statements sharing a
+   key agree on its title, `featured` and `event_order`.
+
+   **Across groups, only when grouping will render** (C-3.5.2 — every
+   statement in the section declares a group): exactly one group `featured`,
+   and `predicate_order` running 0..n-1 within each group. These are gated
+   because a partially grouped section is a legitimate payload, not a
+   malformed one: the publisher omits metadata for a statement whose owning
+   event cannot be resolved, so the *featured* event's own statements can be
+   the ungrouped ones, leaving a section whose only declared group is
+   secondary. That renders flat per C-3.5.5. Enforcing a headline there would
+   make the flat fallback unreachable and turn a readable page into an error.
+
+   **`event_order` must be unique across distinct groups, and need not be
+   contiguous.** The two are different properties and only one is required. A
+   tie has no defined order, so it falls through to whatever the renderer
+   sorts by next — which C-3.5.4 forbids being the opaque key — while a gap
+   is honest: the publisher enumerates *admitted* events, and one that
+   contributed no attributable statement simply has no group.
+
+   No implementation may rely on the fields below without this. The clause
+   grants permission to render grouping, not permission to trust it.
 2. **Grouped rendering** applies to `recorded_on_this_date` only, and only
    when **every** statement in it carries `event_group` (`event_group_key`,
    `event_title`, `featured`, `event_order`, `predicate_order`). Each
