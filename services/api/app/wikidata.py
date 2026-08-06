@@ -72,6 +72,7 @@ from app.services import (
     create_source_release,
     publish_day_profile,
     resolve_claim,
+    sources_supporting_evidence,
 )
 
 __all__ = [
@@ -1578,37 +1579,22 @@ def _grouped_recorded_statements(
 
 
 def _source_attributions(
-    session: Session, *, event_ids: Sequence[UUID]
+    session: Session, *, evidence: Sequence[PublicationStatementEvidenceInput]
 ) -> list[dict[str, str]]:
-    """Every source whose evidence supports this date's recorded section.
+    """Every source whose evidence supports this profile.
 
     A singular attribution names whichever publisher wrote last, which on a
     multi-source date is not a summary but a false claim -- and false in the
     direction that flatters the most recent contributor. Statement-level
     provenance stays authoritative; this is the page-level summary of it.
+
+    Derived from the evidence being published rather than from the admitted
+    events. Enrichment carries a prior profile's annual context forward, and
+    those sections rest on publishers this pass never resolved -- deriving from
+    events alone would name the event's publishers and drop theirs, which is the
+    same false claim the singular field made, only one size larger.
     """
-    owners = events_by_source_release(session, event_ids=event_ids)
-    attributions: list[dict[str, str]] = []
-    seen: set[UUID] = set()
-    for release_id in owners:
-        if release_id in seen:
-            continue
-        seen.add(release_id)
-        release = session.get(SourceRelease, release_id)
-        if release is None:
-            continue
-        origin = session.get(Source, release.source_id)
-        if origin is None:
-            continue
-        attributions.append(
-            {
-                "name": origin.name,
-                "publisher": origin.publisher or "",
-                "url": origin.canonical_url or "",
-            }
-        )
-    attributions.sort(key=lambda entry: entry["name"])
-    return attributions
+    return sources_supporting_evidence(session, evidence)
 
 
 def publish_wikidata_event(
@@ -1998,11 +1984,7 @@ def publish_wikidata_event(
             event_ids=admitted_event_ids,
         )
 
-    # Every source whose evidence supports the recorded section, not whichever
-    # publisher wrote last.
-    source_attributions = _source_attributions(
-        session, event_ids=admitted_event_ids
-    )
+    payload: dict[str, Any]
     if previous_manifest is None:
         payload = {
             "schema_version": "1",
@@ -2010,7 +1992,6 @@ def publish_wikidata_event(
             "profile_type": profile_type.value,
             "sections": {"recorded_on_this_date": recorded_statements},
             "section_states": {"recorded_on_this_date": {"status": "available"}},
-            "source_attributions": source_attributions,
         }
     else:
         # Enrich the existing profile rather than replace it: carry every prior
@@ -2031,13 +2012,20 @@ def publish_wikidata_event(
                 **(base_states if isinstance(base_states, dict) else {}),
                 "recorded_on_this_date": {"status": "available"},
             },
-            "source_attributions": source_attributions,
         }
         if isinstance(base.get("quality"), dict):
             payload["quality"] = base["quality"]
         recorded_evidence = _carried_forward_evidence(
             session, manifest_id=previous_manifest.id
         ) + recorded_evidence
+
+    # Derived last, from the evidence the profile actually publishes -- carried
+    # forward included. Deriving it before the carry-forward merge above would
+    # attribute only what this pass resolved and silently drop the publishers
+    # behind every section it inherited.
+    payload["source_attributions"] = _source_attributions(
+        session, evidence=recorded_evidence
+    )
 
     # publish_day_profile's idempotency decides purely on the rendered payload's
     # content hash. A human can reaffirm or replace the current featured choice
