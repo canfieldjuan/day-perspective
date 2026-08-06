@@ -5,6 +5,7 @@ import {
   type DayProfileSectionKey,
   type ProfileNotPublished,
   type ProfileStatement,
+  type ProfileStatementEventGroup,
   type PublishedProfileResponse
 } from "@day-perspective/contracts";
 
@@ -151,12 +152,58 @@ function isStatementProvenance(value: unknown): boolean {
   return resolved !== undefined || derived !== undefined;
 }
 
+/**
+ * A position in a sequence: a whole number, not negative.
+ *
+ * `Number.isFinite` alone admits `-1` and `1.5`, which sort perfectly well —
+ * that is the hazard. Nothing throws; the wrong statement quietly takes the
+ * lead treatment, which is the one position on the page a reader reads as the
+ * page's claim about what the date is.
+ */
+function isOrdinal(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0;
+}
+
+/**
+ * Read a complete event group out of a value, or null if it is not one.
+ *
+ * The single definition of what a usable group is, used by both the response
+ * boundary and the renderer. They previously carried a copy each and drifted:
+ * the renderer rejected an empty `event_group_key` while the boundary accepted
+ * it, so one empty string passed validation and then silently removed every
+ * event boundary on the page instead of raising the API-error state.
+ *
+ * An empty key or title is not a usable group. A key that identifies nothing
+ * cannot group statements, and a title that names nothing cannot head a group
+ * for a reader — the two failure modes this metadata exists to prevent.
+ */
+export function readEventGroup(
+  value: unknown
+): ProfileStatementEventGroup | null {
+  const group = asRecord(value);
+  if (
+    group === undefined ||
+    typeof group.event_group_key !== "string" ||
+    group.event_group_key === "" ||
+    typeof group.event_title !== "string" ||
+    group.event_title === "" ||
+    typeof group.featured !== "boolean" ||
+    !isOrdinal(group.event_order) ||
+    !isOrdinal(group.predicate_order)
+  ) {
+    return null;
+  }
+  return group as unknown as ProfileStatementEventGroup;
+}
+
 function isProfileStatement(value: unknown): value is ProfileStatement {
   const statement = asRecord(value);
   return (
     statement !== undefined &&
     typeof statement.statement_id === "string" &&
     typeof statement.statement === "string" &&
+    (statement.event_group === undefined ||
+      readEventGroup(statement.event_group) !== null) &&
     (statement.provenance_note === undefined || typeof statement.provenance_note === "string") &&
     (statement.details === undefined || asRecord(statement.details) !== undefined) &&
     (statement.provenance === undefined ||
@@ -296,6 +343,130 @@ export function isPublishedProfileResponse(
         isSectionKey(key) &&
         Array.isArray(statements) &&
         statements.every((statement) => isProfileStatement(statement))
-    )
+    ) &&
+    hasCoherentEventGroups(sections.recorded_on_this_date)
   );
+}
+
+/**
+ * Exactly one event leads, and the group keys agree with themselves.
+ *
+ * Per-statement validation cannot see this: two groups can each be perfectly
+ * well formed and both claim `featured`. The renderer would then give both lead
+ * treatment, and the page shows two headlines with nothing telling a reader
+ * which event the date is actually about — the single question D046 exists to
+ * answer.
+ *
+ * Checked only among statements that declare a group. A section carrying none
+ * is a profile published before typed grouping; it renders flat and there is no
+ * invariant to check.
+ */
+function hasCoherentEventGroups(statements: unknown): boolean {
+  if (!Array.isArray(statements)) {
+    return true;
+  }
+  const groups = new Map<string, ProfileStatementEventGroup>();
+  let declared = 0;
+  for (const statement of statements) {
+    const record = asRecord(statement);
+    if (record === undefined || record.event_group === undefined) {
+      continue;
+    }
+    declared += 1;
+    const group = readEventGroup(record.event_group);
+    if (group === null) {
+      return false;
+    }
+    const seen = groups.get(group.event_group_key);
+    if (seen === undefined) {
+      groups.set(group.event_group_key, group);
+      continue;
+    }
+    // One key must describe one event, or grouping by it means nothing.
+    if (
+      seen.event_title !== group.event_title ||
+      seen.featured !== group.featured ||
+      seen.event_order !== group.event_order
+    ) {
+      return false;
+    }
+  }
+  if (groups.size === 0) {
+    return true;
+  }
+
+  // Every remaining property is a property of the *set* of groups, and every
+  // one of them is gated on the same condition: the section is fully grouped,
+  // so grouping will actually render. A partially grouped section falls back to
+  // flat (C-3.5.5), which reads none of these, and enforcing them there turns a
+  // contract-valid payload into an error page.
+  //
+  // The gate is written once, here, rather than repeated per check. Three
+  // consecutive review rounds found exactly one invariant left outside it —
+  // featured count, then the featured/order correlation, then uniqueness —
+  // because a per-check condition is something a new check can silently forget
+  // to include. Anything added below this line is gated by construction.
+  if (declared !== statements.length) {
+    return true;
+  }
+
+  // Exactly one headline. The featured event's statements can be the ungrouped
+  // ones in a partial section, which is why this cannot run above the gate.
+  if ([...groups.values()].filter((group) => group.featured).length !== 1) {
+    return false;
+  }
+
+  // The headline is also the group the payload orders first, so a renderer
+  // sorting by `featured` and one sorting by `event_order` reach the same
+  // event. Without it C-3.5.3 and C-3.5.4 can demand different first groups.
+  if (
+    ![...groups.values()].every(
+      (group) => group.featured === (group.event_order === 0)
+    )
+  ) {
+    return false;
+  }
+
+  // Distinct groups must not share an `event_order`: a tie has no defined
+  // order, so it falls through to the opaque-key comparator, which C-3.5.4
+  // forbids. Uniqueness is a different property from contiguity — gaps are
+  // honest, because the publisher enumerates admitted events and one may
+  // contribute no attributable statement, so `event_order` is NOT required to
+  // run 0..m-1.
+  const orders = [...groups.values()].map((group) => group.event_order);
+  if (new Set(orders).size !== orders.length) {
+    return false;
+  }
+
+  return hasContiguousPredicates(statements);
+}
+
+/**
+ * Each group's `predicate_order` runs 0..n-1 over its own statements.
+ *
+ * Per-group, not per-section: two events each starting at 0 is correct, which
+ * is the whole point of the field — a group stays ordered when rendered alone,
+ * collapsed, or reordered. A gap or a duplicate means the payload's stated
+ * order is not an order, and the renderer would sort it into something
+ * plausible rather than something true.
+ */
+function hasContiguousPredicates(statements: unknown[]): boolean {
+  const byGroup = new Map<string, number[]>();
+  for (const statement of statements) {
+    const record = asRecord(statement);
+    const group = record && readEventGroup(record.event_group);
+    if (!group) {
+      return false;
+    }
+    const orders = byGroup.get(group.event_group_key) ?? [];
+    orders.push(group.predicate_order);
+    byGroup.set(group.event_group_key, orders);
+  }
+  for (const orders of byGroup.values()) {
+    const sorted = [...orders].sort((left, right) => left - right);
+    if (sorted.some((order, index) => order !== index)) {
+      return false;
+    }
+  }
+  return true;
 }

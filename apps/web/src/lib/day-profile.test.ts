@@ -201,6 +201,143 @@ describe("publication tier validation", () => {
   });
 });
 
+describe("event-group metadata at the response boundary", () => {
+  const profileWith = (eventGroup: unknown) => ({
+    status: "published",
+    date: "1964-03-27",
+    profile_type: "standard_statistical",
+    manifest_id: "manifest-event-group",
+    content_hash: "e".repeat(64),
+    profile: {
+      schema_version: "1",
+      date: "1964-03-27",
+      profile_type: "standard_statistical",
+      sections: {
+        recorded_on_this_date: [
+          {
+            statement_id: "s1",
+            statement: "USGS names the record X.",
+            ...(eventGroup === undefined ? {} : { event_group: eventGroup })
+          }
+        ]
+      },
+      section_states: {}
+    }
+  });
+
+  const WELL_FORMED = {
+    event_group_key: "group1",
+    event_title: "1964 Alaska earthquake",
+    featured: true,
+    event_order: 0,
+    predicate_order: 0
+  };
+
+  it("accepts a complete event group", () => {
+    expect(
+      isPublishedProfileResponse(profileWith(WELL_FORMED), "1964-03-27")
+    ).toBe(true);
+  });
+
+  it("accepts a statement published before typed grouping existed", () => {
+    expect(isPublishedProfileResponse(profileWith(undefined), "1964-03-27")).toBe(
+      true
+    );
+  });
+
+  it("rejects a null event group", () => {
+    expect(isPublishedProfileResponse(profileWith(null), "1964-03-27")).toBe(
+      false
+    );
+  });
+
+  it("rejects an event group missing its key", () => {
+    const withoutKey: Record<string, unknown> = { ...WELL_FORMED };
+    delete withoutKey.event_group_key;
+    expect(isPublishedProfileResponse(profileWith(withoutKey), "1964-03-27")).toBe(
+      false
+    );
+  });
+
+  it("rejects an event group whose order is not a number", () => {
+    expect(
+      isPublishedProfileResponse(
+        profileWith({ ...WELL_FORMED, event_order: "0" }),
+        "1964-03-27"
+      )
+    ).toBe(false);
+  });
+
+  it("rejects an event group whose featured flag is not a boolean", () => {
+    expect(
+      isPublishedProfileResponse(
+        profileWith({ ...WELL_FORMED, featured: "true" }),
+        "1964-03-27"
+      )
+    ).toBe(false);
+  });
+});
+
+describe("empty event-group identifiers are not a usable group", () => {
+  const envelopeWith = (eventGroup: unknown) => ({
+    status: "published",
+    date: "1964-03-27",
+    profile_type: "standard_statistical",
+    manifest_id: "manifest-empty-group",
+    content_hash: "f".repeat(64),
+    profile: {
+      schema_version: "1",
+      date: "1964-03-27",
+      profile_type: "standard_statistical",
+      sections: {
+        recorded_on_this_date: [
+          {
+            statement_id: "s1",
+            statement: "USGS names the record X.",
+            event_group: eventGroup
+          }
+        ]
+      },
+      section_states: {}
+    }
+  });
+
+  const COMPLETE = {
+    event_group_key: "group1",
+    event_title: "1964 Alaska earthquake",
+    featured: true,
+    event_order: 0,
+    predicate_order: 0
+  };
+
+  it("rejects an empty group key", () => {
+    // The renderer already treats this as unusable and drops grouping for the
+    // whole section. Accepting it here turns a bad payload into a silently
+    // ungrouped page instead of the API-error state.
+    expect(
+      isPublishedProfileResponse(
+        envelopeWith({ ...COMPLETE, event_group_key: "" }),
+        "1964-03-27"
+      )
+    ).toBe(false);
+  });
+
+  it("rejects an empty event title", () => {
+    expect(
+      isPublishedProfileResponse(
+        envelopeWith({ ...COMPLETE, event_title: "" }),
+        "1964-03-27"
+      )
+    ).toBe(false);
+  });
+
+  it("still accepts a group whose strings are present", () => {
+    expect(
+      isPublishedProfileResponse(envelopeWith(COMPLETE), "1964-03-27")
+    ).toBe(true);
+  });
+});
+
 describe("source attributions at the response boundary", () => {
   const envelope = (attributions: unknown) => ({
     status: "published",
@@ -269,6 +406,695 @@ describe("source attributions at the response boundary", () => {
   it("rejects a list that is not a list", () => {
     expect(
       isPublishedProfileResponse(envelope({ ...COMPLETE }), "1964-03-27")
+    ).toBe(false);
+  });
+});
+
+describe("the single-featured-group invariant is checked across the section", () => {
+  const statement = (id: string, group: unknown) => ({
+    statement_id: id,
+    statement: `Statement ${id}.`,
+    event_group: group
+  });
+
+  const envelope = (statements: unknown[]) => ({
+    status: "published",
+    date: "1964-03-27",
+    profile_type: "standard_statistical",
+    manifest_id: "manifest-featured",
+    content_hash: "a".repeat(64),
+    profile: {
+      schema_version: "1",
+      date: "1964-03-27",
+      profile_type: "standard_statistical",
+      sections: { recorded_on_this_date: statements },
+      section_states: {}
+    }
+  });
+
+  const featured = {
+    event_group_key: "g0",
+    event_title: "The featured event",
+    featured: true,
+    event_order: 0,
+    predicate_order: 0
+  };
+  const secondary = {
+    event_group_key: "g1",
+    event_title: "A second event",
+    featured: false,
+    event_order: 1,
+    predicate_order: 0
+  };
+
+  it("accepts one featured group leading the others", () => {
+    expect(
+      isPublishedProfileResponse(
+        envelope([statement("a", featured), statement("b", secondary)]),
+        "1964-03-27"
+      )
+    ).toBe(true);
+  });
+
+  it("rejects two groups both claiming to be featured", () => {
+    // Per-statement checks pass here: each group is individually well formed.
+    // The renderer would give both lead treatment, so the page shows two
+    // headlines and no way for a reader to tell which event the date is about.
+    expect(
+      isPublishedProfileResponse(
+        envelope([
+          statement("a", featured),
+          statement("b", { ...secondary, featured: true })
+        ]),
+        "1964-03-27"
+      )
+    ).toBe(false);
+  });
+
+  it("rejects a section with no featured group at all", () => {
+    expect(
+      isPublishedProfileResponse(
+        envelope([
+          statement("a", { ...featured, featured: false, event_order: 1 }),
+          statement("b", { ...secondary, event_order: 2 })
+        ]),
+        "1964-03-27"
+      )
+    ).toBe(false);
+  });
+
+  it("rejects a featured group that is not first in the published order", () => {
+    expect(
+      isPublishedProfileResponse(
+        envelope([
+          statement("a", { ...featured, event_order: 1 }),
+          statement("b", { ...secondary, event_order: 0 })
+        ]),
+        "1964-03-27"
+      )
+    ).toBe(false);
+  });
+
+  it("rejects one group key describing two different events", () => {
+    expect(
+      isPublishedProfileResponse(
+        envelope([
+          statement("a", featured),
+          statement("b", { ...featured, event_title: "A different title" })
+        ]),
+        "1964-03-27"
+      )
+    ).toBe(false);
+  });
+
+  it("leaves a section with no grouping alone", () => {
+    // Profiles published before typed grouping carry none; the renderer falls
+    // back to flat and the invariant has nothing to check.
+    expect(
+      isPublishedProfileResponse(
+        envelope([
+          { statement_id: "a", statement: "Ungrouped." },
+          { statement_id: "b", statement: "Also ungrouped." }
+        ]),
+        "1964-03-27"
+      )
+    ).toBe(true);
+  });
+});
+
+describe("ordinals are ordinals", () => {
+  const statement = (id: string, group: unknown) => ({
+    statement_id: id,
+    statement: `Statement ${id}.`,
+    event_group: group
+  });
+  const envelope = (statements: unknown[]) => ({
+    status: "published",
+    date: "1964-03-27",
+    profile_type: "standard_statistical",
+    manifest_id: "manifest-ordinals",
+    content_hash: "b".repeat(64),
+    profile: {
+      schema_version: "1",
+      date: "1964-03-27",
+      profile_type: "standard_statistical",
+      sections: { recorded_on_this_date: statements },
+      section_states: {}
+    }
+  });
+  const lead = {
+    event_group_key: "g0",
+    event_title: "The featured event",
+    featured: true,
+    event_order: 0,
+    predicate_order: 0
+  };
+
+  it("accepts a contiguous zero-based sequence", () => {
+    expect(
+      isPublishedProfileResponse(
+        envelope([
+          statement("a", lead),
+          statement("b", { ...lead, predicate_order: 1 })
+        ]),
+        "1964-03-27"
+      )
+    ).toBe(true);
+  });
+
+  it("rejects a negative predicate order", () => {
+    // Sorting still succeeds, which is the danger: the wrong statement
+    // silently takes the lead treatment instead of the page erroring.
+    expect(
+      isPublishedProfileResponse(
+        envelope([
+          statement("a", lead),
+          statement("b", { ...lead, predicate_order: -1 })
+        ]),
+        "1964-03-27"
+      )
+    ).toBe(false);
+  });
+
+  it("rejects a fractional predicate order", () => {
+    expect(
+      isPublishedProfileResponse(
+        envelope([
+          statement("a", lead),
+          statement("b", { ...lead, predicate_order: 1.5 })
+        ]),
+        "1964-03-27"
+      )
+    ).toBe(false);
+  });
+
+  it("rejects a fractional or negative event order", () => {
+    expect(
+      isPublishedProfileResponse(
+        envelope([statement("a", { ...lead, event_order: 0.5 })]),
+        "1964-03-27"
+      )
+    ).toBe(false);
+    expect(
+      isPublishedProfileResponse(
+        envelope([statement("a", { ...lead, event_order: -0 })]),
+        "1964-03-27"
+      )
+    ).toBe(true);
+  });
+
+  it("rejects a gap in one group's sequence", () => {
+    expect(
+      isPublishedProfileResponse(
+        envelope([
+          statement("a", lead),
+          statement("b", { ...lead, predicate_order: 2 })
+        ]),
+        "1964-03-27"
+      )
+    ).toBe(false);
+  });
+
+  it("rejects a duplicated ordinal within one group", () => {
+    expect(
+      isPublishedProfileResponse(
+        envelope([statement("a", lead), statement("b", lead)]),
+        "1964-03-27"
+      )
+    ).toBe(false);
+  });
+
+  it("counts each group's sequence separately", () => {
+    // Two events each starting at 0 is correct — predicate_order runs within
+    // a group, not across the section.
+    const second = {
+      event_group_key: "g1",
+      event_title: "A second event",
+      featured: false,
+      event_order: 1,
+      predicate_order: 0
+    };
+    expect(
+      isPublishedProfileResponse(
+        envelope([
+          statement("a", lead),
+          statement("b", { ...lead, predicate_order: 1 }),
+          statement("c", second),
+          statement("d", { ...second, predicate_order: 1 })
+        ]),
+        "1964-03-27"
+      )
+    ).toBe(true);
+  });
+
+  it("still rejects a negative ordinal where contiguity is not checked", () => {
+    // The partially-grouped path deliberately skips the contiguity check, so
+    // this is the case only the ordinal rule catches. Without it the section
+    // renders flat with a group carrying a nonsense position — harmless today,
+    // and silently wrong the moment anything reads that field.
+    expect(
+      isPublishedProfileResponse(
+        envelope([
+          statement("a", { ...lead, predicate_order: -1 }),
+          { statement_id: "b", statement: "Ungrouped." }
+        ]),
+        "1964-03-27"
+      )
+    ).toBe(false);
+  });
+
+  it("does not impose contiguity on a partially grouped section", () => {
+    // Such a section renders flat by the renderer's own fallback, so the
+    // sequence is never used. Failing the profile would replace a readable
+    // page with an error over an ordering nothing reads.
+    expect(
+      isPublishedProfileResponse(
+        envelope([
+          statement("a", { ...lead, predicate_order: 3 }),
+          { statement_id: "b", statement: "Ungrouped." }
+        ]),
+        "1964-03-27"
+      )
+    ).toBe(true);
+  });
+});
+
+describe("event_order gaps between groups are tolerated", () => {
+  it("accepts a featured group and a secondary one whose orders are not adjacent", () => {
+    // The publisher enumerates admitted events, but only events that
+    // contributed an attributable statement become groups. An admitted event
+    // whose statements could not be attributed leaves a gap in a payload that
+    // is otherwise honest, so the boundary must not require 0..m-1.
+    expect(
+      isPublishedProfileResponse(
+        {
+          status: "published",
+          date: "1964-03-27",
+          profile_type: "standard_statistical",
+          manifest_id: "manifest-order-gap",
+          content_hash: "d".repeat(64),
+          profile: {
+            schema_version: "1",
+            date: "1964-03-27",
+            profile_type: "standard_statistical",
+            sections: {
+              recorded_on_this_date: [
+                {
+                  statement_id: "a",
+                  statement: "The featured event.",
+                  event_group: {
+                    event_group_key: "g0",
+                    event_title: "The featured event",
+                    featured: true,
+                    event_order: 0,
+                    predicate_order: 0
+                  }
+                },
+                {
+                  statement_id: "b",
+                  statement: "A later event.",
+                  event_group: {
+                    event_group_key: "g2",
+                    event_title: "A later event",
+                    featured: false,
+                    event_order: 2,
+                    predicate_order: 0
+                  }
+                }
+              ]
+            },
+            section_states: {}
+          }
+        },
+        "1964-03-27"
+      )
+    ).toBe(true);
+  });
+});
+
+describe("cross-group invariants respect the partial-grouping fallback", () => {
+  const envelope = (statements: unknown[]) => ({
+    status: "published",
+    date: "1964-03-27",
+    profile_type: "standard_statistical",
+    manifest_id: "manifest-partial-invariants",
+    content_hash: "e".repeat(64),
+    profile: {
+      schema_version: "1",
+      date: "1964-03-27",
+      profile_type: "standard_statistical",
+      sections: { recorded_on_this_date: statements },
+      section_states: {}
+    }
+  });
+  const grouped = (id: string, group: unknown) => ({
+    statement_id: id,
+    statement: `Statement ${id}.`,
+    event_group: group
+  });
+  const ungrouped = (id: string) => ({
+    statement_id: id,
+    statement: `Statement ${id}.`
+  });
+
+  it("accepts a partial section whose only declared group is a secondary one", () => {
+    // The featured event's own statements can be ungrouped: attribution omits
+    // a release that produced two events on one date rather than guessing.
+    // The renderer falls back to flat, which is readable and honest. Demanding
+    // a featured group here turns that safe degradation into an error page.
+    expect(
+      isPublishedProfileResponse(
+        envelope([
+          ungrouped("a"),
+          grouped("b", {
+            event_group_key: "g1",
+            event_title: "A secondary event",
+            featured: false,
+            event_order: 1,
+            predicate_order: 0
+          })
+        ]),
+        "1964-03-27"
+      )
+    ).toBe(true);
+  });
+
+  it("still requires exactly one featured group when everything is grouped", () => {
+    expect(
+      isPublishedProfileResponse(
+        envelope([
+          grouped("a", {
+            event_group_key: "g1",
+            event_title: "A secondary event",
+            featured: false,
+            event_order: 1,
+            predicate_order: 0
+          })
+        ]),
+        "1964-03-27"
+      )
+    ).toBe(false);
+  });
+
+  it("rejects two distinct groups sharing one event_order", () => {
+    // Ties fall through to the opaque-key comparator, which is the ordering
+    // the contract forbids — so a duplicate reaches hash order rather than
+    // failing. Uniqueness is required; gaps stay allowed.
+    const lead = {
+      event_group_key: "g0",
+      event_title: "The featured event",
+      featured: true,
+      event_order: 0,
+      predicate_order: 0
+    };
+    expect(
+      isPublishedProfileResponse(
+        envelope([
+          grouped("a", lead),
+          grouped("b", {
+            event_group_key: "g1",
+            event_title: "One secondary event",
+            featured: false,
+            event_order: 1,
+            predicate_order: 0
+          }),
+          grouped("c", {
+            event_group_key: "g2",
+            event_title: "Another secondary event",
+            featured: false,
+            event_order: 1,
+            predicate_order: 0
+          })
+        ]),
+        "1964-03-27"
+      )
+    ).toBe(false);
+  });
+
+  it("still accepts distinct orders with a gap between them", () => {
+    const lead = {
+      event_group_key: "g0",
+      event_title: "The featured event",
+      featured: true,
+      event_order: 0,
+      predicate_order: 0
+    };
+    expect(
+      isPublishedProfileResponse(
+        envelope([
+          grouped("a", lead),
+          grouped("b", {
+            event_group_key: "g2",
+            event_title: "A later event",
+            featured: false,
+            event_order: 2,
+            predicate_order: 0
+          })
+        ]),
+        "1964-03-27"
+      )
+    ).toBe(true);
+  });
+});
+
+describe("an empty recorded section passes the boundary", () => {
+  it("accepts recorded_on_this_date: [] without demanding a featured group", () => {
+    // A context-only profile publishes this. The cross-group invariants have
+    // nothing to check, and requiring a headline would reject a valid page.
+    expect(
+      isPublishedProfileResponse(
+        {
+          status: "published",
+          date: "1964-03-27",
+          profile_type: "standard_statistical",
+          manifest_id: "manifest-empty-recorded",
+          content_hash: "f".repeat(64),
+          profile: {
+            schema_version: "1",
+            date: "1964-03-27",
+            profile_type: "standard_statistical",
+            sections: { recorded_on_this_date: [] },
+            section_states: {
+              recorded_on_this_date: { status: "available" }
+            }
+          }
+        },
+        "1964-03-27"
+      )
+    ).toBe(true);
+  });
+});
+
+describe("the featured/order correlation is a cross-group invariant", () => {
+  it("does not apply it to a partially grouped section", () => {
+    // C-3.5.1 gates every cross-group invariant on the section being fully
+    // grouped, because such a section renders flat and none of them is read.
+    // The correlation was the one left unconditional, so a partial payload
+    // carrying a group at event_order 0 that is not featured became an API
+    // error while the contract calls it valid.
+    expect(
+      isPublishedProfileResponse(
+        {
+          status: "published",
+          date: "1964-03-27",
+          profile_type: "standard_statistical",
+          manifest_id: "manifest-partial-correlation",
+          content_hash: "9".repeat(64),
+          profile: {
+            schema_version: "1",
+            date: "1964-03-27",
+            profile_type: "standard_statistical",
+            sections: {
+              recorded_on_this_date: [
+                { statement_id: "a", statement: "Ungrouped." },
+                {
+                  statement_id: "b",
+                  statement: "Grouped.",
+                  event_group: {
+                    event_group_key: "g0",
+                    event_title: "A declared event",
+                    featured: false,
+                    event_order: 0,
+                    predicate_order: 0
+                  }
+                }
+              ]
+            },
+            section_states: {}
+          }
+        },
+        "1964-03-27"
+      )
+    ).toBe(true);
+  });
+
+  it("still applies it when every statement is grouped", () => {
+    expect(
+      isPublishedProfileResponse(
+        {
+          status: "published",
+          date: "1964-03-27",
+          profile_type: "standard_statistical",
+          manifest_id: "manifest-full-correlation",
+          content_hash: "8".repeat(64),
+          profile: {
+            schema_version: "1",
+            date: "1964-03-27",
+            profile_type: "standard_statistical",
+            sections: {
+              recorded_on_this_date: [
+                {
+                  statement_id: "a",
+                  statement: "Not featured, but first.",
+                  event_group: {
+                    event_group_key: "g0",
+                    event_title: "An unfeatured event at zero",
+                    featured: false,
+                    event_order: 0,
+                    predicate_order: 0
+                  }
+                },
+                {
+                  statement_id: "b",
+                  statement: "Featured, but second.",
+                  event_group: {
+                    event_group_key: "g1",
+                    event_title: "The featured event",
+                    featured: true,
+                    event_order: 1,
+                    predicate_order: 0
+                  }
+                }
+              ]
+            },
+            section_states: {}
+          }
+        },
+        "1964-03-27"
+      )
+    ).toBe(false);
+  });
+});
+
+describe("no cross-group invariant escapes the grouping gate", () => {
+  const partial = (group: unknown) => ({
+    status: "published",
+    date: "1964-03-27",
+    profile_type: "standard_statistical",
+    manifest_id: "manifest-gate-sweep",
+    content_hash: "7".repeat(64),
+    profile: {
+      schema_version: "1",
+      date: "1964-03-27",
+      profile_type: "standard_statistical",
+      sections: {
+        recorded_on_this_date: [
+          { statement_id: "u", statement: "Ungrouped." },
+          { statement_id: "a", statement: "A.", event_group: group },
+          {
+            statement_id: "b",
+            statement: "B.",
+            event_group: {
+              event_group_key: "g1",
+              event_title: "Another event",
+              featured: false,
+              event_order: 1,
+              predicate_order: 0
+            }
+          }
+        ]
+      },
+      section_states: {}
+    }
+  });
+
+  it("tolerates duplicate event_order in a partially grouped section", () => {
+    // The renderer falls back to flat, so no ordering is read. Every other
+    // cross-group invariant is already gated; this one was not.
+    expect(
+      isPublishedProfileResponse(
+        partial({
+          event_group_key: "g0",
+          event_title: "One event",
+          featured: false,
+          event_order: 1,
+          predicate_order: 0
+        }),
+        "1964-03-27"
+      )
+    ).toBe(true);
+  });
+
+  it("tolerates a non-contiguous predicate order in a partially grouped section", () => {
+    expect(
+      isPublishedProfileResponse(
+        partial({
+          event_group_key: "g0",
+          event_title: "One event",
+          featured: false,
+          event_order: 2,
+          predicate_order: 5
+        }),
+        "1964-03-27"
+      )
+    ).toBe(true);
+  });
+
+  it("still rejects duplicate event_order when the section is fully grouped", () => {
+    expect(
+      isPublishedProfileResponse(
+        {
+          status: "published",
+          date: "1964-03-27",
+          profile_type: "standard_statistical",
+          manifest_id: "manifest-gate-full",
+          content_hash: "6".repeat(64),
+          profile: {
+            schema_version: "1",
+            date: "1964-03-27",
+            profile_type: "standard_statistical",
+            sections: {
+              recorded_on_this_date: [
+                {
+                  statement_id: "a",
+                  statement: "A.",
+                  event_group: {
+                    event_group_key: "g0",
+                    event_title: "The featured event",
+                    featured: true,
+                    event_order: 0,
+                    predicate_order: 0
+                  }
+                },
+                {
+                  statement_id: "b",
+                  statement: "B.",
+                  event_group: {
+                    event_group_key: "g1",
+                    event_title: "One secondary",
+                    featured: false,
+                    event_order: 1,
+                    predicate_order: 0
+                  }
+                },
+                {
+                  statement_id: "c",
+                  statement: "C.",
+                  event_group: {
+                    event_group_key: "g2",
+                    event_title: "Another secondary",
+                    featured: false,
+                    event_order: 1,
+                    predicate_order: 0
+                  }
+                }
+              ]
+            },
+            section_states: {}
+          }
+        },
+        "1964-03-27"
+      )
     ).toBe(false);
   });
 });
