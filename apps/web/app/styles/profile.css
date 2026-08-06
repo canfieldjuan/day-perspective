@@ -40,8 +40,6 @@
 
 
 
-
-
 .quality-grade {
   font-weight: 800;
 }
@@ -298,7 +296,7 @@
 }
 
 .event-group__title {
-  color: var(--ink-muted, #56514b);
+  color: var(--muted-ink);
   font-size: 0.82rem;
   font-weight: 600;
   letter-spacing: 0.04em;
@@ -314,21 +312,11 @@
 
 .stratum__group-lede {
   border-top: 1px solid var(--line);
-  color: var(--ink-muted, #56514b);
+  color: var(--muted-ink);
   font-size: 0.9rem;
   font-weight: 600;
   margin: 1.6rem 0 0.9rem;
   padding-top: 1rem;
-}
-
-/* Only the featured group's first statement takes the lead treatment. Without
-   this the secondary event's opening line would compete with the headline at
-   the same type size. */
-.event-group:not(.event-group--featured) .profile-statement[data-lead="true"]
-  > .statement-text {
-  font-size: 1rem;
-  line-height: 1.55;
-  max-width: none;
 }
 
 @media (max-width: 40rem) {
