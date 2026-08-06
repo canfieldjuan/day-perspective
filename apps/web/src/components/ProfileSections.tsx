@@ -19,6 +19,7 @@ type ProfileSectionsProps = {
   sections?: PublishedDayProfile["sections"];
   sectionStates?: PublishedDayProfile["section_states"];
   sourceAttribution?: PublishedDayProfile["source_attribution"];
+  sourceAttributions?: PublishedDayProfile["source_attributions"];
   quality?: PublishedDayProfile["quality"];
   profileDate?: string;
   publicationManifestId?: string;
@@ -30,6 +31,7 @@ export function ProfileSections({
   sections,
   sectionStates,
   sourceAttribution,
+  sourceAttributions,
   quality,
   profileDate,
   publicationManifestId,
@@ -43,10 +45,26 @@ export function ProfileSections({
     typeof evidenceStatement?.details?.quality_grade === "string"
       ? evidenceStatement.details.quality_grade
       : quality?.grade;
+  // A profile published before typed attribution carries only the singular
+  // field. Normalising here means the render path has one shape to handle.
+  //
+  // The plural field wins on presence, not on truthiness. An empty array is a
+  // profile saying its evidence credits nobody; reading that as "absent" and
+  // falling back would resurrect a source the current contract deliberately
+  // left out — the false claim the plural field exists to stop making.
+  const attributions =
+    sourceAttributions !== undefined
+      ? sourceAttributions
+      : sourceAttribution
+        ? [sourceAttribution]
+        : [];
   const showIntegrity =
     availability === "published" &&
     Boolean(
-      quality || sourceAttribution || publicationManifestId || publicationContentHash
+      quality ||
+        attributions.length > 0 ||
+        publicationManifestId ||
+        publicationContentHash
     );
 
   return (
@@ -182,11 +200,30 @@ export function ProfileSections({
                     {quality.explanation}
                   </p>
                 ) : null}
-                {sourceAttribution ? (
-                  <p>
-                    Source:{" "}
-                    <a href={sourceAttribution.url}>{sourceAttribution.name}</a>,
-                    published by {sourceAttribution.publisher}.
+                {attributions.length > 0 ? (
+                  <p data-testid="source-attributions">
+                    {attributions.length === 1 ? "Source: " : "Sources: "}
+                    {attributions.map((entry, index) => (
+                      <React.Fragment key={entry.url + entry.name}>
+                        {index > 0 ? "; " : ""}
+                        {/*
+                          A source's publisher and URL are both nullable
+                          upstream, and the publisher emits "" for an absent
+                          one. Neither absence is dressed up: an empty href
+                          resolves to the current page, so a reader clicking a
+                          credit is silently reloaded rather than sent to the
+                          source, and "published by ." asserts an attribution
+                          the payload does not carry.
+                        */}
+                        {entry.url ? (
+                          <a href={entry.url}>{entry.name}</a>
+                        ) : (
+                          entry.name
+                        )}
+                        {entry.publisher ? `, published by ${entry.publisher}` : ""}
+                      </React.Fragment>
+                    ))}
+                    .
                   </p>
                 ) : null}
                 {publicationManifestId ? (

@@ -18,9 +18,35 @@ export const DAY_PROFILE_SECTION_KEYS = [
 
 export type DayProfileSectionKey = (typeof DAY_PROFILE_SECTION_KEYS)[number];
 
+/**
+ * Which canonical event a recorded statement describes.
+ *
+ * Grouping is stated rather than inferred from array position. A renderer that
+ * guessed group boundaries from order would break the moment a date holds three
+ * events, or an event contributes a single statement.
+ *
+ * `event_group_key` is stable across republication and opaque: it is derived
+ * from the event's identity resolution, not from a database row id, so it means
+ * the same thing to a browser without publishing an internal identifier that
+ * invites being treated as an address.
+ *
+ * Exactly one group on a profile carries `featured: true`, and that group is
+ * `event_order` 0. `predicate_order` runs from 0 within each group, so a group
+ * stays correctly ordered when rendered on its own.
+ */
+export interface ProfileStatementEventGroup {
+  event_group_key: string;
+  event_title: string;
+  featured: boolean;
+  event_order: number;
+  predicate_order: number;
+}
+
 export interface ProfileStatement {
   statement_id: string;
   statement: string;
+  /** Present on recorded-event statements published from G3b-2b onward. */
+  event_group?: ProfileStatementEventGroup;
   provenance_note?: string;
   details?: Record<string, unknown>;
   provenance?: {
@@ -118,7 +144,19 @@ export interface PublishedDayProfile {
   >;
   publication_tier?: PublicationTier;
   quality?: { grade: string; explanation: string };
+  /**
+   * @deprecated Superseded by `source_attributions`. A singular attribution
+   * names one source, which is false on a date whose recorded section rests on
+   * several — and false in the direction that flatters whichever publisher
+   * wrote last. Retained so profiles published before G3b-2b still typecheck.
+   */
   source_attribution?: { name: string; publisher: string; url: string };
+  /**
+   * Every source whose evidence supports this profile, one entry each.
+   * Statement-level provenance remains authoritative; this is the page-level
+   * summary of it.
+   */
+  source_attributions?: Array<{ name: string; publisher: string; url: string }>;
 }
 
 export interface ProfileNotPublished {
