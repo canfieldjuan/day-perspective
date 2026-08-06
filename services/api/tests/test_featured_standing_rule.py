@@ -540,3 +540,68 @@ def test_a_human_choice_is_reported_as_human_origin(
     assert evaluation.selection_id == chosen.id
     assert evaluation.selection_version == chosen.decision_version
     assert evaluation.decision_changed is False
+
+
+@pytest.mark.integration
+def test_the_evaluation_always_describes_its_own_bound_selection(
+    session: Session, tmp_path: Path
+) -> None:
+    """The winner rendered and the decision cited must be the same decision.
+
+    The payload is ordered by ``winning_root_id`` and the manifest cites
+    ``selection_id``. If those ever describe different rows, a reader sees one
+    event leading while the provenance names another — and the review status is
+    derived from the row that was *not* rendered.
+    """
+    for events in (
+        [_make_event(session, key="alpha"), _make_event(session, key="beta")],
+        [
+            _make_event(session, key="gamma"),
+            _make_event(session, key="delta"),
+            _make_event(session, key="epsilon"),
+        ],
+    ):
+        evaluation = _apply(session, events)
+        assert evaluation is not None
+        bound = session.get(EditorialSelection, evaluation.selection_id)
+        assert bound is not None
+        assert bound.resolved_claim_id == evaluation.winning_root_id
+        assert bound.decision_version == evaluation.selection_version
+        assert (
+            bound.reviewed_by == STANDING_FEATURED_EVENT_RULE
+        ) == (evaluation.selection_origin == FEATURED_ORIGIN_STANDING_RULE)
+
+
+@pytest.mark.integration
+def test_a_human_choice_landing_first_is_honoured_not_overwritten(
+    session: Session, tmp_path: Path
+) -> None:
+    """The concurrent case, made deterministic.
+
+    Under a race a human choice can be recorded between the rule reading the
+    current selections and writing its own. The writer refuses to displace it
+    and returns that person's row; the evaluation must then describe *that*
+    decision rather than the hash winner it set out to record.
+    """
+    first = _make_event(session, key="alpha")
+    second = _make_event(session, key="beta")
+    from app.governance import record_featured_event_selection
+
+    # The human decision exists before the rule evaluates, which is the state a
+    # race leaves behind by the time the writer takes the lock.
+    human = record_featured_event_selection(
+        session,
+        profile_date=PROFILE_DATE,
+        candidate_root_ids=[first.resolved_claim_id, second.resolved_claim_id],
+        chosen_root_id=second.resolved_claim_id,
+        reviewer=HUMAN,
+        rationale="A person chose while the rule was mid-evaluation.",
+    )
+
+    evaluation = _apply(session, [first, second])
+
+    assert evaluation is not None
+    assert evaluation.selection_id == human.id
+    assert evaluation.winning_root_id == second.resolved_claim_id
+    assert evaluation.selection_origin == FEATURED_ORIGIN_HUMAN
+    assert evaluation.decision_changed is False

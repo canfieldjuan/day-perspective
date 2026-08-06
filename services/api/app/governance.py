@@ -1268,6 +1268,17 @@ def evaluate_featured_event(
     if len(candidates) < 2:
         return None
 
+    # Held across the read *and* the write. Reading the current selections
+    # unlocked and writing under the writer's own lock spans two snapshots: a
+    # human choice landing in between is invisible here but honoured there, so
+    # the writer would return that human's row while this function still
+    # reported the hash winner and a rule origin -- a payload ordered by one
+    # decision and bound to another.
+    lock_key = f"featured-event:{profile_date.isoformat()}"
+    session.execute(
+        select(func.pg_advisory_xact_lock(func.hashtextextended(lock_key, 0)))
+    )
+
     keys = _featured_candidate_keys(session, candidate_root_ids=candidates)
     fingerprint = featured_candidate_fingerprint(
         session, profile_date=profile_date, candidate_root_ids=candidates
@@ -1342,6 +1353,19 @@ def evaluate_featured_event(
             "only -- this asserts no significance for the chosen event."
         ),
     )
+    # Report what was recorded, not what was requested. The writer refuses to
+    # displace a human choice and hands that person's row back instead, so
+    # trusting the request here would describe a headline nobody selected. The
+    # lock above should make this unreachable; it is asserted rather than
+    # assumed because the cost of being wrong is a payload ordered by one
+    # decision while citing another.
+    if recorded.resolved_claim_id != winner:
+        return _evaluation_for_selection(
+            selection=recorded,
+            profile_date=profile_date,
+            fingerprint=fingerprint,
+            keys=keys,
+        )
     return FeaturedEventEvaluation(
         algorithm_version=STANDING_FEATURED_RULE_VERSION,
         profile_date=profile_date,
@@ -1352,6 +1376,33 @@ def evaluate_featured_event(
         selection_version=recorded.decision_version,
         selection_origin=FEATURED_ORIGIN_STANDING_RULE,
         decision_changed=True,
+    )
+
+
+def _evaluation_for_selection(
+    *,
+    selection: EditorialSelection,
+    profile_date: date,
+    fingerprint: str,
+    keys: dict[UUID, str],
+) -> FeaturedEventEvaluation:
+    """An evaluation describing a selection row that already exists."""
+    root = selection.resolved_claim_id
+    assert root is not None
+    return FeaturedEventEvaluation(
+        algorithm_version=STANDING_FEATURED_RULE_VERSION,
+        profile_date=profile_date,
+        candidate_set_fingerprint=fingerprint,
+        winning_root_id=root,
+        winning_identity_key=keys[root],
+        selection_id=selection.id,
+        selection_version=selection.decision_version,
+        selection_origin=(
+            FEATURED_ORIGIN_HUMAN
+            if is_human_reviewer(selection.reviewed_by)
+            else FEATURED_ORIGIN_STANDING_RULE
+        ),
+        decision_changed=False,
     )
 
 

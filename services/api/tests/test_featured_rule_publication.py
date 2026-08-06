@@ -30,6 +30,7 @@ from app.governance import (
     EditorialSelection,
     EditorialSelectionStatus,
     IdentityAdjudicationDecision,
+    evaluate_featured_event,
     events_behind_manifest,
     featured_candidate_fingerprint,
     record_editorial_selection,
@@ -618,3 +619,63 @@ def test_a_changed_candidate_set_republishes_without_force_new_version(
         wikidata_event.id,
         third.id,
     }
+
+
+@pytest.mark.integration
+def test_a_decision_surviving_a_failed_publication_governs_the_next_one_identically(
+    session: Session, tmp_path: Path
+) -> None:
+    """The retry-safety this slice relies on, asserted rather than assumed.
+
+    ``publish_day_profile`` commits its DRAFT manifest in phase one, so a
+    standing decision recorded beforehand is committed with it and a later
+    phase-two failure cannot be rolled back by the caller. If reconciliation
+    then abandons that manifest, the decision outlives a publication that never
+    happened.
+
+    That is survivable only because the rule is deterministic: the next
+    publication over the same candidate set recomputes the same winner, finds
+    the existing row, and reuses it rather than appending a second decision. If
+    that were not true, an abandoned publication would leave the date with
+    stale editorial history governing every later one.
+
+    The clean contract is for the decision to roll back with the failed
+    publication, which needs a spine change and is tracked on #78.
+    """
+    store, golden = _publish_past_the_golden_collision(session, tmp_path)
+    golden_event = _golden_event(session, golden)
+    wikidata_event = _wikidata_event(session)
+
+    # Stand in for a publication that recorded its decision and then failed:
+    # the decision exists, no profile followed it.
+    orphaned = evaluate_featured_event(
+        session,
+        profile_date=GOLDEN_DATE,
+        candidate_root_ids=[
+            golden_event.resolved_claim_id,
+            wikidata_event.resolved_claim_id,
+        ],
+    )
+    assert orphaned is not None
+    assert orphaned.decision_changed is True
+    rows_after_orphan = _featured_rows(session)
+    session.flush()
+
+    outcome = publish_wikidata_event(session, store=store)
+
+    assert outcome.status == "published"
+    manifest = session.get(PublicationManifest, outcome.manifest_id)
+    assert manifest is not None
+    # The surviving decision is reused, not superseded or duplicated.
+    assert manifest.metadata_json["featured_event_selection_id"] == str(
+        orphaned.selection_id
+    )
+    assert (
+        manifest.metadata_json["featured_event_selection_version"]
+        == orphaned.selection_version
+    )
+    assert _featured_rows(session) == rows_after_orphan
+    assert (
+        manifest.metadata_json["featured_event_candidate_set_fingerprint"]
+        == orphaned.candidate_set_fingerprint
+    )
