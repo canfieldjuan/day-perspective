@@ -884,3 +884,94 @@ describe("an empty recorded section passes the boundary", () => {
     ).toBe(true);
   });
 });
+
+describe("the featured/order correlation is a cross-group invariant", () => {
+  it("does not apply it to a partially grouped section", () => {
+    // C-3.5.1 gates every cross-group invariant on the section being fully
+    // grouped, because such a section renders flat and none of them is read.
+    // The correlation was the one left unconditional, so a partial payload
+    // carrying a group at event_order 0 that is not featured became an API
+    // error while the contract calls it valid.
+    expect(
+      isPublishedProfileResponse(
+        {
+          status: "published",
+          date: "1964-03-27",
+          profile_type: "standard_statistical",
+          manifest_id: "manifest-partial-correlation",
+          content_hash: "9".repeat(64),
+          profile: {
+            schema_version: "1",
+            date: "1964-03-27",
+            profile_type: "standard_statistical",
+            sections: {
+              recorded_on_this_date: [
+                { statement_id: "a", statement: "Ungrouped." },
+                {
+                  statement_id: "b",
+                  statement: "Grouped.",
+                  event_group: {
+                    event_group_key: "g0",
+                    event_title: "A declared event",
+                    featured: false,
+                    event_order: 0,
+                    predicate_order: 0
+                  }
+                }
+              ]
+            },
+            section_states: {}
+          }
+        },
+        "1964-03-27"
+      )
+    ).toBe(true);
+  });
+
+  it("still applies it when every statement is grouped", () => {
+    expect(
+      isPublishedProfileResponse(
+        {
+          status: "published",
+          date: "1964-03-27",
+          profile_type: "standard_statistical",
+          manifest_id: "manifest-full-correlation",
+          content_hash: "8".repeat(64),
+          profile: {
+            schema_version: "1",
+            date: "1964-03-27",
+            profile_type: "standard_statistical",
+            sections: {
+              recorded_on_this_date: [
+                {
+                  statement_id: "a",
+                  statement: "Not featured, but first.",
+                  event_group: {
+                    event_group_key: "g0",
+                    event_title: "An unfeatured event at zero",
+                    featured: false,
+                    event_order: 0,
+                    predicate_order: 0
+                  }
+                },
+                {
+                  statement_id: "b",
+                  statement: "Featured, but second.",
+                  event_group: {
+                    event_group_key: "g1",
+                    event_title: "The featured event",
+                    featured: true,
+                    event_order: 1,
+                    predicate_order: 0
+                  }
+                }
+              ]
+            },
+            section_states: {}
+          }
+        },
+        "1964-03-27"
+      )
+    ).toBe(false);
+  });
+});

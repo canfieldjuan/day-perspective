@@ -427,7 +427,13 @@ function hasCoherentEventGroups(statements: unknown): boolean {
   // honest payload. Requiring 0..m-1 here would reject it. Only the property
   // the publisher actually guarantees is checked: the featured group is 0.
   // The headline is also the one the payload orders first, so a renderer
-  // sorting by either field reaches the same event.
+  // sorting by either field reaches the same event. Gated with the other
+  // cross-group invariants (C-3.5.1): a partially grouped section renders
+  // flat, so nothing reads the correlation, and enforcing it there rejects a
+  // payload the contract calls valid.
+  if (declared !== statements.length) {
+    return true;
+  }
   return [...groups.values()].every(
     (group) => group.featured === (group.event_order === 0)
   );
