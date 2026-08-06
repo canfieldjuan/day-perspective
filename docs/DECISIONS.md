@@ -1443,3 +1443,59 @@ does not yet consume the featured-selection binding this slice writes, the
 published contract does not yet expose typed multi-event grouping, and
 attribution is still a single `source_attribution` block — all explicitly
 G3b-2 (#79), which remains open. G4 does not begin until G3b-2 merges.
+
+## D045: A publisher that cannot represent a whole date refuses it
+
+**Context:** D044 (#83) made a date able to publish several canonical events once
+a human has adjudicated them distinct. The golden USGS publisher was not part of
+that change and still rebuilds `recorded_on_this_date` from its own statements
+alone. That is correct on a single-event date and amnesia on a shared one: the
+successor carries only USGS evidence, `events_behind_manifest` infers only the
+USGS event, and the collision guard stops believing the co-published event was
+ever behind the date. A later candidate is then judged against USGS alone, and a
+`distinct_event` decision a human actually made never runs.
+
+**Decision:** A publisher that cannot represent every event a date has admitted
+**refuses to publish it**, by name, rather than minting a version that silently
+drops what it cannot carry.
+
+Carrying and revalidating another source's statements is not the golden
+publisher's job. It knows how to render USGS content; making it responsible for
+Wikidata's — including that source's editorial selections and release
+eligibility — because both events happened on the same day is the wrong
+ownership boundary, and the multi-event assembly already lives with the
+publisher that owns it.
+
+**Mechanism:** `publish_golden_profile` (`services/api/app/usgs.py`) compares the
+current published manifest's admitted set against the event it can represent, and
+raises `MultiEventDateRequiresCombinedPublisher` when anything remains. The error
+carries a stable `code` attribute — `multi_event_date_requires_combined_publisher`
+— so callers and tests key on the identity of the refusal rather than on prose
+that can drift or match by accident. The message names the specific events.
+
+**Operational consequence, stated rather than discovered:** updating USGS content
+on an already multi-event date is **intentionally blocked** until a
+source-agnostic multi-event republisher exists. That is a known inability with a
+named error, not a silent failure.
+
+**Alternatives considered:** Teaching the golden publisher to retain the other
+events' statements — it would need to revalidate another source's editorial
+selections and release eligibility, duplicating the Wikidata publisher's
+retention logic, and a second implementation of that is what produced the
+findings behind D044. Leaving it alone and relying on a spine-level guard — the
+right general invariant, tracked as the deferred cross-publisher guard, but it
+does not exist yet and this path is live now. Letting the rerun proceed and
+repairing the index afterwards — the archive would have already published a
+version asserting the day held one event when a human had recorded two.
+
+**Consequences:** The only known publisher that could make the archive forget an
+admitted event now cannot. Proven by
+`services/api/tests/test_usgs_multi_event_refusal.py`: the refusal is raised by
+code, nothing is minted, the date still resolves both events afterwards, and the
+ordinary single-event rerun and first publication are unaffected — the last two
+verified to pass with the refusal disabled, so they cannot be passing merely
+because the guard blocks everything.
+
+The concurrency caveat is unchanged and deferred: this check reads before
+`publish_day_profile` takes its per-date lock, so it does not close the
+check-then-act window. That fix belongs in the publish spine.
