@@ -77,32 +77,62 @@ affordance (C-9).
 signal this section previously deferred now exists, so the rule changes
 from "grouping is not derivable" to "grouping is read, never inferred".
 
-1. **Grouped rendering** applies to `recorded_on_this_date` only, and only
+1. **Validation precedes rendering, and is a precondition of this clause.**
+   `event_group` is payload, so it is untrusted until the response boundary
+   has checked it — a present-but-malformed group (`null`, `{}`, a negative
+   ordinal) must fail the profile into the API-error state, not reach the
+   renderer.
+
+   **Per group, always:** `event_group_key` and `event_title` non-empty;
+   `featured` boolean; `event_order` and `predicate_order` whole and
+   non-negative; one key describing one event, so two statements sharing a
+   key agree on its title, `featured` and `event_order`.
+
+   **Across groups, only when grouping will render** (C-3.5.2 — every
+   statement in the section declares a group): exactly one group `featured`,
+   and `predicate_order` running 0..n-1 within each group. These are gated
+   because a partially grouped section is a legitimate payload, not a
+   malformed one: the publisher omits metadata for a statement whose owning
+   event cannot be resolved, so the *featured* event's own statements can be
+   the ungrouped ones, leaving a section whose only declared group is
+   secondary. That renders flat per C-3.5.5. Enforcing a headline there would
+   make the flat fallback unreachable and turn a readable page into an error.
+
+   **`event_order` must be unique across distinct groups, and need not be
+   contiguous.** The two are different properties and only one is required. A
+   tie has no defined order, so it falls through to whatever the renderer
+   sorts by next — which C-3.5.4 forbids being the opaque key — while a gap
+   is honest: the publisher enumerates *admitted* events, and one that
+   contributed no attributable statement simply has no group.
+
+   No implementation may rely on the fields below without this. The clause
+   grants permission to render grouping, not permission to trust it.
+2. **Grouped rendering** applies to `recorded_on_this_date` only, and only
    when **every** statement in it carries `event_group` (`event_group_key`,
    `event_title`, `featured`, `event_order`, `predicate_order`). Each
    distinct `event_group_key` renders as one group: an `h3` carrying
    `event_title`, then that group's statements in `predicate_order`. Groups
    render in `event_order`, and `data-event-group` / `data-featured` are the
    structural selectors (C-11).
-2. **The featured group leads.** Exactly one group is `featured` and it is
+3. **The featured group leads.** Exactly one group is `featured` and it is
    `event_order` 0. Its first statement takes the lead treatment — larger
    statement type and full-width rule — and every other group renders in the
    standard register beneath a non-heading label, "Also recorded on this
    date". The label is deliberately not a heading: it introduces the event
    titles rather than competing with them in the outline (C-10).
-3. **Ordering is read from the payload, never from array position.** Sort on
+4. **Ordering is read from the payload, never from array position.** Sort on
    `event_order` and `predicate_order`. `event_group_key` is opaque — it is a
    digest, so ordering by it smuggles in hash order and is a defect, not a
    fallback.
-4. **Flat rendering is retained**, unchanged, for any recorded section where
+5. **Flat rendering is retained**, unchanged, for any recorded section where
    some or no statement declares a group — which includes every profile
    published before this signal existed. There, the first statement in
    publisher order takes the lead treatment as before. A partially-grouped
    section renders flat rather than stranding statements outside a group.
-5. **The UI still must never claim an event count.** Rendering the groups a
+6. **The UI still must never claim an event count.** Rendering the groups a
    payload declares is not the same as asserting how many events a date held;
    no copy states or implies a total.
-6. **Single-event dates render as one featured group**, not as a special
+7. **Single-event dates render as one featured group**, not as a special
    case. The shape does not change with the number of events, so the branch
    nobody exercises does not exist.
 
