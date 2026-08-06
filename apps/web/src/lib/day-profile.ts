@@ -153,6 +153,18 @@ function isStatementProvenance(value: unknown): boolean {
 }
 
 /**
+ * A position in a sequence: a whole number, not negative.
+ *
+ * `Number.isFinite` alone admits `-1` and `1.5`, which sort perfectly well —
+ * that is the hazard. Nothing throws; the wrong statement quietly takes the
+ * lead treatment, which is the one position on the page a reader reads as the
+ * page's claim about what the date is.
+ */
+function isOrdinal(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0;
+}
+
+/**
  * Read a complete event group out of a value, or null if it is not one.
  *
  * The single definition of what a usable group is, used by both the response
@@ -176,10 +188,8 @@ export function readEventGroup(
     typeof group.event_title !== "string" ||
     group.event_title === "" ||
     typeof group.featured !== "boolean" ||
-    typeof group.event_order !== "number" ||
-    !Number.isFinite(group.event_order) ||
-    typeof group.predicate_order !== "number" ||
-    !Number.isFinite(group.predicate_order)
+    !isOrdinal(group.event_order) ||
+    !isOrdinal(group.predicate_order)
   ) {
     return null;
   }
@@ -356,11 +366,13 @@ function hasCoherentEventGroups(statements: unknown): boolean {
     return true;
   }
   const groups = new Map<string, ProfileStatementEventGroup>();
+  let declared = 0;
   for (const statement of statements) {
     const record = asRecord(statement);
     if (record === undefined || record.event_group === undefined) {
       continue;
     }
+    declared += 1;
     const group = readEventGroup(record.event_group);
     if (group === null) {
       return false;
@@ -382,6 +394,13 @@ function hasCoherentEventGroups(statements: unknown): boolean {
   if (groups.size === 0) {
     return true;
   }
+  // Contiguity is checked only when grouping will actually be used to render.
+  // A partially grouped section falls back to flat, so its sequence is never
+  // read, and failing the profile there would replace a readable page with an
+  // error over an ordering nothing consults.
+  if (declared === statements.length && !hasContiguousPredicates(statements)) {
+    return false;
+  }
   const featured = [...groups.values()].filter((group) => group.featured);
   if (featured.length !== 1) {
     return false;
@@ -391,4 +410,34 @@ function hasCoherentEventGroups(statements: unknown): boolean {
   return [...groups.values()].every(
     (group) => group.featured === (group.event_order === 0)
   );
+}
+
+/**
+ * Each group's `predicate_order` runs 0..n-1 over its own statements.
+ *
+ * Per-group, not per-section: two events each starting at 0 is correct, which
+ * is the whole point of the field — a group stays ordered when rendered alone,
+ * collapsed, or reordered. A gap or a duplicate means the payload's stated
+ * order is not an order, and the renderer would sort it into something
+ * plausible rather than something true.
+ */
+function hasContiguousPredicates(statements: unknown[]): boolean {
+  const byGroup = new Map<string, number[]>();
+  for (const statement of statements) {
+    const record = asRecord(statement);
+    const group = record && readEventGroup(record.event_group);
+    if (!group) {
+      return false;
+    }
+    const orders = byGroup.get(group.event_group_key) ?? [];
+    orders.push(group.predicate_order);
+    byGroup.set(group.event_group_key, orders);
+  }
+  for (const orders of byGroup.values()) {
+    const sorted = [...orders].sort((left, right) => left - right);
+    if (sorted.some((order, index) => order !== index)) {
+      return false;
+    }
+  }
+  return true;
 }

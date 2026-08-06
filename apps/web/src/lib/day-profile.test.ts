@@ -521,3 +521,160 @@ describe("the single-featured-group invariant is checked across the section", ()
     ).toBe(true);
   });
 });
+
+describe("ordinals are ordinals", () => {
+  const statement = (id: string, group: unknown) => ({
+    statement_id: id,
+    statement: `Statement ${id}.`,
+    event_group: group
+  });
+  const envelope = (statements: unknown[]) => ({
+    status: "published",
+    date: "1964-03-27",
+    profile_type: "standard_statistical",
+    manifest_id: "manifest-ordinals",
+    content_hash: "b".repeat(64),
+    profile: {
+      schema_version: "1",
+      date: "1964-03-27",
+      profile_type: "standard_statistical",
+      sections: { recorded_on_this_date: statements },
+      section_states: {}
+    }
+  });
+  const lead = {
+    event_group_key: "g0",
+    event_title: "The featured event",
+    featured: true,
+    event_order: 0,
+    predicate_order: 0
+  };
+
+  it("accepts a contiguous zero-based sequence", () => {
+    expect(
+      isPublishedProfileResponse(
+        envelope([
+          statement("a", lead),
+          statement("b", { ...lead, predicate_order: 1 })
+        ]),
+        "1964-03-27"
+      )
+    ).toBe(true);
+  });
+
+  it("rejects a negative predicate order", () => {
+    // Sorting still succeeds, which is the danger: the wrong statement
+    // silently takes the lead treatment instead of the page erroring.
+    expect(
+      isPublishedProfileResponse(
+        envelope([
+          statement("a", lead),
+          statement("b", { ...lead, predicate_order: -1 })
+        ]),
+        "1964-03-27"
+      )
+    ).toBe(false);
+  });
+
+  it("rejects a fractional predicate order", () => {
+    expect(
+      isPublishedProfileResponse(
+        envelope([
+          statement("a", lead),
+          statement("b", { ...lead, predicate_order: 1.5 })
+        ]),
+        "1964-03-27"
+      )
+    ).toBe(false);
+  });
+
+  it("rejects a fractional or negative event order", () => {
+    expect(
+      isPublishedProfileResponse(
+        envelope([statement("a", { ...lead, event_order: 0.5 })]),
+        "1964-03-27"
+      )
+    ).toBe(false);
+    expect(
+      isPublishedProfileResponse(
+        envelope([statement("a", { ...lead, event_order: -0 })]),
+        "1964-03-27"
+      )
+    ).toBe(true);
+  });
+
+  it("rejects a gap in one group's sequence", () => {
+    expect(
+      isPublishedProfileResponse(
+        envelope([
+          statement("a", lead),
+          statement("b", { ...lead, predicate_order: 2 })
+        ]),
+        "1964-03-27"
+      )
+    ).toBe(false);
+  });
+
+  it("rejects a duplicated ordinal within one group", () => {
+    expect(
+      isPublishedProfileResponse(
+        envelope([statement("a", lead), statement("b", lead)]),
+        "1964-03-27"
+      )
+    ).toBe(false);
+  });
+
+  it("counts each group's sequence separately", () => {
+    // Two events each starting at 0 is correct — predicate_order runs within
+    // a group, not across the section.
+    const second = {
+      event_group_key: "g1",
+      event_title: "A second event",
+      featured: false,
+      event_order: 1,
+      predicate_order: 0
+    };
+    expect(
+      isPublishedProfileResponse(
+        envelope([
+          statement("a", lead),
+          statement("b", { ...lead, predicate_order: 1 }),
+          statement("c", second),
+          statement("d", { ...second, predicate_order: 1 })
+        ]),
+        "1964-03-27"
+      )
+    ).toBe(true);
+  });
+
+  it("still rejects a negative ordinal where contiguity is not checked", () => {
+    // The partially-grouped path deliberately skips the contiguity check, so
+    // this is the case only the ordinal rule catches. Without it the section
+    // renders flat with a group carrying a nonsense position — harmless today,
+    // and silently wrong the moment anything reads that field.
+    expect(
+      isPublishedProfileResponse(
+        envelope([
+          statement("a", { ...lead, predicate_order: -1 }),
+          { statement_id: "b", statement: "Ungrouped." }
+        ]),
+        "1964-03-27"
+      )
+    ).toBe(false);
+  });
+
+  it("does not impose contiguity on a partially grouped section", () => {
+    // Such a section renders flat by the renderer's own fallback, so the
+    // sequence is never used. Failing the profile would replace a readable
+    // page with an error over an ordering nothing reads.
+    expect(
+      isPublishedProfileResponse(
+        envelope([
+          statement("a", { ...lead, predicate_order: 3 }),
+          { statement_id: "b", statement: "Ungrouped." }
+        ]),
+        "1964-03-27"
+      )
+    ).toBe(true);
+  });
+});
