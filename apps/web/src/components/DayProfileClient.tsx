@@ -308,6 +308,7 @@ export function DayProfileClient({
           sections={viewState.profile.sections}
           sectionStates={viewState.profile.section_states}
           sourceAttribution={viewState.profile.source_attribution}
+          sourceAttributions={viewState.profile.source_attributions}
           quality={viewState.profile.quality}
           profileDate={date}
           publicationManifestId={viewState.manifestId}
