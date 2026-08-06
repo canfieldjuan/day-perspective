@@ -295,10 +295,17 @@ export function isPublishedProfileResponse(
     }
   }
 
-  // Validated with the same strictness as the singular field it replaces. An
-  // attribution the page renders as a source link is a claim about who stands
+  // An attribution the page renders as a credit is a claim about who stands
   // behind the content, so a malformed entry must fail the profile rather than
-  // reach a reader as a broken or empty credit.
+  // reach a reader as a broken credit.
+  //
+  // The two sides are not symmetric, and deliberately so. `Source.name` is
+  // non-nullable upstream, so an empty name means a corrupt payload and is
+  // rejected. `publisher` and `canonical_url` are both nullable, and the
+  // publisher emits "" for an absent one — that is unknown data, not corrupt
+  // data, and rejecting the whole profile over a source with no recorded URL
+  // would throw away a page of honest evidence. The renderer names such a
+  // source without linking or crediting it.
   if (profile.source_attributions !== undefined) {
     if (!Array.isArray(profile.source_attributions)) {
       return false;
@@ -308,6 +315,7 @@ export function isPublishedProfileResponse(
       if (
         attribution === undefined ||
         typeof attribution.name !== "string" ||
+        attribution.name === "" ||
         typeof attribution.publisher !== "string" ||
         typeof attribution.url !== "string"
       ) {

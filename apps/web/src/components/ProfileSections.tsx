@@ -323,8 +323,21 @@ export function ProfileSections({
                     {attributions.map((entry, index) => (
                       <React.Fragment key={entry.url + entry.name}>
                         {index > 0 ? "; " : ""}
-                        <a href={entry.url}>{entry.name}</a>, published by{" "}
-                        {entry.publisher}
+                        {/*
+                          A source's publisher and URL are both nullable
+                          upstream, and the publisher emits "" for an absent
+                          one. Neither absence is dressed up: an empty href
+                          resolves to the current page, so a reader clicking a
+                          credit is silently reloaded rather than sent to the
+                          source, and "published by ." asserts an attribution
+                          the payload does not carry.
+                        */}
+                        {entry.url ? (
+                          <a href={entry.url}>{entry.name}</a>
+                        ) : (
+                          entry.name
+                        )}
+                        {entry.publisher ? `, published by ${entry.publisher}` : ""}
                       </React.Fragment>
                     ))}
                     .
