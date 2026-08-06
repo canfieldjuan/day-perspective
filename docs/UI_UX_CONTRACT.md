@@ -88,9 +88,15 @@ from "grouping is not derivable" to "grouping is read, never inferred".
    non-negative; one key describing one event, so two statements sharing a
    key agree on its title, `featured` and `event_order`.
 
-   **Across groups, only when grouping will render** (C-3.5.2 — every
-   statement in the section declares a group): exactly one group `featured`,
-   and `predicate_order` running 0..n-1 within each group. These are gated
+   **Across groups, only when grouping will render** (C-3.5.2 — the section
+   is non-empty *and* every statement in it declares a group): exactly one
+   group `featured`; that group's `event_order` is 0 and no other group's is
+   — `featured` if and only if `event_order === 0`; and `predicate_order`
+   running 0..n-1 within each group. The correlation is not redundant with
+   uniqueness: without it a payload can pass every other check with an
+   unfeatured group at 0 and the featured group at 1, and then C-3.5.3
+   (featured leads) and C-3.5.4 (sort by `event_order`) demand different
+   first groups, so no renderer can satisfy both. These are gated
    because a partially grouped section is a legitimate payload, not a
    malformed one: the publisher omits metadata for a statement whose owning
    event cannot be resolved, so the *featured* event's own statements can be
@@ -108,8 +114,13 @@ from "grouping is not derivable" to "grouping is read, never inferred".
    No implementation may rely on the fields below without this. The clause
    grants permission to render grouping, not permission to trust it.
 2. **Grouped rendering** applies to `recorded_on_this_date` only, and only
-   when **every** statement in it carries `event_group` (`event_group_key`,
-   `event_title`, `featured`, `event_order`, `predicate_order`). Each
+   when the section holds **at least one** statement and **every** statement
+   in it carries `event_group` (`event_group_key`, `event_title`, `featured`,
+   `event_order`, `predicate_order`). The non-empty requirement is explicit
+   because "every statement declares a group" is vacuously true of an empty
+   array, and a context-only profile publishes `recorded_on_this_date: []` —
+   which must reach the quiet-date seam (C-5), not a grouped renderer holding
+   no groups or a featured-group check with nothing to check. Each
    distinct `event_group_key` renders as one group: an `h3` carrying
    `event_title`, then that group's statements in `predicate_order`. Groups
    render in `event_order`, and `data-event-group` / `data-featured` are the
