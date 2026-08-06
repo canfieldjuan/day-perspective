@@ -678,3 +678,56 @@ describe("ordinals are ordinals", () => {
     ).toBe(true);
   });
 });
+
+describe("event_order gaps between groups are tolerated", () => {
+  it("accepts a featured group and a secondary one whose orders are not adjacent", () => {
+    // The publisher enumerates admitted events, but only events that
+    // contributed an attributable statement become groups. An admitted event
+    // whose statements could not be attributed leaves a gap in a payload that
+    // is otherwise honest, so the boundary must not require 0..m-1.
+    expect(
+      isPublishedProfileResponse(
+        {
+          status: "published",
+          date: "1964-03-27",
+          profile_type: "standard_statistical",
+          manifest_id: "manifest-order-gap",
+          content_hash: "d".repeat(64),
+          profile: {
+            schema_version: "1",
+            date: "1964-03-27",
+            profile_type: "standard_statistical",
+            sections: {
+              recorded_on_this_date: [
+                {
+                  statement_id: "a",
+                  statement: "The featured event.",
+                  event_group: {
+                    event_group_key: "g0",
+                    event_title: "The featured event",
+                    featured: true,
+                    event_order: 0,
+                    predicate_order: 0
+                  }
+                },
+                {
+                  statement_id: "b",
+                  statement: "A later event.",
+                  event_group: {
+                    event_group_key: "g2",
+                    event_title: "A later event",
+                    featured: false,
+                    event_order: 2,
+                    predicate_order: 0
+                  }
+                }
+              ]
+            },
+            section_states: {}
+          }
+        },
+        "1964-03-27"
+      )
+    ).toBe(true);
+  });
+});

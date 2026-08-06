@@ -405,6 +405,13 @@ function hasCoherentEventGroups(statements: unknown): boolean {
   if (featured.length !== 1) {
     return false;
   }
+  // `event_order` is deliberately NOT required to be contiguous across groups,
+  // even though the publisher assigns it with `enumerate`. It enumerates the
+  // *admitted events*, while a group exists only for an event that contributed
+  // an attributable statement (`wikidata.py:1559-1562`) — so an admitted event
+  // whose statements could not be attributed leaves a real gap in an otherwise
+  // honest payload. Requiring 0..m-1 here would reject it. Only the property
+  // the publisher actually guarantees is checked: the featured group is 0.
   // The headline is also the one the payload orders first, so a renderer
   // sorting by either field reaches the same event.
   return [...groups.values()].every(
