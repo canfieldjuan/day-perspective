@@ -143,12 +143,23 @@ from "grouping is not derivable" to "grouping is read, never inferred".
 6. **The UI still must never claim an event count.** Rendering the groups a
    payload declares is not the same as asserting how many events a date held;
    no copy states or implies a total.
-7. **Single-event dates render as one featured group**, not as a special
-   case. The shape does not change with the number of events, so the branch
-   nobody exercises does not exist.
+7. **A single-event date that carries grouping renders as one featured
+   group**, not as a special case: among grouped payloads the shape does not
+   change with the number of events, so the branch nobody exercises does not
+   exist. This is conditional on grouping being present, like every rule in
+   this clause. A single-event profile from a publisher that emits no
+   `event_group` — the golden USGS publisher today (`usgs.py:1303-1318`) —
+   is an ungrouped payload and renders flat per C-3.5.5. Read unconditionally
+   this rule would contradict that one, and no renderer could satisfy both.
 
-Issue #18's deferral of a payload-level grouping signal is discharged by
-this amendment.
+**On the deferral this replaces.** C-3 recorded the payload-level grouping
+signal as "deferred to backend coordination (logged on issue #18)". That
+citation was wrong when it was written: #18 is the typed evidence-class
+vocabulary, which is untouched by this amendment and stays open. The signal
+itself arrived with G3b-2b (#89); the remaining grouping work — making every
+publisher stamp it, rather than only `publish_wikidata_event` — is **#92**.
+So nothing here discharges #18, and this clause describes the Wikidata path
+until #92 lands.
 
 ## C-4 Evidence classes
 
