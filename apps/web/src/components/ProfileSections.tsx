@@ -139,10 +139,14 @@ export function ProfileSections({
       ? evidenceStatement.details.quality_grade
       : quality?.grade;
   // A profile published before typed attribution carries only the singular
-  // field. Normalising here means the render path has one shape to handle, and
-  // the plural wins when both are present.
+  // field. Normalising here means the render path has one shape to handle.
+  //
+  // The plural field wins on presence, not on truthiness. An empty array is a
+  // profile saying its evidence credits nobody; reading that as "absent" and
+  // falling back would resurrect a source the current contract deliberately
+  // left out — the false claim the plural field exists to stop making.
   const attributions =
-    sourceAttributions && sourceAttributions.length > 0
+    sourceAttributions !== undefined
       ? sourceAttributions
       : sourceAttribution
         ? [sourceAttribution]

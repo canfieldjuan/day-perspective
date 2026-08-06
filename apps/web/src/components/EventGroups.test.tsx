@@ -151,6 +151,7 @@ function renderProfile(profile: PublishedDayProfile) {
       availability="published"
       sections={profile.sections}
       sectionStates={profile.section_states}
+      sourceAttribution={profile.source_attribution}
       sourceAttributions={profile.source_attributions}
       profileDate={profile.date}
     />
@@ -355,5 +356,59 @@ describe("malformed or partial grouping degrades instead of breaking", () => {
       container.querySelectorAll("[data-event-group]")
     ).map((node) => node.getAttribute("data-event-group"));
     expect(groups).toEqual(["featured01", "secondary1", "aaa-sorts-first"]);
+  });
+});
+
+describe("the plural attribution wins whenever the payload supplies it", () => {
+  const withBoth = (
+    attributions: PublishedDayProfile["source_attributions"]
+  ): PublishedDayProfile => ({
+    ...singleEventProfile(),
+    source_attribution: {
+      name: "A superseded single source",
+      publisher: "Legacy publisher",
+      url: "https://legacy.invalid/"
+    },
+    source_attributions: attributions
+  });
+
+  it("does not fall back to the legacy source when the plural list is empty", () => {
+    // An empty plural array is a statement: this profile's evidence credits
+    // nobody. Treating it as "absent" resurrects a source the current contract
+    // deliberately left out.
+    renderProfile(withBoth([]));
+
+    expect(screen.queryByText("A superseded single source")).toBeNull();
+    expect(screen.queryByText(/^Sources?:/)).toBeNull();
+  });
+
+  it("prefers the plural list over the legacy field when both are present", () => {
+    renderProfile(
+      withBoth([
+        {
+          name: "USGS earthquake catalog",
+          publisher: "United States Geological Survey",
+          url: "https://earthquake.usgs.gov/"
+        }
+      ])
+    );
+
+    expect(screen.getByText("USGS earthquake catalog")).toBeTruthy();
+    expect(screen.queryByText("A superseded single source")).toBeNull();
+  });
+
+  it("still honours the legacy field when the plural one is absent", () => {
+    const profile = singleEventProfile();
+    delete profile.source_attributions;
+    renderProfile({
+      ...profile,
+      source_attribution: {
+        name: "A superseded single source",
+        publisher: "Legacy publisher",
+        url: "https://legacy.invalid/"
+      }
+    });
+
+    expect(screen.getByText("A superseded single source")).toBeTruthy();
   });
 });
