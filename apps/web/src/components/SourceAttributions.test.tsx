@@ -83,3 +83,62 @@ describe("a page names every source it rests on", () => {
     expect(links).toEqual([USGS.url, WIKIDATA.url]);
   });
 });
+
+describe("a source with unknown publisher or URL is not dressed up as complete", () => {
+  const NO_URL = {
+    name: "An archive with no canonical URL",
+    publisher: "Some publisher",
+    url: ""
+  };
+  const NO_PUBLISHER = {
+    name: "An archive with no known publisher",
+    publisher: "",
+    url: "https://archive.invalid/"
+  };
+
+  it("names a source without a URL instead of linking it to nowhere", () => {
+    // `Source.canonical_url` is nullable and the publisher emits "" for it. An
+    // empty href is not a missing link — it resolves to the current page, so a
+    // reader clicking a credit gets silently reloaded.
+    const { container } = renderIntegrity({ source_attributions: [NO_URL] });
+
+    const line = container.querySelector('[data-testid="source-attributions"]');
+    expect(line?.textContent).toContain(NO_URL.name);
+    expect(
+      container.querySelectorAll('[data-testid="source-attributions"] a').length
+    ).toBe(0);
+  });
+
+  it("omits the publisher clause when no publisher is known", () => {
+    const { container } = renderIntegrity({
+      source_attributions: [NO_PUBLISHER]
+    });
+
+    const line = container.querySelector('[data-testid="source-attributions"]');
+    expect(line?.textContent).toContain(NO_PUBLISHER.name);
+    // "published by ." asserts an attribution the payload does not carry.
+    expect(line?.textContent).not.toContain("published by");
+  });
+
+  it("still links and credits a source that knows both", () => {
+    const { container } = renderIntegrity({
+      source_attributions: [
+        {
+          name: "USGS earthquake catalog",
+          publisher: "United States Geological Survey",
+          url: "https://earthquake.usgs.gov/"
+        }
+      ]
+    });
+
+    expect(
+      container.querySelector(
+        '[data-testid="source-attributions"] a[href="https://earthquake.usgs.gov/"]'
+      )
+    ).toBeTruthy();
+    const line = container.querySelector('[data-testid="source-attributions"]');
+    expect(line?.textContent).toContain(
+      "published by United States Geological Survey"
+    );
+  });
+});
