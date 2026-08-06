@@ -1599,6 +1599,18 @@ that flatters the most recent contributor.
 **Decision:** Every recorded statement carries typed `event_group` metadata, and
 a profile lists **every** source its evidence rests on.
 
+**Scope as implemented (do not read this entry as universal).** Only
+`publish_wikidata_event` stamps groups and derives `source_attributions`. The
+golden USGS publisher (`usgs.py:1305-1325`) still builds recorded statements
+without `event_group` and emits the singular `source_attribution`
+(`usgs.py:1390`); `publish_annual_context_profile` emits no attribution at all.
+Those paths are unchanged, not regressed — the renderer's flat fallback covers
+ungrouped sections by design, and the singular field still renders — but a
+profile minted by them does not yet satisfy the decision above. Making it
+universal belongs in the shared publication spine rather than repeated in three
+publishers, which is its own slice: issue #92. Until that lands, this entry
+describes the Wikidata path.
+
 **Mechanism:** `event_group` carries `event_group_key`, `event_title`,
 `featured`, `event_order` and `predicate_order`. The key is a digest of the
 event's identity resolution rather than a database row id: stable across
