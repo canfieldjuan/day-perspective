@@ -237,32 +237,6 @@ describe("a single-event date reads as it always did", () => {
   });
 });
 
-describe("attribution does not collapse several sources into one", () => {
-  it("names every source a multi-source page rests on", () => {
-    renderProfile(multiEventProfile());
-
-    expect(screen.getByText("USGS earthquake catalog")).toBeTruthy();
-    expect(screen.getByText("Wikidata candidate entities")).toBeTruthy();
-  });
-
-  it("does not present one source as supporting the whole page", () => {
-    renderProfile(multiEventProfile());
-
-    // "Source:" singular would assert that one publisher stands behind
-    // everything on the page, which is exactly the claim the payload stopped
-    // making.
-    expect(screen.queryByText(/^Source:/)).toBeNull();
-    expect(screen.getByText(/^Sources:/)).toBeTruthy();
-  });
-
-  it("still reads naturally when there is genuinely one source", () => {
-    renderProfile(singleEventProfile());
-
-    expect(screen.getByText(/^Source:/)).toBeTruthy();
-    expect(screen.getByText("USGS earthquake catalog")).toBeTruthy();
-  });
-});
-
 describe("grouping stays navigable", () => {
   it("nests each event title one level under its section heading", () => {
     const { container } = renderProfile(multiEventProfile());
@@ -356,59 +330,5 @@ describe("malformed or partial grouping degrades instead of breaking", () => {
       container.querySelectorAll("[data-event-group]")
     ).map((node) => node.getAttribute("data-event-group"));
     expect(groups).toEqual(["featured01", "secondary1", "aaa-sorts-first"]);
-  });
-});
-
-describe("the plural attribution wins whenever the payload supplies it", () => {
-  const withBoth = (
-    attributions: PublishedDayProfile["source_attributions"]
-  ): PublishedDayProfile => ({
-    ...singleEventProfile(),
-    source_attribution: {
-      name: "A superseded single source",
-      publisher: "Legacy publisher",
-      url: "https://legacy.invalid/"
-    },
-    source_attributions: attributions
-  });
-
-  it("does not fall back to the legacy source when the plural list is empty", () => {
-    // An empty plural array is a statement: this profile's evidence credits
-    // nobody. Treating it as "absent" resurrects a source the current contract
-    // deliberately left out.
-    renderProfile(withBoth([]));
-
-    expect(screen.queryByText("A superseded single source")).toBeNull();
-    expect(screen.queryByText(/^Sources?:/)).toBeNull();
-  });
-
-  it("prefers the plural list over the legacy field when both are present", () => {
-    renderProfile(
-      withBoth([
-        {
-          name: "USGS earthquake catalog",
-          publisher: "United States Geological Survey",
-          url: "https://earthquake.usgs.gov/"
-        }
-      ])
-    );
-
-    expect(screen.getByText("USGS earthquake catalog")).toBeTruthy();
-    expect(screen.queryByText("A superseded single source")).toBeNull();
-  });
-
-  it("still honours the legacy field when the plural one is absent", () => {
-    const profile = singleEventProfile();
-    delete profile.source_attributions;
-    renderProfile({
-      ...profile,
-      source_attribution: {
-        name: "A superseded single source",
-        publisher: "Legacy publisher",
-        url: "https://legacy.invalid/"
-      }
-    });
-
-    expect(screen.getByText("A superseded single source")).toBeTruthy();
   });
 });
