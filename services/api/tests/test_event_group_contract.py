@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.coverage import rebuild_coverage_index
@@ -218,3 +219,83 @@ def test_a_single_source_profile_keeps_its_attribution(
     assert attributions is not None
     assert len(attributions) == 1
     rebuild_coverage_index(session)
+
+
+def _sources_in_published_evidence(
+    session: Session, manifest_id: object, *, skip_recorded: bool = False
+) -> set[str]:
+    """Source names read back out of a manifest's own evidence snapshots.
+
+    Deliberately independent of how the publisher derives its attribution list:
+    this walks what was actually published, so a test built on it cannot agree
+    with the production path by sharing its mistake. Lineage ancestors are not
+    collected -- a release's parent is visible in per-statement provenance, and
+    the page-level summary names the sources the evidence rests on directly.
+    """
+    names: set[str] = set()
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key == "source_release" and isinstance(value, dict):
+                    source = value.get("source")
+                    if isinstance(source, dict) and source.get("name"):
+                        names.add(str(source["name"]))
+                    for nested_key, nested in value.items():
+                        if nested_key != "lineage":
+                            walk(nested)
+                    continue
+                walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    from app.models import PublicationStatementEvidence
+
+    rows = session.scalars(
+        select(PublicationStatementEvidence).where(
+            PublicationStatementEvidence.publication_manifest_id == manifest_id
+        )
+    )
+    for row in rows:
+        if skip_recorded and row.statement_path.startswith(
+            "/sections/recorded_on_this_date/"
+        ):
+            continue
+        walk(row.evidence_snapshot)
+    return names
+
+
+@pytest.mark.integration
+def test_attribution_covers_the_sections_it_carries_forward(
+    session: Session, tmp_path: Path
+) -> None:
+    """A summary of "every source supporting this profile" must mean the profile.
+
+    Enrichment keeps the prior profile's annual context -- population, conflict
+    -- and adds a recorded event. Deriving the attribution list from the admitted
+    events alone names the event's publishers and silently drops the publishers
+    behind every carried-forward section, which is the same false claim the
+    singular field made, only one size larger.
+    """
+    store, _golden = _publish_past_the_golden_collision(session, tmp_path)
+
+    outcome = publish_wikidata_event(session, store=store)
+    assert outcome.status == "published"
+
+    manifest = session.get(PublicationManifest, outcome.manifest_id)
+    assert manifest is not None
+    payload = store.read(manifest.storage_uri, manifest.content_hash)
+    attributed = {entry["name"] for entry in payload["source_attributions"]}
+
+    carried = _sources_in_published_evidence(session, manifest.id, skip_recorded=True)
+    assert carried, "fixture publishes no carried-forward evidence to attribute"
+    assert carried <= attributed, (
+        f"carried-forward sections rest on {sorted(carried - attributed)}, "
+        "which the profile does not attribute"
+    )
+
+    supporting = _sources_in_published_evidence(session, manifest.id)
+    assert supporting <= attributed, (
+        f"unattributed sources: {sorted(supporting - attributed)}"
+    )

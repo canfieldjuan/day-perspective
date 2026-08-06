@@ -975,6 +975,58 @@ def _snapshot_statement_evidence(
     return sorted(snapshotted, key=lambda item: item.evidence.statement_path)
 
 
+def _collect_direct_sources(
+    node: Any, collected: dict[str, dict[str, str]]
+) -> None:
+    """Gather the ``source`` block of every release a snapshot rests on directly.
+
+    ``lineage`` is skipped on purpose. A release derived from an earlier one is
+    still evidence for the statement, but its ancestors are a chain, not a list
+    of publishers standing behind the page; naming them at page level would
+    credit sources the profile never read. That chain stays visible in the
+    statement's own provenance, which is authoritative.
+    """
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key == "source_release" and isinstance(value, dict):
+                source = value.get("source")
+                if isinstance(source, dict) and source.get("id"):
+                    collected[str(source["id"])] = {
+                        "name": str(source.get("name") or ""),
+                        "publisher": str(source.get("publisher") or ""),
+                        "url": str(source.get("canonical_url") or ""),
+                    }
+                for nested_key, nested in value.items():
+                    if nested_key != "lineage":
+                        _collect_direct_sources(nested, collected)
+                continue
+            _collect_direct_sources(value, collected)
+    elif isinstance(node, list):
+        for item in node:
+            _collect_direct_sources(item, collected)
+
+
+def sources_supporting_evidence(
+    session: Session,
+    evidence: Iterable[PublicationStatementEvidenceInput],
+) -> list[dict[str, str]]:
+    """Every source whose evidence supports the statements being published.
+
+    Derived from the evidence inputs themselves, not from any one section's
+    subject matter. A publisher that enriches an existing profile carries other
+    sections forward, and those sections rest on publishers it never touched;
+    attributing only what the enriching pass resolved names the newcomer and
+    quietly drops the sources holding up most of the page.
+
+    Reads the same snapshots the spine publishes, so the list cannot describe a
+    different profile than the one that ships.
+    """
+    collected: dict[str, dict[str, str]] = {}
+    for item in _snapshot_statement_evidence(session, evidence):
+        _collect_direct_sources(item.snapshot, collected)
+    return sorted(collected.values(), key=lambda entry: (entry["name"], entry["url"]))
+
+
 def _source_snapshot_hash(evidence: Iterable[SnapshottedStatementEvidence]) -> str:
     return content_hash(
         {

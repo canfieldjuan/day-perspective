@@ -1621,10 +1621,21 @@ Single-event profiles publish the same shape with one featured group. A
 conditional shape would make every renderer branch on whether grouping exists,
 and the branch nobody exercises is the one that breaks.
 
-`source_attributions` lists each contributing source once. The singular
-`source_attribution` is retired from new payloads and kept in the contract as
-deprecated so artifacts published before this still typecheck. Statement-level
-provenance remains authoritative; this is only the page-level summary of it.
+`source_attributions` lists each contributing source once, derived from **the
+evidence the profile publishes** — not from the events this pass admitted.
+Enrichment carries a prior profile's annual context forward, and those sections
+rest on publishers the enriching pass never resolved; attributing only its own
+events would name the newcomer and drop the sources holding up most of the page,
+which is the singular field's false claim at a larger size. Lineage ancestors of
+a release are excluded: a parent release is a chain, not a publisher standing
+behind the page, and it stays visible in the statement's own provenance.
+
+The singular `source_attribution` is retired from new payloads and kept in the
+contract as deprecated so artifacts published before this still typecheck. A
+renderer must prefer the plural field on **presence**, not on truthiness — an
+empty list means the evidence credits nobody, and falling back to the singular
+field there resurrects exactly what this retired. Statement-level provenance
+remains authoritative; this is only the page-level summary of it.
 
 **Alternatives considered:** A second parallel structure holding grouped events
 — it would duplicate the recorded section and the two could disagree, which is
