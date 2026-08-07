@@ -197,7 +197,11 @@ class USGSEarthquakeAdapter:
         slug=USGS_SOURCE_SLUG,
         name="USGS Earthquake Catalog",
         publisher="U.S. Geological Survey, Earthquake Hazards Program",
-        canonical_url="https://earthquake.usgs.gov/fdsnws/event/1/",
+        # A page a reader can open, not the FDSN web-service root this module
+        # itself calls to fetch records (#101). Page-level attribution names
+        # the source; the specific record stays reachable through
+        # per-statement provenance (`source_record_locator`), not this field.
+        canonical_url="https://earthquake.usgs.gov/earthquakes/",
         usage_notes=(
             "Official USGS public earthquake catalog data. Attribute the U.S. Geological "
             "Survey and retain the source record locator and retrieval metadata."
@@ -426,6 +430,16 @@ def ingest_usgs(
                 )
                 session.add(source)
                 session.flush()
+            else:
+                # Correct an already-ingested row, or a metadata fix never
+                # reaches the environments that matter: the row is created
+                # once and every later ingest finds it. #101 changed
+                # `canonical_url` and would have applied only to a database
+                # that had never ingested USGS. `un_wpp.py:524-530` already
+                # does this; the USGS path did not.
+                source.name = adapter.metadata.name
+                source.publisher = adapter.metadata.publisher
+                source.canonical_url = adapter.metadata.canonical_url
             existing_release = session.scalar(
                 select(SourceRelease).where(
                     SourceRelease.source_id == source.id,
