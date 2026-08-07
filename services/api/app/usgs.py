@@ -35,6 +35,7 @@ from app.governance import (
     record_editorial_selection,
     register_release_license,
     reviewed_resolutions_for_release,
+    stamp_recorded_event_groups,
 )
 from app.models import (
     Claim,
@@ -1322,6 +1323,24 @@ def publish_golden_profile(
                 resolved_claim_id=resolved_claim.id,
             )
         )
+    golden_event = session.scalar(
+        select(Event).where(Event.resolved_claim_id == resolved["event_identity"].id)
+    )
+    if golden_event is None:
+        raise ValueError(
+            "The golden release's identity has not been resolved into an event."
+        )
+    # One event is still an event (D047): the golden profile publishes the
+    # same typed `event_group` shape a multi-event Wikidata date does, with a
+    # single featured group, so a renderer never has to branch on whether
+    # grouping is present.
+    statements = stamp_recorded_event_groups(
+        session,
+        statements=statements,
+        evidence=evidence,
+        featured_event_id=golden_event.id,
+        event_ids=[golden_event.id],
+    )
     evidence_statement = {
         "statement_id": "quality-assessment",
         "statement": quality_explanation,
@@ -1387,11 +1406,6 @@ def publish_golden_profile(
             "grade": quality_grade,
             "explanation": quality_explanation,
         },
-        "source_attribution": {
-            "name": source.name,
-            "publisher": source.publisher,
-            "url": USGS_RECORD_LOCATOR,
-        },
     }
     evidence.append(
         PublicationStatementEvidenceInput(
@@ -1411,14 +1425,9 @@ def publish_golden_profile(
         .order_by(PublicationManifest.version.desc())
     )
     if previous_manifest is not None:
-        golden_event = session.scalar(
-            select(Event).where(
-                Event.resolved_claim_id == resolved["event_identity"].id
-            )
-        )
         co_published = events_behind_manifest(
             session, manifest=previous_manifest
-        ) - ({golden_event.id} if golden_event is not None else set())
+        ) - {golden_event.id}
         if co_published:
             raise MultiEventDateRequiresCombinedPublisher(
                 f"{MultiEventDateRequiresCombinedPublisher.code}: "

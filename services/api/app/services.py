@@ -1527,6 +1527,32 @@ def publish_day_profile(
     """
     if profile_type_for_date(profile_date) != profile_type:
         raise ValueError("The profile type does not match the public date band.")
+    # Validated -- and, as a side effect, materialized -- before anything else
+    # touches it. `source_attributions` below snapshots the same evidence, and
+    # a snapshot failure raises its own, less specific error; an untraceable or
+    # malformed statement must fail on *this* check first, with this message,
+    # regardless of which caller run (fresh publish or an idempotent rerun)
+    # reaches it.
+    statement_evidence = _validate_statement_evidence(
+        session,
+        payload,
+        statement_evidence,
+        profile_date=profile_date,
+        profile_type=profile_type,
+    )
+    # Every source whose evidence supports this profile, derived here rather
+    # than by each publisher opting in. A publisher that forgot to derive it
+    # (or, before this, two of the three that never did) would silently ship
+    # a page that does not name what it rests on. Every caller already builds
+    # `statement_evidence` for the whole profile it is publishing, carried
+    # forward included, so this is the same source of truth the rest of the
+    # spine hashes.
+    payload = {
+        **payload,
+        "source_attributions": sources_supporting_evidence(
+            session, statement_evidence
+        ),
+    }
     tier = derive_publication_tier(payload)
     # The tier travels inside the hashed artifact so the stored profile, its
     # manifest, and every consumer describe the same thing.
@@ -1591,13 +1617,8 @@ def publish_day_profile(
             manifest = pending
             staged = store.stage_versioned(profile_date, manifest.version, payload)
         else:
-            evidence = _validate_statement_evidence(
-                session,
-                payload,
-                statement_evidence,
-                profile_date=profile_date,
-                profile_type=profile_type,
-            )
+            # Already validated above, before `source_attributions` was derived.
+            evidence = statement_evidence
             snapshotted_evidence = _snapshot_statement_evidence(session, evidence)
             _validate_profile_supersession(
                 session,

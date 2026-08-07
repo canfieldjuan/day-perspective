@@ -35,6 +35,7 @@ from app.models import PublicationManifest
 from app.services import LocalFilesystemPublishedProfileStore
 from app.wikidata import publish_wikidata_event
 
+from .test_usgs_vertical_slice import publish as publish_golden
 from .test_wikidata_publish import (
     _golden_event,
     _prepare_for_publication,
@@ -299,3 +300,67 @@ def test_attribution_covers_the_sections_it_carries_forward(
     assert supporting <= attributed, (
         f"unattributed sources: {sorted(supporting - attributed)}"
     )
+
+
+@pytest.mark.integration
+def test_a_golden_only_date_declares_its_event_group(
+    session: Session, tmp_path: Path
+) -> None:
+    """USGS-only, no Wikidata enrichment, satisfies the same contract (#92).
+
+    One event is still an event: the golden publisher never creates a second
+    event on its date, so every recorded statement lands in one featured
+    group -- the same shape a multi-event Wikidata date publishes, not a
+    conditional one a renderer would have to branch on.
+    """
+    _, golden = publish_golden(session, tmp_path)
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+
+    recorded = _recorded(session, store, golden.publication_manifest_id)
+    assert recorded
+    for statement in recorded:
+        group = statement.get("event_group")
+        assert group is not None, f"{statement['statement_id']} has no event group"
+        assert group["event_group_key"]
+        assert group["event_title"]
+        assert group["featured"] is True
+        assert group["event_order"] == 0
+        assert isinstance(group["predicate_order"], int)
+    orders = [statement["event_group"]["predicate_order"] for statement in recorded]
+    assert orders == list(range(len(orders))), (
+        "predicate_order must be 0-based and contiguous within the one group"
+    )
+
+
+@pytest.mark.integration
+def test_a_golden_only_date_derives_its_attribution_in_the_spine(
+    session: Session, tmp_path: Path
+) -> None:
+    """The golden publisher no longer opts into attribution -- the spine derives it.
+
+    D047's scope caveat named `usgs.py` as one of the paths that did not yet
+    satisfy the decision: it built recorded statements with no `event_group`
+    and emitted the singular, now-retired `source_attribution` -- which, on
+    this profile, is doubly wrong, since the golden fixture carries UN WPP and
+    UCDP annual context alongside its USGS recorded event and a singular field
+    could only ever name one of the three.
+    """
+    _, golden = publish_golden(session, tmp_path)
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+
+    manifest = session.get(PublicationManifest, golden.publication_manifest_id)
+    assert manifest is not None
+    payload = store.read(manifest.storage_uri, manifest.content_hash)
+    attributions = payload.get("source_attributions")
+    assert attributions is not None
+    names = {entry["name"] for entry in attributions}
+    assert names == {
+        "USGS Earthquake Catalog",
+        "World Population Prospects 2024",
+        "Uppsala Conflict Data Program",
+    }
+    for entry in attributions:
+        assert entry["name"] and entry["publisher"] and entry["url"]
+    # The singular field must not assert that one source supports the page --
+    # it is retired from every publisher, not only the Wikidata path.
+    assert "source_attribution" not in payload
