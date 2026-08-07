@@ -372,15 +372,30 @@ describe("source attributions at the response boundary", () => {
   });
 
   it("accepts a source whose publisher and URL are genuinely unknown", () => {
-    // Both columns are nullable upstream and the publisher emits "" for them.
-    // Failing the profile here would discard a page of honest evidence because
-    // one source has no recorded URL; the renderer degrades instead.
+    // Both columns are nullable upstream, and the publisher omits the key
+    // for an absent one rather than emitting "". Failing the profile here
+    // would discard a page of honest evidence because one source has no
+    // recorded URL; the renderer degrades instead.
+    expect(
+      isPublishedProfileResponse(envelope([{ name: COMPLETE.name }]), "1964-03-27")
+    ).toBe(true);
+  });
+
+  it("rejects an empty-string publisher or URL", () => {
+    // "" is no longer a legitimate way to say "unknown" — the key must be
+    // absent instead. A present-but-empty string is corrupt, not honest.
     expect(
       isPublishedProfileResponse(
-        envelope([{ ...COMPLETE, publisher: "", url: "" }]),
+        envelope([{ ...COMPLETE, publisher: "" }]),
         "1964-03-27"
       )
-    ).toBe(true);
+    ).toBe(false);
+    expect(
+      isPublishedProfileResponse(
+        envelope([{ ...COMPLETE, url: "" }]),
+        "1964-03-27"
+      )
+    ).toBe(false);
   });
 
   it("rejects an attribution with no name", () => {

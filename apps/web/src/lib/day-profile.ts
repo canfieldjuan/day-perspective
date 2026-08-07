@@ -312,10 +312,14 @@ export function isPublishedProfileResponse(
   // The two sides are not symmetric, and deliberately so. `Source.name` is
   // non-nullable upstream, so an empty name means a corrupt payload and is
   // rejected. `publisher` and `canonical_url` are both nullable, and the
-  // publisher emits "" for an absent one — that is unknown data, not corrupt
-  // data, and rejecting the whole profile over a source with no recorded URL
-  // would throw away a page of honest evidence. The renderer names such a
-  // source without linking or crediting it.
+  // publisher omits the key entirely for an absent one — that is unknown
+  // data, not corrupt data, and rejecting the whole profile over a source
+  // with no recorded URL would throw away a page of honest evidence. Once
+  // absence is expressed by omission, a present "" is no longer legitimate
+  // either way: it would mean "unknown" and "the empty string" are the same
+  // payload again, so a present publisher/url must be non-empty. The
+  // renderer names a source with no recorded URL without linking or
+  // crediting it.
   if (profile.source_attributions !== undefined) {
     if (!Array.isArray(profile.source_attributions)) {
       return false;
@@ -326,8 +330,11 @@ export function isPublishedProfileResponse(
         attribution === undefined ||
         typeof attribution.name !== "string" ||
         attribution.name === "" ||
-        typeof attribution.publisher !== "string" ||
-        typeof attribution.url !== "string"
+        (attribution.publisher !== undefined &&
+          (typeof attribution.publisher !== "string" ||
+            attribution.publisher === "")) ||
+        (attribution.url !== undefined &&
+          (typeof attribution.url !== "string" || attribution.url === ""))
       ) {
         return false;
       }

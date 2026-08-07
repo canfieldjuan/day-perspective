@@ -85,21 +85,21 @@ describe("a page names every source it rests on", () => {
 });
 
 describe("a source with unknown publisher or URL is not dressed up as complete", () => {
-  const NO_URL = {
+  const NO_URL: { name: string; publisher: string; url?: string } = {
     name: "An archive with no canonical URL",
-    publisher: "Some publisher",
-    url: ""
+    publisher: "Some publisher"
+    // url omitted: genuinely unknown, not the empty string.
   };
-  const NO_PUBLISHER = {
+  const NO_PUBLISHER: { name: string; publisher?: string; url: string } = {
     name: "An archive with no known publisher",
-    publisher: "",
     url: "https://archive.invalid/"
+    // publisher omitted: genuinely unknown, not the empty string.
   };
 
   it("names a source without a URL instead of linking it to nowhere", () => {
-    // `Source.canonical_url` is nullable and the publisher emits "" for it. An
-    // empty href is not a missing link — it resolves to the current page, so a
-    // reader clicking a credit gets silently reloaded.
+    // `Source.canonical_url` is nullable and the publisher omits the key for
+    // it. An empty href is not a missing link — it resolves to the current
+    // page, so a reader clicking a credit gets silently reloaded.
     const { container } = renderIntegrity({ source_attributions: [NO_URL] });
 
     const line = container.querySelector('[data-testid="source-attributions"]');

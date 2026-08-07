@@ -1007,11 +1007,16 @@ def _collect_direct_sources(
             if key == "source_release" and isinstance(value, dict):
                 source = value.get("source")
                 if isinstance(source, dict) and source.get("id"):
-                    collected[str(source["id"])] = {
-                        "name": str(source.get("name") or ""),
-                        "publisher": str(source.get("publisher") or ""),
-                        "url": str(source.get("canonical_url") or ""),
+                    entry: dict[str, str] = {
+                        "name": str(source.get("name") or "")
                     }
+                    publisher = source.get("publisher")
+                    if publisher:
+                        entry["publisher"] = str(publisher)
+                    url = source.get("canonical_url")
+                    if url:
+                        entry["url"] = str(url)
+                    collected[str(source["id"])] = entry
             _collect_direct_sources(value, collected)
     elif isinstance(node, list):
         for item in node:
@@ -1036,7 +1041,9 @@ def sources_supporting_evidence(
     collected: dict[str, dict[str, str]] = {}
     for item in _snapshot_statement_evidence(session, evidence):
         _collect_direct_sources(item.snapshot, collected)
-    return sorted(collected.values(), key=lambda entry: (entry["name"], entry["url"]))
+    return sorted(
+        collected.values(), key=lambda entry: (entry["name"], entry.get("url", ""))
+    )
 
 
 def _source_snapshot_hash(evidence: Iterable[SnapshottedStatementEvidence]) -> str:

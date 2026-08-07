@@ -321,23 +321,26 @@ export function ProfileSections({
                   <p data-testid="source-attributions">
                     {attributions.length === 1 ? "Source: " : "Sources: "}
                     {attributions.map((entry, index) => (
-                      <React.Fragment key={entry.url + entry.name}>
+                      <React.Fragment key={entry.name + (entry.url ?? "")}>
                         {index > 0 ? "; " : ""}
                         {/*
                           A source's publisher and URL are both nullable
-                          upstream, and the publisher emits "" for an absent
-                          one. Neither absence is dressed up: an empty href
-                          resolves to the current page, so a reader clicking a
-                          credit is silently reloaded rather than sent to the
-                          source, and "published by ." asserts an attribution
-                          the payload does not carry.
+                          upstream, and the payload omits the key entirely
+                          for an absent one. Neither absence is dressed up:
+                          an empty href resolves to the current page, so a
+                          reader clicking a credit is silently reloaded
+                          rather than sent to the source, and "published by
+                          ." asserts an attribution the payload does not
+                          carry.
                         */}
-                        {entry.url ? (
+                        {entry.url !== undefined ? (
                           <a href={entry.url}>{entry.name}</a>
                         ) : (
                           entry.name
                         )}
-                        {entry.publisher ? `, published by ${entry.publisher}` : ""}
+                        {entry.publisher !== undefined
+                          ? `, published by ${entry.publisher}`
+                          : ""}
                       </React.Fragment>
                     ))}
                     .

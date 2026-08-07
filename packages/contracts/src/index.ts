@@ -165,8 +165,15 @@ export interface PublishedDayProfile {
    * Every source whose evidence supports this profile, one entry each.
    * Statement-level provenance remains authoritative; this is the page-level
    * summary of it.
+   *
+   * `publisher` and `url` are absent, not `""`, when the source's publisher
+   * or canonical URL is not recorded. Both are nullable upstream, and a
+   * present-but-empty string would make "unknown" and "the empty string"
+   * the same payload -- unavailable data encoded as though it were present.
+   * `name` stays required: it is non-nullable upstream, so an empty name
+   * means the payload is corrupt, not that the source is unattributed.
    */
-  source_attributions?: Array<{ name: string; publisher: string; url: string }>;
+  source_attributions?: Array<{ name: string; publisher?: string; url?: string }>;
 }
 
 export interface ProfileNotPublished {

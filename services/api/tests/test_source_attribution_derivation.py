@@ -168,3 +168,57 @@ def test_a_lineage_ancestor_is_not_credited(session: Session) -> None:
         "a release the published one was derived from is credited as a source "
         "standing behind the page"
     )
+
+
+def test_an_unknown_publisher_or_url_is_omitted_not_emitted_empty(
+    session: Session,
+) -> None:
+    """Absence is expressed by omitting the key, not by the empty string.
+
+    `Source.publisher` and `Source.canonical_url` are both nullable. Coercing
+    a missing one to "" makes "unknown" and "the empty string" the same
+    payload, which is unavailable data encoded as a present value.
+    """
+    unattributed_source = Source(
+        slug="no-publisher-source",
+        name="An archive with no recorded publisher or URL",
+        publisher=None,
+        canonical_url=None,
+        legal_review_status=LegalReviewStatus.NOT_REQUIRED,
+    )
+    session.add(unattributed_source)
+    session.flush()
+    release = _release_for(session, unattributed_source, "v1")
+
+    claim = create_claim(
+        session,
+        source_release_id=release.id,
+        source_record_locator="record:unattributed",
+        claim_type="synthetic_assertion",
+        assertion_text="An assertion from an unattributed source.",
+    )
+    resolved = resolve_claim(
+        session,
+        canonical_key="test:attribution-unknown-publisher",
+        resolved_value={"statement": "The resolved value."},
+        rationale="Attribution omission test.",
+        supporting_claim_ids=[claim.id],
+    )
+
+    attributions = sources_supporting_evidence(
+        session,
+        [
+            PublicationStatementEvidenceInput(
+                statement_path="/sections/evidence_notes/0",
+                resolved_claim_id=resolved.id,
+            )
+        ],
+    )
+
+    entry = next(e for e in attributions if e["name"] == unattributed_source.name)
+    assert "publisher" not in entry, (
+        "an unknown publisher must be omitted, not encoded as an empty string"
+    )
+    assert "url" not in entry, (
+        "an unknown URL must be omitted, not encoded as an empty string"
+    )
