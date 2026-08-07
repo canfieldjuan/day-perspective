@@ -430,6 +430,16 @@ def ingest_usgs(
                 )
                 session.add(source)
                 session.flush()
+            else:
+                # Correct an already-ingested row, or a metadata fix never
+                # reaches the environments that matter: the row is created
+                # once and every later ingest finds it. #101 changed
+                # `canonical_url` and would have applied only to a database
+                # that had never ingested USGS. `un_wpp.py:524-530` already
+                # does this; the USGS path did not.
+                source.name = adapter.metadata.name
+                source.publisher = adapter.metadata.publisher
+                source.canonical_url = adapter.metadata.canonical_url
             existing_release = session.scalar(
                 select(SourceRelease).where(
                     SourceRelease.source_id == source.id,
