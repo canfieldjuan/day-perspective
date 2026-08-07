@@ -914,8 +914,19 @@ def test_completed_publication_survives_unrelated_commit_failure(
     )
     assert replacement_manifest is not None
     assert replacement_manifest.version == 2
-    # The artifact carries the derived publication tier alongside the
-    # caller's payload (D031), so the stored profile is the payload plus it.
+    # The artifact carries the derived publication tier and source
+    # attributions alongside the caller's payload (D031, #92): the spine
+    # derives both, so the stored profile is the payload plus them.
     assert store.read(
         replacement_manifest.storage_uri, replacement_manifest.content_hash
-    ) == {**replacement_payload, "publication_tier": "context_only"}
+    ) == {
+        **replacement_payload,
+        "publication_tier": "context_only",
+        "source_attributions": [
+            {
+                "name": "Synthetic source for tests",
+                "publisher": "Test suite",
+                "url": "https://example.invalid/test-source",
+            }
+        ],
+    }

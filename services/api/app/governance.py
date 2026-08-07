@@ -45,7 +45,7 @@ from app.models import (
     SourceLineage,
     SourceRelease,
 )
-from app.services import canonical_json_bytes
+from app.services import PublicationStatementEvidenceInput, canonical_json_bytes
 
 
 def _utcnow() -> datetime:
@@ -1289,6 +1289,99 @@ def events_by_source_release(
     for release_id in ambiguous:
         owners.pop(release_id, None)
     return owners
+
+
+def stamp_recorded_event_groups(
+    session: Session,
+    *,
+    statements: list[dict[str, Any]],
+    evidence: list[PublicationStatementEvidenceInput],
+    featured_event_id: UUID,
+    event_ids: Sequence[UUID],
+) -> list[dict[str, Any]]:
+    """Stamp each recorded statement with the event it describes (D047).
+
+    Shared by every publisher that mints ``recorded_on_this_date`` statements,
+    not specific to any one of them: a single-event golden profile passes one
+    ``featured_event_id`` in a one-element ``event_ids``, and a multi-event
+    Wikidata date passes its full admitted set. "One event is still an event"
+    -- publishing the same shape either way means a renderer never has to
+    branch on whether grouping is present.
+
+    Grouping stated rather than positional. A renderer that inferred groups from
+    array order would be guessing where one event ends, and the guess breaks as
+    soon as a date holds three events or one of them contributes a single
+    statement.
+
+    Attribution runs through source-release lineage, which every publisher has,
+    rather than identity or occurrence provenance, which only some statements
+    root on -- USGS publishes title, magnitude and depth through none of them.
+
+    The featured event is ``event_order`` 0 and leads; ``predicate_order`` runs
+    from 0 within each group, so a group stays ordered when rendered alone.
+    """
+    owners = events_by_source_release(session, event_ids=event_ids)
+    titles: dict[UUID, tuple[str, str]] = {}
+    for event_id in event_ids:
+        event = session.get(Event, event_id)
+        identity = (
+            None if event is None else session.get(ResolvedClaim, event.resolved_claim_id)
+        )
+        if event is None or identity is None:
+            continue
+        titles[event_id] = (
+            event_group_key(identity.canonical_key),
+            event.canonical_title,
+        )
+
+    attributed: list[UUID | None] = []
+    for item in evidence:
+        owner: UUID | None = None
+        if item.resolved_claim_id is not None:
+            resolved = session.get(ResolvedClaim, item.resolved_claim_id)
+            if resolved is not None:
+                claim = session.scalar(
+                    select(Claim)
+                    .join(
+                        ResolvedClaimEvidence,
+                        ResolvedClaimEvidence.claim_id == Claim.id,
+                    )
+                    .where(
+                        ResolvedClaimEvidence.resolved_claim_id == resolved.id,
+                        ResolvedClaimEvidence.stance == "supporting",
+                    )
+                    .order_by(Claim.id)
+                )
+                if claim is not None:
+                    owner = owners.get(claim.source_release_id)
+        attributed.append(owner)
+
+    ordering = [featured_event_id] + [
+        event_id for event_id in event_ids if event_id != featured_event_id
+    ]
+    event_order = {event_id: index for index, event_id in enumerate(ordering)}
+    predicate_counter: dict[UUID, int] = {}
+    grouped: list[dict[str, Any]] = []
+    for statement, owner in zip(statements, attributed, strict=True):
+        if owner is None or owner not in titles:
+            grouped.append(statement)
+            continue
+        key, title = titles[owner]
+        position = predicate_counter.get(owner, 0)
+        predicate_counter[owner] = position + 1
+        grouped.append(
+            {
+                **statement,
+                "event_group": {
+                    "event_group_key": key,
+                    "event_title": title,
+                    "featured": owner == featured_event_id,
+                    "event_order": event_order.get(owner, len(ordering)),
+                    "predicate_order": position,
+                },
+            }
+        )
+    return grouped
 
 
 def evaluate_featured_event(

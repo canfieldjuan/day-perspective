@@ -1599,17 +1599,19 @@ that flatters the most recent contributor.
 **Decision:** Every recorded statement carries typed `event_group` metadata, and
 a profile lists **every** source its evidence rests on.
 
-**Scope as implemented (do not read this entry as universal).** Only
-`publish_wikidata_event` stamps groups and derives `source_attributions`. The
-golden USGS publisher (`usgs.py:1305-1325`) still builds recorded statements
-without `event_group` and emits the singular `source_attribution`
-(`usgs.py:1390`); `publish_annual_context_profile` emits no attribution at all.
-Those paths are unchanged, not regressed — the renderer's flat fallback covers
-ungrouped sections by design, and the singular field still renders — but a
-profile minted by them does not yet satisfy the decision above. Making it
-universal belongs in the shared publication spine rather than repeated in three
-publishers, which is its own slice: issue #92. Until that lands, this entry
-describes the Wikidata path.
+**Scope as implemented.** #92 made this universal. `source_attributions` is now
+derived once in the shared publication spine (`publish_day_profile`) from the
+evidence being published, so every publisher gets it without opting in — the
+golden USGS publisher no longer emits the singular `source_attribution`, and
+`publish_context_profile` (UN WPP), which never publishes a recorded event,
+gets an honest attribution list for the sections it does publish. The golden
+publisher stamps `event_group` on its recorded statements through the same
+`stamp_recorded_event_groups` helper `publish_wikidata_event` uses, passing its
+one event as a one-element admitted set — D047's "one event is still an
+event" applies to it exactly as it does to a single-event Wikidata date. Left
+open: a recorded statement whose source release cannot be tied to exactly one
+event still renders the *whole* section flat rather than getting a residual
+group of its own (see #92's discussion for the two ways to close that gap).
 
 **Mechanism:** `event_group` carries `event_group_key`, `event_title`,
 `featured`, `event_order` and `predicate_order`. The key is a digest of the
