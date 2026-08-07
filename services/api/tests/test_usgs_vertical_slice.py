@@ -136,6 +136,24 @@ def test_fixture_ingestion_records_release_raw_record_claims_run_and_check(
     assert set(session.scalars(select(ReviewTask.status))) == {"open"}
 
 
+def test_source_canonical_url_is_a_page_a_reader_can_use(
+    session: Session, tmp_path: Path
+) -> None:
+    """#101: the page-level attribution credit must open a page, not the FDSN
+    web-service root the ingest pipeline itself calls to fetch records.
+
+    `source_attributions` (#92) reads this column directly, so whatever it
+    holds is what the "Publication integrity" credit links a reader to.
+    """
+    ingest(session, tmp_path)
+    source = session.scalar(
+        select(Source).where(Source.slug == USGSEarthquakeAdapter.metadata.slug)
+    )
+    assert source is not None
+    assert source.canonical_url == "https://earthquake.usgs.gov/earthquakes/"
+    assert "fdsnws" not in source.canonical_url
+
+
 def test_raw_checksum_is_stable_and_matches_committed_fixture(
     session: Session, tmp_path: Path
 ) -> None:

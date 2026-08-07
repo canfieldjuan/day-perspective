@@ -197,7 +197,11 @@ class USGSEarthquakeAdapter:
         slug=USGS_SOURCE_SLUG,
         name="USGS Earthquake Catalog",
         publisher="U.S. Geological Survey, Earthquake Hazards Program",
-        canonical_url="https://earthquake.usgs.gov/fdsnws/event/1/",
+        # A page a reader can open, not the FDSN web-service root this module
+        # itself calls to fetch records (#101). Page-level attribution names
+        # the source; the specific record stays reachable through
+        # per-statement provenance (`source_record_locator`), not this field.
+        canonical_url="https://earthquake.usgs.gov/earthquakes/",
         usage_notes=(
             "Official USGS public earthquake catalog data. Attribute the U.S. Geological "
             "Survey and retain the source record locator and retrieval metadata."
