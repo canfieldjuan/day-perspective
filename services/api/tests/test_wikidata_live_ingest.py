@@ -79,6 +79,7 @@ def entity_document(
     occurrence: str,
     precision: int = 11,
     label: str = "A synthetic recorded event",
+    optional_properties: bool = True,
 ) -> bytes:
     """A structurally faithful Wikidata entity document.
 
@@ -86,7 +87,31 @@ def entity_document(
     so a test can vary the entity and its date without shipping another fixture
     that could be mistaken for production data (§12).
     """
-    entity = {
+    claims: dict[str, Any] = {
+        "P31": [_snak("P31", {"entity-type": "item", "id": "Q7944"})],
+        "P585": [_time_statement(occurrence, precision)],
+        "P625": [
+            {
+                "mainsnak": {
+                    "snaktype": "value",
+                    "property": "P625",
+                    "datavalue": {
+                        "value": {
+                            "latitude": 1.5,
+                            "longitude": 2.5,
+                            "precision": 0.001,
+                            "globe": "http://www.wikidata.org/entity/Q2",
+                        },
+                        "type": "globecoordinate",
+                    },
+                    "datatype": "globe-coordinate",
+                },
+                "type": "statement",
+                "rank": "normal",
+            }
+        ],
+    }
+    entity: dict[str, Any] = {
         "type": "item",
         "id": entity_id,
         "pageid": 4242,
@@ -97,35 +122,17 @@ def entity_document(
         "labels": {"en": {"language": "en", "value": label}},
         "descriptions": {},
         "aliases": {"en": [{"language": "en", "value": f"{label} (alias)"}]},
-        "claims": {
-            "P31": [_snak("P31", {"entity-type": "item", "id": "Q7944"})],
-            "P585": [_time_statement(occurrence, precision)],
-            "P625": [
-                {
-                    "mainsnak": {
-                        "snaktype": "value",
-                        "property": "P625",
-                        "datavalue": {
-                            "value": {
-                                "latitude": 1.5,
-                                "longitude": 2.5,
-                                "precision": 0.001,
-                                "globe": "http://www.wikidata.org/entity/Q2",
-                            },
-                            "type": "globecoordinate",
-                        },
-                        "datatype": "globe-coordinate",
-                    },
-                    "type": "statement",
-                    "rank": "normal",
-                }
-            ],
-            "P2527": [_snak("P2527", {"amount": "+7.1", "unit": "1"}, "quantity")],
-            "P4511": [_snak("P4511", {"amount": "+10", "unit": "1"}, "quantity")],
-            "P1120": [_snak("P1120", {"amount": "+3", "unit": "1"}, "quantity")],
-        },
+        "claims": claims,
         "sitelinks": {},
     }
+    if optional_properties:
+        claims["P2527"] = [_snak("P2527", {"amount": "+7.1", "unit": "1"}, "quantity")]
+        claims["P4511"] = [_snak("P4511", {"amount": "+10", "unit": "1"}, "quantity")]
+        claims["P1120"] = [_snak("P1120", {"amount": "+3", "unit": "1"}, "quantity")]
+    else:
+        # An event that is not an earthquake has no magnitude, depth, fatality
+        # count, or necessarily a coordinate.
+        del claims["P625"]
     return json.dumps({"entities": {entity_id: entity}}).encode("utf-8")
 
 
@@ -371,3 +378,116 @@ def test_the_license_record_names_the_entity_it_covers(
     assert license_row is not None
     assert "Q108princ" in (license_row.attribution_text or "")
     assert "Q749610" not in (license_row.attribution_text or "")
+
+
+@pytest.mark.integration
+def test_an_event_without_earthquake_properties_can_be_ingested(
+    session: Session, tmp_path: Path
+) -> None:
+    """Most of the Golden-100 is not an earthquake.
+
+    The selection tags span conflicts, pandemics, cultural milestones and
+    births. `REQUIRED_EVENT_CLAIMS` asks only for identity, type, name and
+    date; magnitude, depth, fatalities and even coordinates are optional
+    downstream. Requiring them at ingest would restrict live enrichment to
+    earthquakes carrying a full measurement set.
+    """
+    payload = entity_document(
+        entity_id="Q108treaty",
+        revision_id=999010,
+        occurrence="1919-06-28",
+        optional_properties=False,
+    )
+
+    result = ingest_wikidata_entity(
+        session,
+        entity_id="Q108treaty",
+        revision_id=999010,
+        fetcher=RecordingFetcher(payload, 999010),
+        raw_store=LocalFilesystemRawSourceStore(tmp_path / "raw"),
+    )
+
+    assert result.source_release_id is not None
+    claim_types = {
+        claim.claim_type
+        for claim in session.scalars(
+            select(Claim).where(Claim.source_release_id == result.source_release_id)
+        )
+    }
+    for required in (
+        "candidate_event_identity",
+        "candidate_event_type",
+        "candidate_name",
+        "candidate_occurrence_date",
+    ):
+        assert required in claim_types
+    # Absent properties produce no claim rather than a null-valued one: the
+    # payload should not assert a magnitude the entity never stated.
+    assert "candidate_magnitude" not in claim_types
+    assert "candidate_coordinates" not in claim_types
+
+
+@pytest.mark.integration
+def test_a_timestamp_more_precise_than_a_day_is_accepted(
+    session: Session, tmp_path: Path
+) -> None:
+    """Second precision names an exact day; rejecting it refuses evidence.
+
+    The policy is to refuse dates we would have to *round*. A P585 recorded to
+    the second requires no rounding to place the event on a calendar day.
+    """
+    payload = entity_document(
+        entity_id="Q108precise",
+        revision_id=999011,
+        occurrence="1969-07-20",
+        precision=14,
+    )
+
+    result = ingest_wikidata_entity(
+        session,
+        entity_id="Q108precise",
+        revision_id=999011,
+        fetcher=RecordingFetcher(payload, 999011),
+        raw_store=LocalFilesystemRawSourceStore(tmp_path / "raw"),
+    )
+
+    claims = list(
+        session.scalars(
+            select(Claim).where(Claim.source_release_id == result.source_release_id)
+        )
+    )
+    assert claims
+    assert all(claim.temporal_start == date(1969, 7, 20) for claim in claims)
+
+
+@pytest.mark.integration
+def test_a_failed_live_fetch_still_leaves_an_audit_trail(
+    session: Session, tmp_path: Path
+) -> None:
+    """DNS, timeout and HTTP errors are the common live failures.
+
+    The CLI commits ingestion failures specifically so the failed run survives.
+    A fetch that raised before the run existed left nothing to commit, so the
+    most likely failure mode was the one with no record.
+    """
+
+    class FailingFetcher:
+        def fetch(self, entity_id: str, revision_id: int | None) -> tuple[bytes, int]:
+            raise TimeoutError("the network is down")
+
+    before = len(list(session.scalars(select(PipelineRun))))
+
+    with pytest.raises(TimeoutError):
+        ingest_wikidata_entity(
+            session,
+            entity_id="Q108princ",
+            revision_id=999012,
+            fetcher=FailingFetcher(),
+            raw_store=LocalFilesystemRawSourceStore(tmp_path / "raw"),
+        )
+
+    runs = list(session.scalars(select(PipelineRun)))
+    assert len(runs) == before + 1, "the failed fetch recorded no pipeline run"
+    run = runs[-1]
+    assert run.status == "failed"
+    assert "the network is down" in json.dumps(run.details)

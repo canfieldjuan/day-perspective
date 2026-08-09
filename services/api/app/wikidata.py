@@ -182,6 +182,18 @@ def _first(entity: dict[str, Any], property_id: str) -> dict[str, Any]:
     return statement
 
 
+def _optional(entity: dict[str, Any], property_id: str) -> dict[str, Any] | None:
+    """The first statement for a property, or None when the entity omits it."""
+    claims = entity.get("claims")
+    if not isinstance(claims, dict):
+        return None
+    statements = claims.get(property_id)
+    if not isinstance(statements, list) or not statements:
+        return None
+    first = statements[0]
+    return first if isinstance(first, dict) else None
+
+
 def _reference_count(statement: dict[str, Any]) -> int:
     references = statement.get("references")
     return len(references) if isinstance(references, list) else 0
@@ -233,11 +245,7 @@ def _parse(
     time_value = _value(time_statement)
     if not isinstance(time_value, dict):
         raise ValueError("Wikidata point-in-time value is malformed.")
-    coordinates_statement = _first(entity, "P625")
-    coordinate_value = _value(coordinates_statement)
-    if not isinstance(coordinate_value, dict):
-        raise ValueError("Wikidata coordinate value is malformed.")
-    candidates = (
+    candidates: list[dict[str, Any]] = list((
         {
             "predicate": "candidate_event_identity",
             "value": {
@@ -269,28 +277,30 @@ def _parse(
             "value": time_value,
             "references": _reference_count(time_statement),
         },
-        {
-            "predicate": "candidate_coordinates",
-            "value": coordinate_value,
-            "references": _reference_count(coordinates_statement),
-        },
-        {
-            "predicate": "candidate_magnitude",
-            "value": _value(_first(entity, "P2527")),
-            "references": _reference_count(_first(entity, "P2527")),
-        },
-        {
-            "predicate": "candidate_depth",
-            "value": _value(_first(entity, "P4511")),
-            "references": _reference_count(_first(entity, "P4511")),
-        },
-        {
-            "predicate": "candidate_fatalities",
-            "value": _value(_first(entity, "P1120")),
-            "references": _reference_count(_first(entity, "P1120")),
-        },
-    )
-    return entity, candidates
+    ))
+    # Coordinates, magnitude, depth and fatalities describe an earthquake. Most
+    # of the Golden-100 is not one -- the selection tags span conflicts,
+    # pandemics, cultural milestones and births -- and REQUIRED_EVENT_CLAIMS
+    # asks only for identity, type, name and date. An absent property yields no
+    # candidate at all rather than a null-valued one, so the payload never
+    # asserts a magnitude the entity did not state.
+    for predicate, property_id in (
+        ("candidate_coordinates", "P625"),
+        ("candidate_magnitude", "P2527"),
+        ("candidate_depth", "P4511"),
+        ("candidate_fatalities", "P1120"),
+    ):
+        statement = _optional(entity, property_id)
+        if statement is None:
+            continue
+        candidates.append(
+            {
+                "predicate": predicate,
+                "value": _value(statement),
+                "references": _reference_count(statement),
+            }
+        )
+    return entity, tuple(candidates)
 
 
 def _license(
@@ -361,7 +371,53 @@ def ingest_wikidata_entity(
     never left as an unrecorded moving target, because a release nobody can
     reproduce is not provenance.
     """
-    payload, served_revision = fetcher.fetch(entity_id, revision_id)
+    # The run is created before the fetch, not after. DNS failures, timeouts and
+    # HTTP errors are the most likely way a live ingest fails, and the CLI
+    # commits ingestion failures specifically so the failed run survives -- but
+    # a fetch that raised before the run existed left nothing to commit, so the
+    # commonest failure was the one with no audit trail.
+    fetch_run = PipelineRun(
+        pipeline_name="wikidata-candidate-adapter",
+        code_version="0.4.0",
+        configuration_hash=content_hash(
+            {
+                "entity": entity_id,
+                "revision": revision_id,
+                "fixture": False,
+                "dry_run": dry_run,
+                "stage": "fetch",
+            }
+        ),
+        status="running",
+        details={"mode": "live", "dry_run": dry_run, "stage": "fetch"},
+    )
+    session.add(fetch_run)
+    session.flush()
+    try:
+        payload, served_revision = fetcher.fetch(entity_id, revision_id)
+    except Exception as error:
+        fetch_run.status = "failed"
+        fetch_run.completed_at = datetime.now(UTC)
+        fetch_run.details = {
+            **fetch_run.details,
+            "error": f"{type(error).__name__}: {error}",
+        }
+        session.add(
+            QualityCheck(
+                pipeline_run_id=fetch_run.id,
+                check_name=_schema_check_name(entity_id),
+                status="failed",
+                subject_type="pipeline_run",
+                subject_id=fetch_run.id,
+                details={"stage": "fetch", "error": str(error)},
+            )
+        )
+        session.flush()
+        raise
+    fetch_run.status = "succeeded"
+    fetch_run.completed_at = datetime.now(UTC)
+    fetch_run.details = {**fetch_run.details, "revision_served": served_revision}
+    session.flush()
     return _ingest_entity_payload(
         session,
         payload=payload,
@@ -731,9 +787,15 @@ def _parse_occurrence_date(value: dict[str, Any]) -> date:
     any entity.
     """
     time_text = value.get("time")
-    if not isinstance(time_text, str) or value.get("precision") != 11:
+    precision = value.get("precision")
+    if not isinstance(time_text, str) or not isinstance(precision, int):
+        raise ValueError("Wikidata occurrence date is malformed.")
+    if precision < 11:
+        # Coarser than a day cannot place an event on a date. Finer than a day
+        # -- hour, minute, second -- names one exactly, and refusing it would
+        # discard evidence we do not have to round.
         raise ValueError(
-            "Wikidata occurrence date is not day-precise (expected P585 precision 11)."
+            "Wikidata occurrence date is not day-precise (expected P585 precision 11 or finer)."
         )
     return date.fromisoformat(time_text.lstrip("+")[:10])
 
