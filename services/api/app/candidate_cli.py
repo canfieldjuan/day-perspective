@@ -11,8 +11,10 @@ from app.database import SessionLocal
 from app.governance import IdentityAdjudicationDecision
 from app.services import LocalFilesystemPublishedProfileStore
 from app.wikidata import (
+    HttpWikidataEntityFetcher,
     attempt_wikidata_enrichment,
     ingest_wikidata_candidate,
+    ingest_wikidata_entity,
     publish_wikidata_event,
     resolve_merge_review,
     resolve_wikidata_event,
@@ -20,12 +22,28 @@ from app.wikidata import (
 
 
 def _ingest(args: argparse.Namespace, settings: Any, session: Any) -> str:
-    result = ingest_wikidata_candidate(
-        session,
-        fixture_path=args.fixture,
-        raw_store=LocalFilesystemRawSourceStore(settings.raw_source_root),
-        dry_run=args.dry_run,
-    )
+    raw_store = LocalFilesystemRawSourceStore(settings.raw_source_root)
+    if getattr(args, "entity", None):
+        result = ingest_wikidata_entity(
+            session,
+            entity_id=args.entity,
+            revision_id=args.revision,
+            fetcher=HttpWikidataEntityFetcher(),
+            raw_store=raw_store,
+            dry_run=args.dry_run,
+        )
+    else:
+        if args.revision is not None:
+            raise SystemExit(
+                "--revision applies to a live --entity fetch; the fixture "
+                "carries its own pinned revision."
+            )
+        result = ingest_wikidata_candidate(
+            session,
+            fixture_path=args.fixture,
+            raw_store=raw_store,
+            dry_run=args.dry_run,
+        )
     return (
         f"source_release_id={result.source_release_id} "
         f"claims={len(result.claim_ids)} idempotent={result.idempotent} "
@@ -94,9 +112,26 @@ def main() -> None:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     ingest = subparsers.add_parser(
-        "ingest", help="Ingest the pinned Wikidata candidate fixture."
+        "ingest",
+        help=(
+            "Ingest a Wikidata candidate: --fixture for the pinned offline "
+            "entity, or --entity to fetch one live."
+        ),
     )
-    ingest.add_argument("--fixture", type=Path, required=True)
+    source = ingest.add_mutually_exclusive_group(required=True)
+    source.add_argument("--fixture", type=Path)
+    source.add_argument(
+        "--entity",
+        help="Wikidata entity id to fetch live, e.g. Q749610.",
+    )
+    ingest.add_argument(
+        "--revision",
+        type=int,
+        help=(
+            "Pin a specific revision. Omitted, the served entity's own "
+            "lastrevid is recorded, so the release stays reproducible."
+        ),
+    )
     ingest.add_argument("--dry-run", action="store_true")
     # Ingestion writes a failed-run audit trail that must survive an error.
     ingest.set_defaults(handler=_ingest, commit_on_error=True)
