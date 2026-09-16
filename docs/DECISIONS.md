@@ -1775,24 +1775,30 @@ Three cases D013 never addressed, because one event never raised them:
 - A source that states a **calendar day** states it in some convention, and the
   adapter must establish which. A convention fixes two separate things — the
   **calendar system** that names the day, and the **meridian** at which the day
-  begins — and they behave oppositely, which an earlier revision of this entry
-  got wrong by generalizing both as "another convention".
+  begins — and neither is presumed.
 
-  A day already stated as the conventional local civil day is taken as reported
-  and never re-derived. Where only the **calendar system** differs, the day is
-  **restated exactly** on the Gregorian axis: a Julian civil date names the same
-  local civil day under a different calendar, so converting it renames a day
-  rather than choosing between days and invents no precision. The record carries
-  the source's calendar system and the fact that the day was restated.
+  The rule is a **test, not a list of conventions**: a stated day yields a
+  date-specific event only where its convention, *applied at the place of
+  occurrence*, makes it denote **exactly one local civil day**. A local day
+  denotes itself. A Julian civil date denotes the same day under another name, so
+  restating it on the Gregorian axis invents no precision. A UTC day denotes a
+  twenty-four hour interval that may or may not coincide with a local civil day —
+  where it coincides it denotes that day, and where it straddles two, choosing one
+  would invent precision the source never stated. An unestablished convention
+  denotes nothing determinate.
 
-  Where the **meridian** differs, the day is **not convertible**: a UTC calendar
-  day is a twenty-four hour interval that at any nonzero local offset falls
-  across two local civil days, so choosing one would invent precision the source
-  never stated — the very thing this contract exists to forbid. Such a day yields
-  a date-specific event only where further evidence resolves the interval to a
-  single local day. Without this case the invariant and the never-re-derive rule
-  contradict each other for any source that dates by UTC day, and the same event
-  could still reach two different profiles.
+  Arriving at a test took four review rounds, and the route is the lesson.
+  Successive revisions enumerated conventions and were each found incomplete: one
+  generalized every non-local convention as non-convertible, which is false of a
+  calendar system; the next refused every UTC day, which is false where the place
+  sits at zero offset for that whole day. An enumeration of cases is open by
+  construction, and a binding document written as one acquires a new wrong clause
+  per case nobody thought of. The criterion is closed, and each case above is an
+  illustration of it rather than a rule of its own.
+
+  Without this case the invariant and the never-re-derive rule contradict each
+  other for any source that dates by UTC day, and the same event could still
+  reach two different profiles.
 
   The distinction is not hypothetical inside the supported range. The shell opens
   at 1900-01-01 (`docs/PRODUCT_CONTRACT.md:25`), and Russia used the Julian
@@ -1818,18 +1824,28 @@ cross-publisher invariant: the same instant and place resolve to the same
 rule, so that slice generalizes the correct implementation rather than inventing
 one.
 
-D013's five fields are the record of a **derivation**, and only a derived day has
-one. They are populated where a day is derived from an instant, not wherever a
-day is filed. A reported local day states no instant, so `exact_timestamp` is
-absent, and `utc_offset_minutes` — "instant-specific" in D013's own words — has
-no value to take: a local civil day spanning a clock transition has two offsets,
-and choosing one would invent exactly the precision this entry forbids. All five
-are already nullable (`models.py:462-466`) and `main`'s reported-day Wikidata
-path populates none of them (`wikidata.py:761-771`), so the honest encoding
-exists and is in use. What A2 adds is `temporal_assignment` telling the two
-cases apart, so that absence reads as "nothing was derived" rather than as
-missing data. Defining the reported-day representation is A2's work; it may not
-be defined by filling these fields with values no source stated.
+Reported and derived are recorded **per field, not as one verdict on the record**
+— the second thing successive revisions of this entry got wrong, in opposite
+directions. One required all five of D013's fields wherever a day was filed,
+which forces a reported day to invent an instant. Its correction tied all five to
+"the day was derived", which discards an instant a source stated outright
+whenever that source also states its local day.
+
+Each field answers its own question. `exact_timestamp` records **what the source
+stated**: present when an instant was stated, whether or not the day was also
+stated, and absent otherwise. `timezone_name` and `utc_offset_minutes` record
+**how a day was derived**: present only where an instant was resolved to a day,
+because an offset is "instant-specific" in D013's own words and a local civil day
+spanning a clock transition has two. So a source stating both a local day and an
+instant yields a **reported** day alongside a **preserved** instant — neither
+re-derived nor discarded.
+
+All five are already nullable (`models.py:462-466`) and `main`'s reported-day
+Wikidata path populates none of them (`wikidata.py:761-771`), so the honest
+encoding exists and is in use. What A2 adds is recording *which* question each
+populated field answers, so that absence reads as "this was not stated and not
+derived" rather than as missing data. A2 may not satisfy this by filling any
+field with a value no source stated and no derivation produced.
 
 **Alternatives considered:** **UTC always** — this reverses D013, and is wrong in
 the way that matters: every reference work dates the 1964 Alaska earthquake to

@@ -62,34 +62,40 @@ publication date is not automatically an occurrence date.
 An event is filed under the conventional local civil day at its place of
 occurrence.
 
-A source that states a calendar day states it in some convention, and the adapter
-for that source must establish which. A convention fixes two separate things: the
-calendar system that names the day, and the meridian at which the day begins.
-They do not behave alike.
+A source states its days in some convention, and the adapter for that source must
+establish which. A convention fixes both the calendar system that names a day and
+the meridian at which a day begins; neither is presumed.
 
-A day already stated as the conventional local civil day is taken as reported and
-is never re-derived. Where only the calendar system differs — a Julian civil date
-from a jurisdiction that had not yet adopted the Gregorian calendar, for instance
-— the day is restated on the product's Gregorian axis, and the published record
-carries the source's calendar system and the fact that the day was restated. That
-correspondence is exact: it renames the same local civil day rather than choosing
-between days, so it invents no precision.
+A stated day yields a date-specific event only where that convention, applied at
+the place of occurrence, makes the day denote exactly one local civil day. This
+test is what every case turns on, rather than the name of the convention:
 
-A day whose meridian differs — a UTC calendar day, for instance — denotes a
-twenty-four hour interval that at any nonzero local offset falls across two local
-civil days. It does not by itself place the event on either, and choosing one
-would invent precision the source never stated. Such a day yields a date-specific
-event only where further evidence — an instant, or the source's own statement of
-the local day — resolves the interval to a single local day.
+- A day already stated as the conventional local civil day denotes itself. It is
+  taken as reported and is never re-derived.
+- A day differing only by calendar system — a Julian civil date from a
+  jurisdiction that had not yet adopted the Gregorian calendar — denotes the same
+  local civil day under another name. Restating it on the Gregorian axis invents
+  no precision, and the published record carries the source's calendar system and
+  the fact that the day was restated.
+- A day whose meridian differs — a UTC calendar day — denotes a twenty-four hour
+  interval that need not coincide with a local civil day. Where the interval does
+  coincide, it denotes that day. Where it straddles two, choosing one would invent
+  precision the source never stated, and it yields no date-specific event unless
+  other evidence — an instant, or the source's own statement of the local day —
+  resolves it to one.
+- A day whose convention is not established denotes nothing determinate, and
+  yields no date-specific event.
 
-A source whose convention is not established does not yield a date-specific
-event.
+A source that states an instant has not thereby stated a day. Where a day is
+derived from an instant, the published record carries the timezone applied and
+the resulting offset. An instant whose place of occurrence is unknown yields no
+date-specific event, because the product does not assign a day by choosing a
+meridian.
 
-A source that states an instant has not stated a date. The day is derived, and
-the published record carries the timezone applied, the resulting offset, and the
-fact that the day was derived rather than reported. An instant whose place of
-occurrence is unknown is not published as a date-specific event, because the
-product does not assign a day by choosing a meridian.
+The record distinguishes what a source stated from what the product derived,
+field by field rather than as a single verdict. A source may state both a local
+civil day and an instant; the day is then reported and the instant is preserved
+as stated, neither re-derived nor discarded.
 
 A daily equivalent is a derived value. It shows its source period, allocation
 method, denominator, coverage, methodology, and comparability status. Missing
