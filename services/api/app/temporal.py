@@ -44,6 +44,28 @@ class Meridian(str, Enum):
 
 
 @dataclass(frozen=True)
+class CivilDate:
+    """A day as a source stated it, in whatever calendar the source uses.
+
+    `datetime.date` is a Gregorian type and rejects a triple that is not a
+    Gregorian date, so it cannot carry every day a source may legitimately
+    state. Julian 1900-02-29 is the plain case: 1900 is a leap year in the
+    Julian calendar and not in the Gregorian, the date is real, it maps to
+    Gregorian 1900-03-13 inside the supported range, and `date(1900, 2, 29)`
+    raises. Whether a triple is a date at all depends on the calendar, so the
+    stated day is carried calendar-neutral and validated against the stated
+    convention rather than against Gregorian rules it does not follow.
+
+    `ResolvedDay.profile_date` stays a `date`, because the product's axis is
+    Gregorian by definition; only the *stated* day needs this.
+    """
+
+    year: int
+    month: int
+    day: int
+
+
+@dataclass(frozen=True)
 class DayConvention:
     """How a source states its days.
 
@@ -66,6 +88,7 @@ class ResolvedDay:
     timezone_name: str | None = None
     utc_offset_minutes: int | None = None
     source_calendar: CalendarSystem | None = None
+    source_meridian: Meridian | None = None
 
 
 class UnresolvedDay(ValueError):
@@ -93,7 +116,51 @@ def _zone(timezone_name: str | None) -> ZoneInfo | None:
         ) from error
 
 
-def _julian_to_gregorian(day: date) -> date:
+def _as_civil(day: date | CivilDate) -> CivilDate:
+    """A stated day as a calendar-neutral triple, whichever way it was given."""
+    if isinstance(day, CivilDate):
+        return day
+    return CivilDate(day.year, day.month, day.day)
+
+
+def _is_julian_date(stated: CivilDate) -> bool:
+    """Whether a triple is a real date in the Julian calendar.
+
+    Identical to the Gregorian rules except for the leap year: Julian leaps
+    every fourth year with no century exception, so 1900-02-29 is a date here
+    and is not one on the Gregorian axis.
+    """
+    if not 1 <= stated.month <= 12 or stated.day < 1:
+        return False
+    lengths = (31, 29 if stated.year % 4 == 0 else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31)
+    return stated.day <= lengths[stated.month - 1]
+
+
+def _stated_as_gregorian(stated: CivilDate, calendar: CalendarSystem) -> date:
+    """The stated day on the product's Gregorian axis, or a refusal.
+
+    Restating a Julian date renames the same local civil day rather than
+    choosing between days, so it invents no precision.
+    """
+    if calendar is CalendarSystem.JULIAN:
+        if not _is_julian_date(stated):
+            raise UnresolvedDay(
+                f"{stated.year:04d}-{stated.month:02d}-{stated.day:02d} is not "
+                "a date in the Julian calendar the source states, so it "
+                "denotes no day at all."
+            )
+        return _julian_to_gregorian(stated)
+    try:
+        return date(stated.year, stated.month, stated.day)
+    except ValueError as error:
+        raise UnresolvedDay(
+            f"{stated.year:04d}-{stated.month:02d}-{stated.day:02d} is not a "
+            "date in the Gregorian calendar the source states, so it denotes "
+            "no day at all."
+        ) from error
+
+
+def _julian_to_gregorian(day: CivilDate) -> date:
     """Restate a Julian civil date on the Gregorian axis, exactly.
 
     The two calendars name the same local civil day differently, so this
@@ -194,17 +261,20 @@ def _resolve_instant(instant: datetime, zone: ZoneInfo, timezone_name: str) -> R
 
 def resolve_day(
     *,
-    stated_day: date | None = None,
-    stated_day_end: date | None = None,
+    stated_day: date | CivilDate | None = None,
+    stated_day_end: date | CivilDate | None = None,
     convention: DayConvention | None = None,
     instant: datetime | None = None,
     timezone_name: str | None = None,
 ) -> ResolvedDay:
     """Resolve what a source stated to exactly one local civil day, or refuse.
 
-    `stated_day` is a day the source stated, in `convention`. `instant` is an
-    instant the source stated. Either may be given, or both. `timezone_name` is
-    the IANA zone at the place of occurrence.
+    `stated_day` is a day the source stated, in `convention`. A Gregorian day
+    may be given as a plain `date`; a day in another calendar needs
+    `CivilDate`, because `date` validates its argument as Gregorian and so
+    cannot carry every day a source may legitimately state. `instant` is an
+    instant the source stated. Either may be given, or both. `timezone_name`
+    is the IANA zone at the place of occurrence.
 
     Raises `UnresolvedDay` whenever the evidence does not denote exactly one
     local civil day, which is the contract's fail-closed default rather than an
@@ -216,7 +286,9 @@ def resolve_day(
             "day follows from it."
         )
 
-    if stated_day_end is not None and stated_day_end != stated_day:
+    if stated_day_end is not None and (
+        stated_day is None or _as_civil(stated_day_end) != _as_civil(stated_day)
+    ):
         raise UnresolvedDay(
             f"The source states an interval ({stated_day} to {stated_day_end}), "
             "not a day. Which profile or profiles an occurrence interval "
@@ -246,11 +318,9 @@ def resolve_day(
             "denotes nothing determinate and yields no date-specific event."
         )
 
-    restated: date | None = None
-    day = stated_day
-    if convention.calendar is CalendarSystem.JULIAN:
-        restated = _julian_to_gregorian(stated_day)
-        day = restated
+    stated = _as_civil(stated_day)
+    day = _stated_as_gregorian(stated, convention.calendar)
+    restated = convention.calendar is not CalendarSystem.GREGORIAN
 
     if convention.meridian is Meridian.UTC:
         if zone is None or timezone_name is None:
@@ -281,24 +351,35 @@ def resolve_day(
                 )
             return _resolve_instant(instant, zone, timezone_name)
 
-    if restated is not None:
-        interpretation = (
-            f"The source states {stated_day.isoformat()} in the Julian calendar, "
-            f"restated as {day.isoformat()} on the Gregorian axis. The two name "
-            "the same local civil day, so the day is reported, not derived."
+    # The interpretation is published provenance, so it states what the source
+    # actually said on BOTH axes. Describing a stated UTC day as a stated local
+    # civil day would be a false claim in the one field a reader consults to
+    # check the assignment, and no other field retains the meridian.
+    stated_text = f"{stated.year:04d}-{stated.month:02d}-{stated.day:02d}"
+    if convention.meridian is Meridian.UTC:
+        said = f"{stated_text} as a UTC calendar day"
+        because = (
+            f"Every instant of that day falls on local {day.isoformat()} in "
+            f"{timezone_name}, so it denotes that day and nothing is invented "
+            "by filing it there."
         )
     else:
-        interpretation = (
-            f"The source states {day.isoformat()} as its local civil day. Taken "
-            "as reported and not re-derived."
+        said = f"{stated_text} as its local civil day"
+        because = "Taken as reported and not re-derived."
+    if restated:
+        said += f" in the {convention.calendar.value.capitalize()} calendar"
+        because = (
+            f"Restated as {day.isoformat()} on the Gregorian axis, which names "
+            f"the same local civil day under another calendar. {because}"
         )
 
     return ResolvedDay(
         profile_date=day,
         temporal_assignment=TemporalAssignment.REPORTED,
         exact_timestamp=instant,
-        interpretation=interpretation,
-        source_calendar=(
-            convention.calendar if convention.calendar is not CalendarSystem.GREGORIAN else None
+        interpretation=f"The source states {said}. {because}",
+        source_calendar=convention.calendar if restated else None,
+        source_meridian=(
+            convention.meridian if convention.meridian is not Meridian.LOCAL_CIVIL else None
         ),
     )

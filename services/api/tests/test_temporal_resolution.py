@@ -18,6 +18,7 @@ import pytest
 from app.models import TemporalAssignment
 from app.temporal import (
     CalendarSystem,
+    CivilDate,
     DayConvention,
     Meridian,
     UnresolvedDay,
@@ -243,6 +244,89 @@ class TestAnInstantResolvesAStraddlingUtcDay:
                 convention=GREGORIAN_UTC,
                 timezone_name="America/Anchorage",
             )
+
+
+class TestAJulianDateIsNotAGregorianDate:
+    """`datetime.date` is a Gregorian type, so it cannot carry every Julian
+    date. A calendar-neutral `CivilDate` can, validated per convention."""
+
+    def test_a_julian_only_date_can_be_expressed_and_resolved(self) -> None:
+        """1900 is a leap year in the Julian calendar and not in the Gregorian.
+
+        So Julian 1900-02-29 exists, `date(1900, 2, 29)` raises, and the day
+        maps to Gregorian 1900-03-13 -- inside the supported range. Carrying a
+        stated Julian day in a Gregorian type makes that date unexpressible.
+        """
+        resolved = resolve_day(
+            stated_day=CivilDate(1900, 2, 29), convention=JULIAN_LOCAL
+        )
+        assert resolved.profile_date == date(1900, 3, 13)
+
+    def test_a_gregorian_date_is_still_accepted_directly(self) -> None:
+        """The common case stays a plain `date`; nothing has to be wrapped."""
+        resolved = resolve_day(
+            stated_day=date(1964, 3, 27), convention=GREGORIAN_LOCAL
+        )
+        assert resolved.profile_date == date(1964, 3, 27)
+
+    def test_a_date_impossible_in_the_stated_calendar_is_refused(self) -> None:
+        """Julian February never has 30 days."""
+        with pytest.raises(UnresolvedDay):
+            resolve_day(
+                stated_day=CivilDate(1900, 2, 30), convention=JULIAN_LOCAL
+            )
+
+    def test_a_julian_only_date_declared_gregorian_is_refused(self) -> None:
+        """The same triple is valid Julian and invalid Gregorian, so the
+        convention decides whether it is a date at all."""
+        with pytest.raises(UnresolvedDay):
+            resolve_day(
+                stated_day=CivilDate(1900, 2, 29), convention=GREGORIAN_LOCAL
+            )
+
+
+class TestTheInterpretationStatesWhatTheSourceActuallySaid:
+    """Provenance text is published, so it may not describe a stated UTC day
+    as a stated local civil day."""
+
+    def test_a_utc_day_is_not_described_as_a_local_civil_day(self) -> None:
+        resolved = resolve_day(
+            stated_day=date(1964, 1, 15),
+            convention=GREGORIAN_UTC,
+            timezone_name="Europe/London",
+        )
+        assert "UTC" in resolved.interpretation
+        assert "as its local civil day" not in resolved.interpretation
+
+    def test_the_stated_meridian_is_recorded(self) -> None:
+        """Nothing else on the result retains it, so it would be lost."""
+        resolved = resolve_day(
+            stated_day=date(1964, 1, 15),
+            convention=GREGORIAN_UTC,
+            timezone_name="Europe/London",
+        )
+        assert resolved.source_meridian is Meridian.UTC
+
+    def test_a_local_day_records_no_meridian_restatement(self) -> None:
+        resolved = resolve_day(
+            stated_day=date(1964, 3, 27), convention=GREGORIAN_LOCAL
+        )
+        assert resolved.source_meridian is None
+
+    def test_julian_and_utc_together_both_appear(self) -> None:
+        """Both axes moved, so the record has to say both."""
+        resolved = resolve_day(
+            stated_day=CivilDate(1964, 1, 2),
+            convention=DayConvention(
+                calendar=CalendarSystem.JULIAN, meridian=Meridian.UTC
+            ),
+            timezone_name="Europe/London",
+        )
+        assert resolved.profile_date == date(1964, 1, 15)
+        assert "Julian" in resolved.interpretation
+        assert "UTC" in resolved.interpretation
+        assert resolved.source_calendar is CalendarSystem.JULIAN
+        assert resolved.source_meridian is Meridian.UTC
 
 
 class TestUnestablishedConventionDenotesNothing:
