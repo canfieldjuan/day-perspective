@@ -1734,21 +1734,27 @@ decision's mechanism, field for field, and `usgs.py:243-247` implements it —
 converting through `ZoneInfo("America/Anchorage")` and recording the rule in its
 methodology (`usgs.py:315`). `GOLDEN_DATE` is `1964-03-27`, that local date.
 
-The Wikidata publisher does not implement it. It derives the day from the first
-ten characters of the P585 timestamp: at day precision that is the day the source
-stated, but for an instant it is the **UTC** day, chosen implicitly and disclosed
-nowhere. It then stamps `temporal_precision = DAY` with
-`temporal_assignment = REPORTED` — asserting the source reported a day when it may
-have reported an instant — and populates none of D013's five fields, so the
-assignment cannot afterwards be audited or corrected.
+Nothing diverges today. The Wikidata path **refuses** any P585 that is not
+exactly day-precise (`wikidata.py:576`), so it only ever files a day the source
+itself stated. `DAY`/`REPORTED` is accurate for that, and D013's five fields are
+correctly empty because nothing was derived. It refuses what it cannot honestly
+file.
 
-So this is not an undecided question. It is a decided one that a second publisher
-was written without implementing, and the reason that was possible is structural:
+The gap is what happens when that changes. #107, open now, relaxes the check to
+accept sub-day precision and derives the day as the **UTC** calendar day of the
+instant — implicitly, disclosed nowhere, still stamped `DAY`/`REPORTED`, still
+populating none of the five fields. Its reviewer caught it. That a careful
+implementation walked straight into it is the point: nothing binding objected,
+because the rule was precedent rather than contract.
+
+So this is not an undecided question, and on `main` it is not yet a divergence
+either. It is a decided rule that never became enforceable, which is why the
+first change reaching for sub-day support chose a different one unopposed.
 **D013 lived only in the decision log.** `docs/PRODUCT_CONTRACT.md` is what binds
 (§2). It required date role, precision and assignment, and already separated a
 reporting date from an occurrence date — but never said which calendar day an
 occurrence falls under. A rule recorded only as precedent does not bind the next
-publisher, and this one was not bound by it.
+publisher.
 
 D013's revisit trigger — "events require disputed or jurisdiction-specific
 calendar assignment" — has not fired. Nothing here disputes D013; this promotes it.
@@ -1757,11 +1763,18 @@ calendar assignment" — has not fired. Nothing here disputes D013; this promote
 was decided for: **an event is filed under the conventional local civil day at
 its place of occurrence.**
 
-Two cases D013 never addressed, because one event never raised them:
+Three cases D013 never addressed, because one event never raised them:
 
-- A source that states a **calendar day** has stated the date. It is taken as
-  reported and never re-derived — evidence about the date, not an input to a
-  calculation.
+- A source that states a **calendar day** states it in some convention, and the
+  adapter must establish which. A day already stated as the conventional local
+  civil day is taken as reported and never re-derived. A day stated in another
+  convention is converted at ingest and the conversion recorded — a day restated
+  in a different convention is derived, not reported. Without this the invariant
+  and the never-re-derive rule contradict each other for any source that dates by
+  UTC day, and the same event could still reach two different profiles, which is
+  the divergence this exists to prevent.
+- A source whose **day convention cannot be established** does not yield a
+  date-specific event.
 - An instant whose **place of occurrence is unknown** is refused for
   date-specific publication. The product does not assign a day by choosing a
   meridian.
@@ -1781,14 +1794,20 @@ contradicts them in order to privilege an arbitrary meridian. **A per-entity
 rule** (local where coordinates exist, UTC otherwise) — most faithful record by
 record, but it produces an archive whose dating rule a reader cannot state, and
 makes two dates incomparable without inspecting each one's provenance. **Leaving
-D013 as precedent and fixing the Wikidata path alone** — the symptom fix. The
-next publisher would be free to diverge again for exactly the reason this one
-did, because nothing binding would have changed.
+D013 as precedent and correcting #107 alone** — the symptom fix. The next change
+reaching for a day assignment would be free to choose differently for exactly the
+reason that one did, because nothing binding would have changed.
 
-**Consequences:** Sub-day P585 precision cannot be accepted honestly until the
-resolver exists, so #107 lands without it and gains it in A2 — rather than
-shipping a narrowing that would immediately be widened again. G4 (#97) does not
-start until A2 merges: the live run writes permanent records into an append-only
-archive that is corrected forward, and eight of the hundred golden records carry
-the `timezone_boundary` selection tag, so the run would near certainly meet this
-case.
+**Consequences:** This is preventive rather than remedial. `main` publishes no
+wrong dates today, and closing the gap before sub-day support lands is cheaper
+than correcting an append-only archive afterwards.
+
+#107 must satisfy the rule before it can accept sub-day precision. Deriving a day
+from an instant requires a timezone, and nothing in the tree derives one from
+coordinates, so sub-day support arrives with that capability rather than ahead of
+it — and until then a Wikidata entity whose P585 carries a timestamp rather than
+a day is refused, by the rule rather than by an arbitrary narrowing.
+
+G4 (#97) does not start until the shared resolver (A2) merges: the live run
+writes permanent records, and eight of the hundred golden records carry the
+`timezone_boundary` selection tag.

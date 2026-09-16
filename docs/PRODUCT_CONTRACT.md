@@ -60,13 +60,21 @@ temporal precision, temporal assignment, and date role. A reporting or
 publication date is not automatically an occurrence date.
 
 An event is filed under the conventional local civil day at its place of
-occurrence. A source that states a calendar day has stated the date: that day is
-taken as reported and is never re-derived. A source that states an instant has
-not stated a date: the day is derived, and the published record carries the
-timezone applied, the resulting offset, and the fact that the day was derived
-rather than reported. An instant whose place of occurrence is unknown is not
-published as a date-specific event, because the product does not assign a day by
-choosing a meridian.
+occurrence.
+
+A source that states a calendar day states it in some convention, and the
+adapter for that source must establish which. A day already stated as the
+conventional local civil day is taken as reported and is never re-derived. A day
+stated in another convention — a UTC calendar day, for instance — is converted at
+ingest and the conversion is recorded, because a day restated in a different
+convention is derived rather than reported. A source whose convention is not
+established does not yield a date-specific event.
+
+A source that states an instant has not stated a date. The day is derived, and
+the published record carries the timezone applied, the resulting offset, and the
+fact that the day was derived rather than reported. An instant whose place of
+occurrence is unknown is not published as a date-specific event, because the
+product does not assign a day by choosing a meridian.
 
 A daily equivalent is a derived value. It shows its source period, allocation
 method, denominator, coverage, methodology, and comparability status. Missing
