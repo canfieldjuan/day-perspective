@@ -1734,11 +1734,18 @@ decision's mechanism, field for field, and `usgs.py:243-247` implements it —
 converting through `ZoneInfo("America/Anchorage")` and recording the rule in its
 methodology (`usgs.py:315`). `GOLDEN_DATE` is `1964-03-27`, that local date.
 
-Nothing diverges today. The Wikidata path **refuses** any P585 that is not
-exactly day-precise (`wikidata.py:576`), so it only ever files a day the source
-itself stated. `DAY`/`REPORTED` is accurate for that, and D013's five fields are
-correctly empty because nothing was derived. It refuses what it cannot honestly
-file.
+Nothing **diverges** today. The Wikidata path refuses any P585 that is not
+exactly day-precise (`wikidata.py:576`), so it never derives a day at all: it
+files the day the source itself stated, and D013's five fields are correctly
+empty because nothing was derived.
+
+What it has not done is establish *which convention* that stated day is in.
+`_wikidata_methodology` (`wikidata.py:530-555`) records the authority and the
+resolution method, not a day convention — so `REPORTED` rests on an unstated
+presumption that P585 day-precision means the event's local civil day. The
+presumption is probably right, since reference sources date events
+conventionally. But the archive has never said so, and an unstated presumption
+about which calendar a date belongs to is exactly what this entry is about.
 
 The gap is what happens when that changes. #107, open now, relaxes the check to
 accept sub-day precision and derives the day as the **UTC** calendar day of the
@@ -1768,11 +1775,14 @@ Three cases D013 never addressed, because one event never raised them:
 - A source that states a **calendar day** states it in some convention, and the
   adapter must establish which. A day already stated as the conventional local
   civil day is taken as reported and never re-derived. A day stated in another
-  convention is converted at ingest and the conversion recorded — a day restated
-  in a different convention is derived, not reported. Without this the invariant
-  and the never-re-derive rule contradict each other for any source that dates by
-  UTC day, and the same event could still reach two different profiles, which is
-  the divergence this exists to prevent.
+  convention is **not convertible**: a UTC calendar day is a twenty-four hour
+  interval that at any nonzero local offset falls across two local civil days, so
+  choosing one would invent precision the source never stated — the very thing
+  this contract exists to forbid. Such a day yields a date-specific event only
+  where further evidence resolves the interval to a single local day. Without
+  this case the invariant and the never-re-derive rule contradict each other for
+  any source that dates by UTC day, and the same event could still reach two
+  different profiles.
 - A source whose **day convention cannot be established** does not yield a
   date-specific event.
 - An instant whose **place of occurrence is unknown** is refused for
@@ -1801,6 +1811,15 @@ reason that one did, because nothing binding would have changed.
 **Consequences:** This is preventive rather than remedial. `main` publishes no
 wrong dates today, and closing the gap before sub-day support lands is cheaper
 than correcting an append-only archive afterwards.
+
+**It also makes an existing path non-conformant, deliberately.** Once the
+contract requires an adapter to establish its source's day convention, the
+Wikidata adapter does not meet it: nothing records what P585 day-precision means.
+That shortfall has no live consequence — no Wikidata event is published today,
+and G4 is already gated on A2 — and A2 closes it by recording the convention in
+the adapter's methodology alongside the authority it already records. Stating the
+rule before every implementation satisfies it is the intended order here; leaving
+it unstated is how #107 reached for a different rule unopposed.
 
 #107 must satisfy the rule before it can accept sub-day precision. Deriving a day
 from an instant requires a timezone, and nothing in the tree derives one from

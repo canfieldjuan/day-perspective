@@ -62,13 +62,16 @@ publication date is not automatically an occurrence date.
 An event is filed under the conventional local civil day at its place of
 occurrence.
 
-A source that states a calendar day states it in some convention, and the
-adapter for that source must establish which. A day already stated as the
-conventional local civil day is taken as reported and is never re-derived. A day
-stated in another convention — a UTC calendar day, for instance — is converted at
-ingest and the conversion is recorded, because a day restated in a different
-convention is derived rather than reported. A source whose convention is not
-established does not yield a date-specific event.
+A source that states a calendar day states it in some convention, and the adapter
+for that source must establish which. A day already stated as the conventional
+local civil day is taken as reported and is never re-derived. A day stated in
+another convention — a UTC calendar day, for instance — denotes a twenty-four
+hour interval that at any nonzero local offset falls across two local civil days;
+it does not by itself place the event on either, and converting it would invent
+precision the source never stated. Such a day yields a date-specific event only
+where further evidence — an instant, or the source's own statement of the local
+day — resolves the interval to a single local day. A source whose convention is
+not established does not yield a date-specific event.
 
 A source that states an instant has not stated a date. The day is derived, and
 the published record carries the timezone applied, the resulting offset, and the
