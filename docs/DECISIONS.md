@@ -1791,11 +1791,13 @@ Three cases D013 never addressed, because one event never raised them:
 
 **Mechanism:** The contract now carries the rule (`docs/PRODUCT_CONTRACT.md`,
 "Evidence, uncertainty, and comparison rules"). Enforcement is the following
-slice (#109 A2): one shared temporal resolver that both publishers call,
-populating D013's five fields, proven by a cross-publisher invariant — the same
-instant and place resolve to the same `profile_date` whichever publisher ingested
-them. USGS already implements the rule, so that slice generalizes the correct
-implementation rather than inventing one.
+slice (#109 A2): one shared temporal resolver called by every publisher that
+files a date-specific event — `usgs.py:850`, `wikidata.py:761` and
+`ucdp.py:1488` are the three constructing an `EventTime` today — populating
+D013's five fields, proven by a cross-publisher invariant: the same instant and
+place resolve to the same `profile_date` whichever publisher ingested them. USGS
+already implements the rule, so that slice generalizes the correct implementation
+rather than inventing one.
 
 **Alternatives considered:** **UTC always** — this reverses D013, and is wrong in
 the way that matters: every reference work dates the 1964 Alaska earthquake to
@@ -1812,14 +1814,27 @@ reason that one did, because nothing binding would have changed.
 wrong dates today, and closing the gap before sub-day support lands is cheaper
 than correcting an append-only archive afterwards.
 
-**It also makes an existing path non-conformant, deliberately.** Once the
-contract requires an adapter to establish its source's day convention, the
-Wikidata adapter does not meet it: nothing records what P585 day-precision means.
-That shortfall has no live consequence — no Wikidata event is published today,
-and G4 is already gated on A2 — and A2 closes it by recording the convention in
-the adapter's methodology alongside the authority it already records. Stating the
-rule before every implementation satisfies it is the intended order here; leaving
-it unstated is how #107 reached for a different rule unopposed.
+**It also makes two existing paths non-conformant, deliberately.** Once the
+contract requires an adapter to establish its source's day convention, neither
+adapter that files a source-stated day meets it.
+
+The Wikidata adapter records nothing about what P585 day-precision means
+(`wikidata.py:530-555`). The UCDP GED adapter files the source's `date_start` as
+the product day under `OCCURRED`/`DIRECT_RECORD` (`ucdp.py:1488-1501`) while its
+methodology records only an annual-count rule and an impacts rule
+(`ucdp.py:151-157`). That adapter's `interpretation` does say "no exact timestamp
+or timezone conversion is asserted" (`ucdp.py:1509-1512`), which disclaims
+*deriving* a day but is not the same as establishing which convention the
+reported day is already in — the distinction this entry exists to draw.
+
+Neither shortfall publishes a wrong date today. No Wikidata event is published at
+all, and G4 is already gated on A2; the GED path is fixture-only
+(`context_cli.py:62` requires `--fixture`, and there is no live GED target),
+and a fixture is never a production fact (§12). A2 closes both by recording each
+source's day convention in its methodology alongside what that methodology
+already records. Stating the rule before every implementation satisfies it is the
+intended order here; leaving it unstated is how #107 reached for a different rule
+unopposed.
 
 #107 must satisfy the rule before it can accept sub-day precision. Deriving a day
 from an instant requires a timezone, and nothing in the tree derives one from
