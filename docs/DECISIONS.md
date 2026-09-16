@@ -1722,3 +1722,174 @@ single-event date announces no secondary section and reads as before, several
 sources are all named while one still reads naturally, and the heading outline
 has no skipped level — that last one verified by reverting the level and watching
 it fail.
+
+## D049: The local civil day is contract, not precedent
+
+**Context:** D013 already decided this, for one event. It stores the UTC instant,
+IANA timezone, instant-specific offset, local date and interpretation separately,
+on the reasoning that "the earthquake occurred on March 28 UTC but belongs to the
+March 27 public profile in Alaska civil time." `EventTime`'s `exact_timestamp`,
+`timezone_name`, `utc_offset_minutes`, `local_date` and `interpretation` are that
+decision's mechanism, field for field, and `usgs.py:243-247` implements it —
+converting through `ZoneInfo("America/Anchorage")` and recording the rule in its
+methodology (`usgs.py:315`). `GOLDEN_DATE` is `1964-03-27`, that local date.
+
+Nothing **diverges** today. The Wikidata path refuses any P585 that is not
+exactly day-precise (`wikidata.py:576`), so it never derives a day at all: it
+files the day the source itself stated, and D013's five fields are correctly
+empty because nothing was derived.
+
+What it has not done is establish *which convention* that stated day is in.
+`_wikidata_methodology` (`wikidata.py:530-555`) records the authority and the
+resolution method, not a day convention — so `REPORTED` rests on an unstated
+presumption that P585 day-precision means the event's local civil day. The
+presumption is probably right, since reference sources date events
+conventionally. But the archive has never said so, and an unstated presumption
+about which calendar a date belongs to is exactly what this entry is about.
+
+The gap is what happens when that changes. #107, open now, relaxes the check to
+accept sub-day precision and derives the day as the **UTC** calendar day of the
+instant — implicitly, disclosed nowhere, still stamped `DAY`/`REPORTED`, still
+populating none of the five fields. Its reviewer caught it. That a careful
+implementation walked straight into it is the point: nothing binding objected,
+because the rule was precedent rather than contract.
+
+So this is not an undecided question, and on `main` it is not yet a divergence
+either. It is a decided rule that never became enforceable, which is why the
+first change reaching for sub-day support chose a different one unopposed.
+**D013 lived only in the decision log.** `docs/PRODUCT_CONTRACT.md` is what binds
+(§2). It required date role, precision and assignment, and already separated a
+reporting date from an occurrence date — but never said which calendar day an
+occurrence falls under. A rule recorded only as precedent does not bind the next
+publisher.
+
+D013's revisit trigger — "events require disputed or jurisdiction-specific
+calendar assignment" — has not fired. Nothing here disputes D013; this promotes it.
+
+**Decision:** The rule enters the contract, generalized off the single event it
+was decided for: **an event is filed under the conventional local civil day at
+its place of occurrence.**
+
+Three cases D013 never addressed, because one event never raised them:
+
+- A source that states a **calendar day** states it in some convention, and the
+  adapter must establish which. A convention fixes two separate things — the
+  **calendar system** that names the day, and the **meridian** at which the day
+  begins — and neither is presumed.
+
+  The rule is a **test, not a list of conventions**: a stated day yields a
+  date-specific event only where its convention, *applied at the place of
+  occurrence*, makes it denote **exactly one local civil day**. A local day
+  denotes itself. A Julian civil date denotes the same day under another name, so
+  restating it on the Gregorian axis invents no precision. A UTC day denotes a
+  twenty-four hour interval that may or may not coincide with a local civil day —
+  where it coincides it denotes that day, and where it straddles two, choosing one
+  would invent precision the source never stated. An unestablished convention
+  denotes nothing determinate.
+
+  Arriving at a test took four review rounds, and the route is the lesson.
+  Successive revisions enumerated conventions and were each found incomplete: one
+  generalized every non-local convention as non-convertible, which is false of a
+  calendar system; the next refused every UTC day, which is false where the place
+  sits at zero offset for that whole day. An enumeration of cases is open by
+  construction, and a binding document written as one acquires a new wrong clause
+  per case nobody thought of. The criterion is closed, and each case above is an
+  illustration of it rather than a rule of its own.
+
+  Without this case the invariant and the never-re-derive rule contradict each
+  other for any source that dates by UTC day, and the same event could still
+  reach two different profiles.
+
+  The distinction is not hypothetical inside the supported range. The shell opens
+  at 1900-01-01 (`docs/PRODUCT_CONTRACT.md:25`), and Russia used the Julian
+  calendar until February 1918, Greece until 1923. Collapsing the two axes would
+  have required an adapter to refuse those dates or to route around the binding
+  rule. Separately, `_parse_occurrence_date` (`wikidata.py:566-578`) reads only
+  `time` and `precision` and never inspects Wikidata's `calendarmodel`, so a
+  Julian-flagged value is currently parsed as though its digits were Gregorian —
+  filed as a code defect, not fixed here.
+- A source whose **day convention cannot be established** does not yield a
+  date-specific event.
+- An instant whose **place of occurrence is unknown** is refused for
+  date-specific publication. The product does not assign a day by choosing a
+  meridian.
+
+**Mechanism:** The contract now carries the rule (`docs/PRODUCT_CONTRACT.md`,
+"Evidence, uncertainty, and comparison rules"). Enforcement is the following
+slice (#109 A2): one shared temporal resolver called by every publisher that
+files a date-specific event — `usgs.py:850`, `wikidata.py:761` and
+`ucdp.py:1488` are the three constructing an `EventTime` today — proven by a
+cross-publisher invariant: the same instant and place resolve to the same
+`profile_date` whichever publisher ingested them. USGS already implements the
+rule, so that slice generalizes the correct implementation rather than inventing
+one.
+
+Reported and derived are recorded **per field, not as one verdict on the record**
+— the second thing successive revisions of this entry got wrong, in opposite
+directions. One required all five of D013's fields wherever a day was filed,
+which forces a reported day to invent an instant. Its correction tied all five to
+"the day was derived", which discards an instant a source stated outright
+whenever that source also states its local day.
+
+Each field answers its own question. `exact_timestamp` records **what the source
+stated**: present when an instant was stated, whether or not the day was also
+stated, and absent otherwise. `timezone_name` and `utc_offset_minutes` record
+**how a day was derived**: present only where an instant was resolved to a day,
+because an offset is "instant-specific" in D013's own words and a local civil day
+spanning a clock transition has two. So a source stating both a local day and an
+instant yields a **reported** day alongside a **preserved** instant — neither
+re-derived nor discarded.
+
+All five are already nullable (`models.py:462-466`) and `main`'s reported-day
+Wikidata path populates none of them (`wikidata.py:761-771`), so the honest
+encoding exists and is in use. What A2 adds is recording *which* question each
+populated field answers, so that absence reads as "this was not stated and not
+derived" rather than as missing data. A2 may not satisfy this by filling any
+field with a value no source stated and no derivation produced.
+
+**Alternatives considered:** **UTC always** — this reverses D013, and is wrong in
+the way that matters: every reference work dates the 1964 Alaska earthquake to
+March 27, so an archive publishing March 28 while claiming evidential honesty
+contradicts them in order to privilege an arbitrary meridian. **A per-entity
+rule** (local where coordinates exist, UTC otherwise) — most faithful record by
+record, but it produces an archive whose dating rule a reader cannot state, and
+makes two dates incomparable without inspecting each one's provenance. **Leaving
+D013 as precedent and correcting #107 alone** — the symptom fix. The next change
+reaching for a day assignment would be free to choose differently for exactly the
+reason that one did, because nothing binding would have changed.
+
+**Consequences:** This is preventive rather than remedial. `main` publishes no
+wrong dates today, and closing the gap before sub-day support lands is cheaper
+than correcting an append-only archive afterwards.
+
+**It also makes two existing paths non-conformant, deliberately.** Once the
+contract requires an adapter to establish its source's day convention, neither
+adapter that files a source-stated day meets it.
+
+The Wikidata adapter records nothing about what P585 day-precision means
+(`wikidata.py:530-555`). The UCDP GED adapter files the source's `date_start` as
+the product day under `OCCURRED`/`DIRECT_RECORD` (`ucdp.py:1488-1501`) while its
+methodology records only an annual-count rule and an impacts rule
+(`ucdp.py:151-157`). That adapter's `interpretation` does say "no exact timestamp
+or timezone conversion is asserted" (`ucdp.py:1509-1512`), which disclaims
+*deriving* a day but is not the same as establishing which convention the
+reported day is already in — the distinction this entry exists to draw.
+
+Neither shortfall publishes a wrong date today. No Wikidata event is published at
+all, and G4 is already gated on A2; the GED path is fixture-only
+(`context_cli.py:62` requires `--fixture`, and there is no live GED target),
+and a fixture is never a production fact (§12). A2 closes both by recording each
+source's day convention in its methodology alongside what that methodology
+already records. Stating the rule before every implementation satisfies it is the
+intended order here; leaving it unstated is how #107 reached for a different rule
+unopposed.
+
+#107 must satisfy the rule before it can accept sub-day precision. Deriving a day
+from an instant requires a timezone, and nothing in the tree derives one from
+coordinates, so sub-day support arrives with that capability rather than ahead of
+it — and until then a Wikidata entity whose P585 carries a timestamp rather than
+a day is refused, by the rule rather than by an arbitrary narrowing.
+
+G4 (#97) does not start until the shared resolver (A2) merges: the live run
+writes permanent records, and eight of the hundred golden records carry the
+`timezone_boundary` selection tag.
