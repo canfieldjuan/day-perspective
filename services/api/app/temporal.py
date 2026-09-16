@@ -120,17 +120,48 @@ def _julian_to_gregorian(day: date) -> date:
 
 
 def _utc_day_denotes(day: date, zone: ZoneInfo) -> bool:
-    """Whether a UTC calendar day coincides with one local civil day.
+    """Whether every instant of a UTC calendar day falls on the stated local day.
 
     A UTC day is a twenty-four hour interval anchored elsewhere, so it need not
-    line up with any local civil day. It does exactly when its first and last
-    instants fall on the same local day, and that day is the one stated --
-    which is a property of the date, not of the place: a location at zero
-    offset in winter can be an hour off under summer time.
+    line up with any local civil day. Whether it does is a property of the
+    date, not of the place: a location at zero offset in winter can be an hour
+    off under summer time.
+
+    The test is containment, not coincidence. Where the UTC day sits inside a
+    longer local day without sharing its boundaries -- Kwajalein crossed the
+    date line backward on 1969-09-30, making local 09-30 about 47 hours long --
+    every instant is still on one local day, so the day is determinate and
+    nothing is invented by filing it there. Requiring identical boundaries
+    would refuse a real event over a representation quirk rather than an
+    evidence gap.
+
+    Endpoints alone would be unsound. Between transitions local time is UTC
+    plus a constant, so it is monotonic and the endpoints bracket every instant
+    between them; across a transition it is not, and the local date could in
+    principle leave and return inside the interval. So the endpoints decide
+    only when the offset is unchanged, and a transition forces a scan.
+    (No zone in tzdata actually does leave and return within a UTC day between
+    1900 and 2025 -- checked exhaustively -- but that is a property of the
+    current data, not a guarantee, and it is not what this rests on.)
     """
     start = datetime(day.year, day.month, day.day, tzinfo=UTC)
-    last = start + timedelta(days=1) - timedelta(microseconds=1)
-    return start.astimezone(zone).date() == day == last.astimezone(zone).date()
+    end = start + timedelta(days=1)
+    last = end - timedelta(microseconds=1)
+
+    first_local = start.astimezone(zone)
+    last_local = last.astimezone(zone)
+    if first_local.date() != day or last_local.date() != day:
+        return False
+    if first_local.utcoffset() == last_local.utcoffset():
+        return True
+
+    probe = start
+    step = timedelta(minutes=15)
+    while probe < end:
+        if probe.astimezone(zone).date() != day:
+            return False
+        probe += step
+    return True
 
 
 def _resolve_instant(instant: datetime, zone: ZoneInfo, timezone_name: str) -> ResolvedDay:
@@ -222,19 +253,33 @@ def resolve_day(
         day = restated
 
     if convention.meridian is Meridian.UTC:
-        if zone is None:
+        if zone is None or timezone_name is None:
             raise UnresolvedDay(
                 f"The stated day {day.isoformat()} is a UTC calendar day, and "
                 "whether it denotes one local civil day depends on the place of "
                 "occurrence, which is unknown."
             )
         if not _utc_day_denotes(day, zone):
-            raise UnresolvedDay(
-                f"The UTC calendar day {day.isoformat()} falls across two local "
-                f"civil days in {timezone_name}. Choosing one would invent "
-                "precision the source never stated, so it yields no "
-                "date-specific event without further evidence."
-            )
+            # The day alone is ambiguous, but the contract admits other
+            # evidence that resolves it -- an instant inside the interval
+            # lands on exactly one local civil day. The day is then derived
+            # from that instant rather than reported, because the source never
+            # stated the local day; it stated a UTC one and an instant.
+            if instant is None:
+                raise UnresolvedDay(
+                    f"The UTC calendar day {day.isoformat()} falls across two "
+                    f"local civil days in {timezone_name}. Choosing one would "
+                    "invent precision the source never stated, so it yields no "
+                    "date-specific event without further evidence."
+                )
+            if instant.astimezone(UTC).date() != day:
+                raise UnresolvedDay(
+                    f"The stated instant {instant.isoformat()} falls outside "
+                    f"the stated UTC calendar day {day.isoformat()}, so the "
+                    "source disagrees with itself and neither value resolves "
+                    "the other."
+                )
+            return _resolve_instant(instant, zone, timezone_name)
 
     if restated is not None:
         interpretation = (

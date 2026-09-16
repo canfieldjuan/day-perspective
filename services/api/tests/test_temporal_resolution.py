@@ -169,6 +169,81 @@ class TestUtcDayTurnsOnWhetherTheIntervalsCoincide:
         with pytest.raises(UnresolvedDay):
             resolve_day(stated_day=date(1964, 3, 28), convention=GREGORIAN_UTC)
 
+    def test_a_contained_utc_day_denotes_the_day_it_falls_within(self) -> None:
+        """Containment is enough; exact coincidence is not required.
+
+        Kwajalein crossed the date line backward on 1969-09-30 (+11 to -12),
+        so local 1969-09-30 ran about 47 hours and the UTC day sits inside it
+        without sharing its boundaries. Every instant of that UTC day is
+        nonetheless on local 09-30, so the day is determinate and nothing is
+        invented by filing it there. Refusing would lose a real event to a
+        representation quirk rather than to an evidence gap.
+        """
+        resolved = resolve_day(
+            stated_day=date(1969, 9, 30),
+            convention=GREGORIAN_UTC,
+            timezone_name="Pacific/Kwajalein",
+        )
+        assert resolved.profile_date == date(1969, 9, 30)
+
+
+class TestAnInstantResolvesAStraddlingUtcDay:
+    """"it yields no date-specific event unless other evidence -- an instant,
+    or the source's own statement of the local day -- resolves it to one."
+
+    A straddling UTC day is ambiguous on its own. An instant inside it is not.
+    """
+
+    def test_the_instant_resolves_what_the_utc_day_alone_could_not(self) -> None:
+        """UTC day 1964-03-28 straddles two Alaska days, but the earthquake
+        instant inside it lands unambiguously on local 1964-03-27."""
+        resolved = resolve_day(
+            stated_day=date(1964, 3, 28),
+            convention=GREGORIAN_UTC,
+            instant=datetime(1964, 3, 28, 3, 36, 14, tzinfo=UTC),
+            timezone_name="America/Anchorage",
+        )
+        assert resolved.profile_date == date(1964, 3, 27)
+
+    def test_the_day_is_derived_because_the_instant_supplied_it(self) -> None:
+        """The source never stated this local day, so it is not reported.
+
+        Contrast the stated-local-day case, where the source did state it and
+        the day stays REPORTED with the instant merely preserved.
+        """
+        resolved = resolve_day(
+            stated_day=date(1964, 3, 28),
+            convention=GREGORIAN_UTC,
+            instant=datetime(1964, 3, 28, 3, 36, 14, tzinfo=UTC),
+            timezone_name="America/Anchorage",
+        )
+        assert resolved.temporal_assignment is TemporalAssignment.DIRECT_RECORD
+        assert resolved.timezone_name == "America/Anchorage"
+        assert resolved.utc_offset_minutes == -600
+
+    def test_an_instant_outside_the_stated_day_is_contradictory(self) -> None:
+        """An instant is evidence about the stated day only if it is in it.
+
+        One falling elsewhere means the source disagrees with itself, which is
+        not something to resolve by preferring one half.
+        """
+        with pytest.raises(UnresolvedDay, match="outside"):
+            resolve_day(
+                stated_day=date(1964, 3, 28),
+                convention=GREGORIAN_UTC,
+                instant=datetime(1964, 4, 15, 3, 36, 14, tzinfo=UTC),
+                timezone_name="America/Anchorage",
+            )
+
+    def test_still_refused_when_no_instant_accompanies_it(self) -> None:
+        """Without the resolving evidence the refusal stands."""
+        with pytest.raises(UnresolvedDay):
+            resolve_day(
+                stated_day=date(1964, 3, 28),
+                convention=GREGORIAN_UTC,
+                timezone_name="America/Anchorage",
+            )
+
 
 class TestUnestablishedConventionDenotesNothing:
     """"A day whose convention is not established denotes nothing determinate,
