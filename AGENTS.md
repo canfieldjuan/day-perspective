@@ -22,9 +22,9 @@ only this file; if the two files drift, `CLAUDE.md` wins.
    issue before landing the PR. A post-round-3 finding that the PR asserts
    something false is neither, and deferring it would ship a known-wrong
    statement: remove the false assertion rather than rewriting it, split
-   scope if removal leaves the slice pointless, say what was removed in the
-   PR and to the operator, and log the gap. After round 3 the author does
-   not make this call silently.
+   scope if removal leaves the slice pointless, say what was removed and
+   why in the PR and to the operator, and log the gap as an issue. After
+   round 3 the author does not make this call silently.
 
 Everything else — ground-truth citation discipline, contracts-first, TDD,
 vertical slices, merge policy, document ownership, honest-data rules — is
