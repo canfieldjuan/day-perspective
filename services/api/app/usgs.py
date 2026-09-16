@@ -78,6 +78,7 @@ from app.services import (
     publish_day_profile,
     resolve_claim,
 )
+from app.temporal import resolve_day
 from app.ucdp import build_ucdp_annual_profile_content
 from app.un_wpp import build_un_wpp_profile_content
 
@@ -240,11 +241,10 @@ class USGSEarthquakeAdapter:
                 "the current claim and publication schema"
             )
         occurrence = datetime.fromtimestamp(record.properties.time / 1000, tz=UTC)
-        local = occurrence.astimezone(ZoneInfo(ALASKA_TIMEZONE))
-        offset = local.utcoffset()
-        if offset is None:
-            raise ValueError("Historical Alaska local offset could not be determined.")
-        local_date = local.date()
+        resolved_day = resolve_day(
+            instant=occurrence, timezone_name=ALASKA_TIMEZONE
+        )
+        local_date = resolved_day.profile_date
         if local_date != GOLDEN_DATE:
             raise ValueError("USGS occurrence does not map to the expected Alaska civil date.")
         return (
@@ -264,7 +264,7 @@ class USGSEarthquakeAdapter:
                 {
                     "date": local_date.isoformat(),
                     "timezone": ALASKA_TIMEZONE,
-                    "utc_offset_minutes": int(offset.total_seconds() / 60),
+                    "utc_offset_minutes": resolved_day.utc_offset_minutes,
                 },
                 temporal_precision=TemporalPrecision.DAY,
                 temporal_assignment=TemporalAssignment.INFERRED,
