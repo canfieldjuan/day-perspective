@@ -19,21 +19,12 @@ only this file; if the two files drift, `CLAUDE.md` wins.
 3. **Three-round convergence rule.** If review has not converged after 3
    rounds, stop pushing fixes: reassess PR scope (split if too broad), and
    defer edge-case-only findings by logging them in the slice's GitHub
-   issue before landing the PR. Where a post-round-3 finding shows the PR
-   asserts something false, deferring it would ship a known-wrong
-   statement. Where the false assertion is prose, remove it rather than
-   rewriting it, and take its dependents with it: check what points at the
-   clause first, because one that defines a term or is cross-referenced
-   cannot be lifted alone and a dangling reference is a new defect. If the
-   dependents will not lift out cleanly, split.
-   Where it is executable — a test assertion, a validation branch, a data
-   mapping — deleting it drops coverage or a guard and lets the defect
-   land, so never delete a test or a guard to converge: split scope so the
-   false part leaves this PR and gets its own slice, with its own review
-   budget. Either way, split scope if what remains has no point, say what
-   was removed or split out and why in the PR and to the operator, and log
-   the gap as an issue. After round 3 the author does not make this call
-   silently.
+   issue before landing the PR. A post-round-3 finding may instead show the
+   PR asserts something false; deferring that ships a known-wrong
+   statement, so it is not simply an edge case to log. The author does not
+   resolve it alone: say what is false and where, in the PR and to the
+   operator, and let them choose the remedy. One constraint holds
+   regardless — never delete a test or a guard to converge.
 
 Everything else — ground-truth citation discipline, contracts-first, TDD,
 vertical slices, merge policy, document ownership, honest-data rules — is

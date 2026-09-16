@@ -74,38 +74,23 @@ back. Is the PR scope too broad? Split it. Are the remaining findings
 edge-case-only? Defer them: log each in the slice's GitHub issue, then land
 the PR.
 
-Where a post-round-3 finding shows the PR asserts something **false**, deferring
-it would ship a known-wrong statement. What to do depends on what is asserting
-it.
-
-**Prose** — a contract clause, a decision record, a comment. **Remove it; do not
-rewrite it** — and take its dependents with it. A clause that defines a term or
-is cross-referenced cannot be lifted alone; check what points at it first, or
-the deletion leaves a dangling reference, which is a new defect. Removed as a
-unit it stays bounded in the way a rewrite is not, and a document silent on a
-case is honest where a document wrong about it is not. If the dependents will
-not lift out cleanly, that is a scope signal: split.
-
-**Executable** — a test assertion, a validation branch, a data mapping.
-Deleting it drops coverage or a guard and lets the underlying defect land, so
-removal is not the safe move here and **never delete a test or a guard to
-converge**. Split scope instead: the false part leaves this PR and gets its own
-slice, with its own review budget.
-
-Either way, if what remains has no point, split scope rather than rewrite. Say
-what was removed or split out, and why — in the PR and to the operator — and log
-the gap as an issue. After round 3 the author does not make this call silently.
+A post-round-3 finding may instead show the PR **asserts something false**.
+Deferring that ships a known-wrong statement, so it is not simply an edge case
+to log. **The author does not resolve it alone**: say what is false and where,
+in the PR and to the operator, and let them choose the remedy. One constraint
+holds regardless — **never delete a test or a guard to converge.**
 
 Why: infinite thread-chasing costs more than a logged deferral (precedent:
-issue #4). The false-assertion branch has to be this narrow because it is
-otherwise self-certifying: "this one is a real error, worth one more round" is
-always available to an author. PR #110 ran to 8 rounds on two docs files
-exactly that way — rounds 4, 6 and 7 each found a defect in text an earlier
-round had just rewritten, and the author overrode this rule twice using a test
-he had invented rather than one written here. The prose/executable split exists
-because the first draft of this rule was written from that docs-only PR and
-stated universally, which would have had a code PR deleting the failing
-assertion — the same over-generalization the rule is meant to catch.
+issue #4). This branch escalates rather than prescribing a remedy, because
+prescribing one is what kept going wrong. PR #110 ran to 8 rounds on two docs
+files, with the author overriding this rule twice on a test he had invented
+rather than one written here. PR #115 then tried to write the remedies out and
+drew a finding per round, each naming a case the enumeration mishandled —
+deleting a false test assertion would drop coverage; deleting a clause that
+defines a term leaves dangling references; deleting prose the PR made false by
+editing it destroys the valid baseline, and in an append-only document destroys
+history. Which remedy fits which case is #117, to be written from real cases
+rather than in the abstract.
 
 ## 8. Merge on green + converged
 
