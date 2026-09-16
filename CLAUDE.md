@@ -74,8 +74,21 @@ back. Is the PR scope too broad? Split it. Are the remaining findings
 edge-case-only? Defer them: log each in the slice's GitHub issue, then land
 the PR.
 
+A post-round-3 finding that the PR asserts something **false** is neither of
+those, and deferring it would ship a known-wrong statement. **Remove the false
+assertion; do not rewrite it.** A deletion cannot introduce the next defect; a
+rewrite demonstrably can. If removing it leaves the slice without its point,
+that is the signal to split scope, not to rewrite. Say what was removed and why
+— in the PR and to the operator — and log the gap as an issue. After round 3
+the author does not make this call silently.
+
 Why: infinite thread-chasing costs more than a logged deferral (precedent:
-issue #4).
+issue #4). The false-assertion branch has to be this narrow because it is
+otherwise self-certifying: "this one is a real error, worth one more round" is
+always available to an author. PR #110 ran to 8 rounds on two docs files
+exactly that way — rounds 4, 6 and 7 each found a defect in text an earlier
+round had just rewritten, and the author overrode this rule twice using a test
+he had invented rather than one written here.
 
 ## 8. Merge on green + converged
 
