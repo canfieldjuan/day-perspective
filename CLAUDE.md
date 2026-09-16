@@ -74,9 +74,9 @@ back. Is the PR scope too broad? Split it. Are the remaining findings
 edge-case-only? Defer them: log each in the slice's GitHub issue, then land
 the PR.
 
-A post-round-3 finding that the PR asserts something **false** is neither of
-those, and deferring it would ship a known-wrong statement. What to do depends
-on what is asserting it.
+Where a post-round-3 finding shows the PR asserts something **false**, deferring
+it would ship a known-wrong statement. What to do depends on what is asserting
+it.
 
 **Prose** — a contract clause, a decision record, a comment. **Remove it; do not
 rewrite it** — and take its dependents with it. A clause that defines a term or
