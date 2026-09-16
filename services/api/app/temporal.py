@@ -211,24 +211,33 @@ def _utc_day_denotes(day: date, zone: ZoneInfo) -> bool:
     1900 and 2025 -- checked exhaustively -- but that is a property of the
     current data, not a guarantee, and it is not what this rests on.)
     """
+    return _local_dates_touched(day, zone) == {day}
+
+
+def _local_dates_touched(day: date, zone: ZoneInfo) -> set[date]:
+    """Every local civil date some instant of a UTC calendar day falls on.
+
+    The fast path is sound rather than convenient: while the offset is
+    unchanged across the interval, local time is UTC plus a constant and so
+    monotonic, and the endpoints bracket every instant between them. Only a
+    transition can break that, and only then is a scan needed.
+    """
     start = datetime(day.year, day.month, day.day, tzinfo=UTC)
     end = start + timedelta(days=1)
     last = end - timedelta(microseconds=1)
 
     first_local = start.astimezone(zone)
     last_local = last.astimezone(zone)
-    if first_local.date() != day or last_local.date() != day:
-        return False
     if first_local.utcoffset() == last_local.utcoffset():
-        return True
+        return {first_local.date(), last_local.date()}
 
+    touched = {first_local.date(), last_local.date()}
     probe = start
     step = timedelta(minutes=15)
     while probe < end:
-        if probe.astimezone(zone).date() != day:
-            return False
+        touched.add(probe.astimezone(zone).date())
         probe += step
-    return True
+    return touched
 
 
 def _resolve_instant(instant: datetime, zone: ZoneInfo, timezone_name: str) -> ResolvedDay:
@@ -264,6 +273,7 @@ def resolve_day(
     stated_day: date | CivilDate | None = None,
     stated_day_end: date | CivilDate | None = None,
     convention: DayConvention | None = None,
+    stated_local_day: date | CivilDate | None = None,
     instant: datetime | None = None,
     timezone_name: str | None = None,
 ) -> ResolvedDay:
@@ -273,8 +283,14 @@ def resolve_day(
     may be given as a plain `date`; a day in another calendar needs
     `CivilDate`, because `date` validates its argument as Gregorian and so
     cannot carry every day a source may legitimately state. `instant` is an
-    instant the source stated. Either may be given, or both. `timezone_name`
-    is the IANA zone at the place of occurrence.
+    instant the source stated. `stated_local_day` is the source's own
+    statement of the local civil day, in the same calendar as `convention`.
+    Any may be given, or several. `timezone_name` is the IANA zone at the
+    place of occurrence.
+
+    Passing more than one is how a source's statements get cross-checked
+    rather than silently reconciled: where two of them disagree, the source
+    disagrees with itself and neither is preferred.
 
     Raises `UnresolvedDay` whenever the evidence does not denote exactly one
     local civil day, which is the contract's fail-closed default rather than an
@@ -297,6 +313,14 @@ def resolve_day(
         )
 
     zone = _zone(timezone_name)
+
+    if stated_day is None and stated_local_day is not None:
+        # The source stated its local civil day and nothing that needs
+        # reconciling against it, so it denotes itself.
+        stated_day, convention = stated_local_day, convention or DayConvention(
+            calendar=CalendarSystem.GREGORIAN, meridian=Meridian.LOCAL_CIVIL
+        )
+        stated_local_day = None
 
     if stated_day is None:
         if instant is None:
@@ -321,6 +345,7 @@ def resolve_day(
     stated = _as_civil(stated_day)
     day = _stated_as_gregorian(stated, convention.calendar)
     restated = convention.calendar is not CalendarSystem.GREGORIAN
+    local_statement: date | None = None
 
     if convention.meridian is Meridian.UTC:
         if zone is None or timezone_name is None:
@@ -329,7 +354,28 @@ def resolve_day(
                 "whether it denotes one local civil day depends on the place of "
                 "occurrence, which is unknown."
             )
-        if not _utc_day_denotes(day, zone):
+        touched = _local_dates_touched(day, zone)
+
+        # A source stating its own local day is cross-checked against the UTC
+        # interval whether or not that interval was ambiguous. A contradiction
+        # is most dangerous exactly where the UTC day looks unambiguous, since
+        # nothing else would surface it.
+        if stated_local_day is not None:
+            local_statement = _stated_as_gregorian(
+                _as_civil(stated_local_day), convention.calendar
+            )
+            local = local_statement
+            if local not in touched:
+                raise UnresolvedDay(
+                    f"The source states local civil day {local.isoformat()}, "
+                    f"but no instant of its stated UTC calendar day "
+                    f"{day.isoformat()} falls on that day in {timezone_name}. "
+                    "The source disagrees with itself and neither value "
+                    "resolves the other."
+                )
+            day = local
+
+        elif not _utc_day_denotes(day, zone):
             # The day alone is ambiguous, but the contract admits other
             # evidence that resolves it -- an instant inside the interval
             # lands on exactly one local civil day. The day is then derived
@@ -358,11 +404,21 @@ def resolve_day(
     stated_text = f"{stated.year:04d}-{stated.month:02d}-{stated.day:02d}"
     if convention.meridian is Meridian.UTC:
         said = f"{stated_text} as a UTC calendar day"
-        because = (
-            f"Every instant of that day falls on local {day.isoformat()} in "
-            f"{timezone_name}, so it denotes that day and nothing is invented "
-            "by filing it there."
-        )
+        if local_statement is not None:
+            # That UTC day may well straddle two local days; it is the source's
+            # own local-day statement that picked one, and saying otherwise
+            # would assert a containment that does not hold.
+            said += f" and local civil day {local_statement.isoformat()}"
+            because = (
+                f"The UTC day covers that local day in {timezone_name}, and the "
+                "local day the source stated is the one filed."
+            )
+        else:
+            because = (
+                f"Every instant of that day falls on local {day.isoformat()} in "
+                f"{timezone_name}, so it denotes that day and nothing is "
+                "invented by filing it there."
+            )
     else:
         said = f"{stated_text} as its local civil day"
         because = "Taken as reported and not re-derived."

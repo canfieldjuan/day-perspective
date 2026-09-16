@@ -246,6 +246,94 @@ class TestAnInstantResolvesAStraddlingUtcDay:
             )
 
 
+class TestTheSourcesOwnLocalDayAlsoResolvesAStraddlingUtcDay:
+    """The contract names two kinds of resolving evidence -- "an instant, or
+    the source's own statement of the local day". The instant is covered
+    above; this is the other one.
+
+    A source giving both a UTC day and its own local day is the case where
+    the two can disagree, which is worth catching rather than losing.
+    """
+
+    def test_the_stated_local_day_resolves_what_the_utc_day_could_not(
+        self,
+    ) -> None:
+        resolved = resolve_day(
+            stated_day=date(1964, 3, 28),
+            convention=GREGORIAN_UTC,
+            stated_local_day=date(1964, 3, 27),
+            timezone_name="America/Anchorage",
+        )
+        assert resolved.profile_date == date(1964, 3, 27)
+
+    def test_it_stays_reported_because_the_source_stated_it(self) -> None:
+        """Unlike the instant path, no day was derived here: the source said
+        which local day it was."""
+        resolved = resolve_day(
+            stated_day=date(1964, 3, 28),
+            convention=GREGORIAN_UTC,
+            stated_local_day=date(1964, 3, 27),
+            timezone_name="America/Anchorage",
+        )
+        assert resolved.temporal_assignment is TemporalAssignment.REPORTED
+        assert resolved.timezone_name is None
+        assert resolved.utc_offset_minutes is None
+
+    def test_a_local_day_the_utc_day_never_touches_is_contradictory(self) -> None:
+        """UTC 1964-03-28 covers local 03-27 and 03-28 in Alaska and nothing
+        else, so a source also claiming 04-15 disagrees with itself."""
+        with pytest.raises(UnresolvedDay, match="disagrees"):
+            resolve_day(
+                stated_day=date(1964, 3, 28),
+                convention=GREGORIAN_UTC,
+                stated_local_day=date(1964, 4, 15),
+                timezone_name="America/Anchorage",
+            )
+
+    def test_a_disagreement_is_caught_even_when_the_utc_day_resolves(self) -> None:
+        """The cross-check is the point, so it applies when the UTC day is
+        unambiguous too -- that is where a silent contradiction would hide."""
+        with pytest.raises(UnresolvedDay, match="disagrees"):
+            resolve_day(
+                stated_day=date(1964, 1, 15),
+                convention=GREGORIAN_UTC,
+                stated_local_day=date(1964, 1, 16),
+                timezone_name="Europe/London",
+            )
+
+    def test_agreement_resolves_normally(self) -> None:
+        resolved = resolve_day(
+            stated_day=date(1964, 1, 15),
+            convention=GREGORIAN_UTC,
+            stated_local_day=date(1964, 1, 15),
+            timezone_name="Europe/London",
+        )
+        assert resolved.profile_date == date(1964, 1, 15)
+
+    def test_the_provenance_does_not_claim_a_containment_that_is_false(
+        self,
+    ) -> None:
+        """UTC 1964-03-28 straddles two Alaska days, so the record must not
+        say every instant of it falls on 03-27. The source's own local-day
+        statement picked the day; the UTC day did not."""
+        resolved = resolve_day(
+            stated_day=date(1964, 3, 28),
+            convention=GREGORIAN_UTC,
+            stated_local_day=date(1964, 3, 27),
+            timezone_name="America/Anchorage",
+        )
+        assert "Every instant" not in resolved.interpretation
+        assert "1964-03-28" in resolved.interpretation
+        assert "1964-03-27" in resolved.interpretation
+
+    def test_a_stated_local_day_alone_is_just_a_local_day(self) -> None:
+        resolved = resolve_day(
+            stated_local_day=date(1964, 3, 27), convention=GREGORIAN_LOCAL
+        )
+        assert resolved.profile_date == date(1964, 3, 27)
+        assert resolved.temporal_assignment is TemporalAssignment.REPORTED
+
+
 class TestAJulianDateIsNotAGregorianDate:
     """`datetime.date` is a Gregorian type, so it cannot carry every Julian
     date. A calendar-neutral `CivilDate` can, validated per convention."""
