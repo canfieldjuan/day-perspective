@@ -21,10 +21,14 @@ only this file; if the two files drift, `CLAUDE.md` wins.
    defer edge-case-only findings by logging them in the slice's GitHub
    issue before landing the PR. A post-round-3 finding that the PR asserts
    something false is neither, and deferring it would ship a known-wrong
-   statement: remove the false assertion rather than rewriting it, split
-   scope if removal leaves the slice pointless, say what was removed and
-   why in the PR and to the operator, and log the gap as an issue. After
-   round 3 the author does not make this call silently.
+   statement. Where the false assertion is prose, remove it rather than
+   rewriting it. Where it is executable — a test assertion, a validation
+   branch, a data mapping — deleting it drops coverage or a guard and lets
+   the defect land, so never delete a test or a guard to converge: split
+   scope so the false part leaves this PR and gets its own slice. Either
+   way, split scope if what remains has no point, say what was removed or
+   split out and why in the PR and to the operator, and log the gap as an
+   issue. After round 3 the author does not make this call silently.
 
 Everything else — ground-truth citation discipline, contracts-first, TDD,
 vertical slices, merge policy, document ownership, honest-data rules — is
