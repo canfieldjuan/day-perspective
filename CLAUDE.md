@@ -74,8 +74,24 @@ back. Is the PR scope too broad? Split it. Are the remaining findings
 edge-case-only? Defer them: log each in the slice's GitHub issue, then land
 the PR.
 
+A post-round-3 finding may instead show the PR **asserts something false**.
+Deferring that ships a known-wrong statement, so it is not simply an edge case
+to log. **The author does not resolve it alone**: say what is false and where,
+in the PR and to the operator, and let them choose the remedy. One constraint
+holds regardless — **never reduce coverage or protection below the base branch
+to converge.**
+
 Why: infinite thread-chasing costs more than a logged deferral (precedent:
-issue #4).
+issue #4). This branch escalates rather than prescribing a remedy, because
+prescribing one is what kept going wrong. PR #110 ran to 8 rounds on two docs
+files, with the author overriding this rule twice on a test he had invented
+rather than one written here. PR #115 then tried to write the remedies out and
+drew a finding per round, each naming a case the enumeration mishandled —
+deleting a false test assertion would drop coverage; deleting a clause that
+defines a term leaves dangling references; deleting prose the PR made false by
+editing it destroys the valid baseline, and in an append-only document destroys
+history. Which remedy fits which case is #117, to be written from real cases
+rather than in the abstract.
 
 ## 8. Merge on green + converged
 

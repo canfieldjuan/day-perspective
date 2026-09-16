@@ -19,7 +19,13 @@ only this file; if the two files drift, `CLAUDE.md` wins.
 3. **Three-round convergence rule.** If review has not converged after 3
    rounds, stop pushing fixes: reassess PR scope (split if too broad), and
    defer edge-case-only findings by logging them in the slice's GitHub
-   issue before landing the PR.
+   issue before landing the PR. A post-round-3 finding may instead show the
+   PR asserts something false; deferring that ships a known-wrong
+   statement, so it is not simply an edge case to log. The author does not
+   resolve it alone: say what is false and where, in the PR and to the
+   operator, and let them choose the remedy. One constraint holds
+   regardless — never reduce coverage or protection below the base branch to
+   converge.
 
 Everything else — ground-truth citation discipline, contracts-first, TDD,
 vertical slices, merge policy, document ownership, honest-data rules — is
