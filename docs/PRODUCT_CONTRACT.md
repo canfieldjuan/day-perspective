@@ -63,15 +63,27 @@ An event is filed under the conventional local civil day at its place of
 occurrence.
 
 A source that states a calendar day states it in some convention, and the adapter
-for that source must establish which. A day already stated as the conventional
-local civil day is taken as reported and is never re-derived. A day stated in
-another convention — a UTC calendar day, for instance — denotes a twenty-four
-hour interval that at any nonzero local offset falls across two local civil days;
-it does not by itself place the event on either, and converting it would invent
-precision the source never stated. Such a day yields a date-specific event only
-where further evidence — an instant, or the source's own statement of the local
-day — resolves the interval to a single local day. A source whose convention is
-not established does not yield a date-specific event.
+for that source must establish which. A convention fixes two separate things: the
+calendar system that names the day, and the meridian at which the day begins.
+They do not behave alike.
+
+A day already stated as the conventional local civil day is taken as reported and
+is never re-derived. Where only the calendar system differs — a Julian civil date
+from a jurisdiction that had not yet adopted the Gregorian calendar, for instance
+— the day is restated on the product's Gregorian axis, and the published record
+carries the source's calendar system and the fact that the day was restated. That
+correspondence is exact: it renames the same local civil day rather than choosing
+between days, so it invents no precision.
+
+A day whose meridian differs — a UTC calendar day, for instance — denotes a
+twenty-four hour interval that at any nonzero local offset falls across two local
+civil days. It does not by itself place the event on either, and choosing one
+would invent precision the source never stated. Such a day yields a date-specific
+event only where further evidence — an instant, or the source's own statement of
+the local day — resolves the interval to a single local day.
+
+A source whose convention is not established does not yield a date-specific
+event.
 
 A source that states an instant has not stated a date. The day is derived, and
 the published record carries the timezone applied, the resulting offset, and the

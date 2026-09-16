@@ -1773,16 +1773,35 @@ its place of occurrence.**
 Three cases D013 never addressed, because one event never raised them:
 
 - A source that states a **calendar day** states it in some convention, and the
-  adapter must establish which. A day already stated as the conventional local
-  civil day is taken as reported and never re-derived. A day stated in another
-  convention is **not convertible**: a UTC calendar day is a twenty-four hour
-  interval that at any nonzero local offset falls across two local civil days, so
-  choosing one would invent precision the source never stated — the very thing
-  this contract exists to forbid. Such a day yields a date-specific event only
-  where further evidence resolves the interval to a single local day. Without
-  this case the invariant and the never-re-derive rule contradict each other for
-  any source that dates by UTC day, and the same event could still reach two
-  different profiles.
+  adapter must establish which. A convention fixes two separate things — the
+  **calendar system** that names the day, and the **meridian** at which the day
+  begins — and they behave oppositely, which an earlier revision of this entry
+  got wrong by generalizing both as "another convention".
+
+  A day already stated as the conventional local civil day is taken as reported
+  and never re-derived. Where only the **calendar system** differs, the day is
+  **restated exactly** on the Gregorian axis: a Julian civil date names the same
+  local civil day under a different calendar, so converting it renames a day
+  rather than choosing between days and invents no precision. The record carries
+  the source's calendar system and the fact that the day was restated.
+
+  Where the **meridian** differs, the day is **not convertible**: a UTC calendar
+  day is a twenty-four hour interval that at any nonzero local offset falls
+  across two local civil days, so choosing one would invent precision the source
+  never stated — the very thing this contract exists to forbid. Such a day yields
+  a date-specific event only where further evidence resolves the interval to a
+  single local day. Without this case the invariant and the never-re-derive rule
+  contradict each other for any source that dates by UTC day, and the same event
+  could still reach two different profiles.
+
+  The distinction is not hypothetical inside the supported range. The shell opens
+  at 1900-01-01 (`docs/PRODUCT_CONTRACT.md:25`), and Russia used the Julian
+  calendar until February 1918, Greece until 1923. Collapsing the two axes would
+  have required an adapter to refuse those dates or to route around the binding
+  rule. Separately, `_parse_occurrence_date` (`wikidata.py:566-578`) reads only
+  `time` and `precision` and never inspects Wikidata's `calendarmodel`, so a
+  Julian-flagged value is currently parsed as though its digits were Gregorian —
+  filed as a code defect, not fixed here.
 - A source whose **day convention cannot be established** does not yield a
   date-specific event.
 - An instant whose **place of occurrence is unknown** is refused for
