@@ -1722,3 +1722,73 @@ single-event date announces no secondary section and reads as before, several
 sources are all named while one still reads naturally, and the heading outline
 has no skipped level — that last one verified by reverting the level and watching
 it fail.
+
+## D049: The local civil day is contract, not precedent
+
+**Context:** D013 already decided this, for one event. It stores the UTC instant,
+IANA timezone, instant-specific offset, local date and interpretation separately,
+on the reasoning that "the earthquake occurred on March 28 UTC but belongs to the
+March 27 public profile in Alaska civil time." `EventTime`'s `exact_timestamp`,
+`timezone_name`, `utc_offset_minutes`, `local_date` and `interpretation` are that
+decision's mechanism, field for field, and `usgs.py:243-247` implements it —
+converting through `ZoneInfo("America/Anchorage")` and recording the rule in its
+methodology (`usgs.py:315`). `GOLDEN_DATE` is `1964-03-27`, that local date.
+
+The Wikidata publisher does not implement it. It derives the day from the first
+ten characters of the P585 timestamp: at day precision that is the day the source
+stated, but for an instant it is the **UTC** day, chosen implicitly and disclosed
+nowhere. It then stamps `temporal_precision = DAY` with
+`temporal_assignment = REPORTED` — asserting the source reported a day when it may
+have reported an instant — and populates none of D013's five fields, so the
+assignment cannot afterwards be audited or corrected.
+
+So this is not an undecided question. It is a decided one that a second publisher
+was written without implementing, and the reason that was possible is structural:
+**D013 lived only in the decision log.** `docs/PRODUCT_CONTRACT.md` is what binds
+(§2). It required date role, precision and assignment, and already separated a
+reporting date from an occurrence date — but never said which calendar day an
+occurrence falls under. A rule recorded only as precedent does not bind the next
+publisher, and this one was not bound by it.
+
+D013's revisit trigger — "events require disputed or jurisdiction-specific
+calendar assignment" — has not fired. Nothing here disputes D013; this promotes it.
+
+**Decision:** The rule enters the contract, generalized off the single event it
+was decided for: **an event is filed under the conventional local civil day at
+its place of occurrence.**
+
+Two cases D013 never addressed, because one event never raised them:
+
+- A source that states a **calendar day** has stated the date. It is taken as
+  reported and never re-derived — evidence about the date, not an input to a
+  calculation.
+- An instant whose **place of occurrence is unknown** is refused for
+  date-specific publication. The product does not assign a day by choosing a
+  meridian.
+
+**Mechanism:** The contract now carries the rule (`docs/PRODUCT_CONTRACT.md`,
+"Evidence, uncertainty, and comparison rules"). Enforcement is the following
+slice (#109 A2): one shared temporal resolver that both publishers call,
+populating D013's five fields, proven by a cross-publisher invariant — the same
+instant and place resolve to the same `profile_date` whichever publisher ingested
+them. USGS already implements the rule, so that slice generalizes the correct
+implementation rather than inventing one.
+
+**Alternatives considered:** **UTC always** — this reverses D013, and is wrong in
+the way that matters: every reference work dates the 1964 Alaska earthquake to
+March 27, so an archive publishing March 28 while claiming evidential honesty
+contradicts them in order to privilege an arbitrary meridian. **A per-entity
+rule** (local where coordinates exist, UTC otherwise) — most faithful record by
+record, but it produces an archive whose dating rule a reader cannot state, and
+makes two dates incomparable without inspecting each one's provenance. **Leaving
+D013 as precedent and fixing the Wikidata path alone** — the symptom fix. The
+next publisher would be free to diverge again for exactly the reason this one
+did, because nothing binding would have changed.
+
+**Consequences:** Sub-day P585 precision cannot be accepted honestly until the
+resolver exists, so #107 lands without it and gains it in A2 — rather than
+shipping a narrowing that would immediately be widened again. G4 (#97) does not
+start until A2 merges: the live run writes permanent records into an append-only
+archive that is corrected forward, and eight of the hundred golden records carry
+the `timezone_boundary` selection tag, so the run would near certainly meet this
+case.
