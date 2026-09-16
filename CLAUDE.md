@@ -79,9 +79,12 @@ those, and deferring it would ship a known-wrong statement. What to do depends
 on what is asserting it.
 
 **Prose** — a contract clause, a decision record, a comment. **Remove it; do not
-rewrite it.** A deletion cannot introduce the next defect; a rewrite
-demonstrably can, and a document silent on a case is honest where a document
-wrong about it is not.
+rewrite it** — and take its dependents with it. A clause that defines a term or
+is cross-referenced cannot be lifted alone; check what points at it first, or
+the deletion leaves a dangling reference, which is a new defect. Removed as a
+unit it stays bounded in the way a rewrite is not, and a document silent on a
+case is honest where a document wrong about it is not. If the dependents will
+not lift out cleanly, that is a scope signal: split.
 
 **Executable** — a test assertion, a validation branch, a data mapping.
 Deleting it drops coverage or a guard and lets the underlying defect land, so
