@@ -1793,11 +1793,24 @@ Three cases D013 never addressed, because one event never raised them:
 "Evidence, uncertainty, and comparison rules"). Enforcement is the following
 slice (#109 A2): one shared temporal resolver called by every publisher that
 files a date-specific event — `usgs.py:850`, `wikidata.py:761` and
-`ucdp.py:1488` are the three constructing an `EventTime` today — populating
-D013's five fields, proven by a cross-publisher invariant: the same instant and
-place resolve to the same `profile_date` whichever publisher ingested them. USGS
-already implements the rule, so that slice generalizes the correct implementation
-rather than inventing one.
+`ucdp.py:1488` are the three constructing an `EventTime` today — proven by a
+cross-publisher invariant: the same instant and place resolve to the same
+`profile_date` whichever publisher ingested them. USGS already implements the
+rule, so that slice generalizes the correct implementation rather than inventing
+one.
+
+D013's five fields are the record of a **derivation**, and only a derived day has
+one. They are populated where a day is derived from an instant, not wherever a
+day is filed. A reported local day states no instant, so `exact_timestamp` is
+absent, and `utc_offset_minutes` — "instant-specific" in D013's own words — has
+no value to take: a local civil day spanning a clock transition has two offsets,
+and choosing one would invent exactly the precision this entry forbids. All five
+are already nullable (`models.py:462-466`) and `main`'s reported-day Wikidata
+path populates none of them (`wikidata.py:761-771`), so the honest encoding
+exists and is in use. What A2 adds is `temporal_assignment` telling the two
+cases apart, so that absence reads as "nothing was derived" rather than as
+missing data. Defining the reported-day representation is A2's work; it may not
+be defined by filling these fields with values no source stated.
 
 **Alternatives considered:** **UTC always** — this reverses D013, and is wrong in
 the way that matters: every reference work dates the 1964 Alaska earthquake to
