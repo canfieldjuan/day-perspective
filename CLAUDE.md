@@ -78,7 +78,9 @@ A post-round-3 finding may instead show the PR **asserts something false**.
 Deferring that ships a known-wrong statement, so it is not simply an edge case
 to log. **The author does not resolve it alone**: say what is false and where,
 in the PR and to the operator, and let them choose the remedy. One constraint
-holds regardless — **never delete a test or a guard to converge.**
+holds regardless — **never reduce coverage or protection below the base branch
+to converge.** Reverting a guard the PR itself added is not a reduction; it
+restores the baseline.
 
 Why: infinite thread-chasing costs more than a logged deferral (precedent:
 issue #4). This branch escalates rather than prescribing a remedy, because
