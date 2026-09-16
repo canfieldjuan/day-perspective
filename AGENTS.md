@@ -25,8 +25,7 @@ only this file; if the two files drift, `CLAUDE.md` wins.
    resolve it alone: say what is false and where, in the PR and to the
    operator, and let them choose the remedy. One constraint holds
    regardless — never reduce coverage or protection below the base branch to
-   converge; reverting a guard the PR itself added is not a reduction, it
-   restores the baseline.
+   converge.
 
 Everything else — ground-truth citation discipline, contracts-first, TDD,
 vertical slices, merge policy, document ownership, honest-data rules — is
