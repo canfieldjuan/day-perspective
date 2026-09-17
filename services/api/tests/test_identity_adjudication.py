@@ -118,7 +118,13 @@ def _make_event(
         source_record_hash_sha256="0" * 64,
         claim_type="candidate_occurrence_date",
         assertion_text=on_date.isoformat(),
-        assertion_json={"value": {"time": on_date.isoformat(), "precision": 11}},
+        assertion_json={
+            "value": {
+                "time": on_date.isoformat(),
+                "precision": 11,
+                "calendarmodel": "http://www.wikidata.org/entity/Q1985727",
+            }
+        },
         assertion_status=ClaimAssertionStatus.ACCEPTED,
     )
     identity = resolve_claim(
@@ -132,7 +138,13 @@ def _make_event(
     occurrence = resolve_claim(
         session,
         canonical_key=f"fixture:{key}:candidate_occurrence_date",
-        resolved_value={"value": {"time": on_date.isoformat(), "precision": 11}},
+        resolved_value={
+            "value": {
+                "time": on_date.isoformat(),
+                "precision": 11,
+                "calendarmodel": "http://www.wikidata.org/entity/Q1985727",
+            }
+        },
         rationale="Fixture occurrence resolution.",
         supporting_claim_ids=[occurrence_claim.id],
         resolution_method=ResolutionMethod.SINGLE_SOURCE,

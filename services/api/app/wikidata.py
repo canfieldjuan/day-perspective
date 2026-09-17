@@ -71,6 +71,12 @@ from app.services import (
     publish_day_profile,
     resolve_claim,
 )
+from app.temporal import (
+    CalendarSystem,
+    DayConvention,
+    Meridian,
+    resolve_day,
+)
 
 __all__ = [
     "LocalFilesystemRawSourceStore",
@@ -542,6 +548,14 @@ def _wikidata_methodology(session: Session) -> Methodology:
             "Accept one reviewed Wikidata candidate per predicate; single-source "
             "acceptance, not independent corroboration."
         ),
+        "day_convention": (
+            "P585 states a civil day at day precision (precision 11), in the "
+            "calendar its calendarmodel names -- Q1985727 Gregorian, Q1985786 "
+            "Julian. The day is resolved through the shared temporal resolver as "
+            "a local civil day: a Gregorian day is taken as reported, a Julian "
+            "day is refused pending exact restatement, and an absent or "
+            "unrecognized model fails closed rather than presuming a calendar."
+        ),
     }
     row = Methodology(
         slug="wikidata-single-candidate",
@@ -564,20 +578,66 @@ def _candidate_value(claim: Claim) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def _parse_occurrence_date(value: dict[str, Any]) -> date:
-    """The P585 day, or an error when the value is not day-precise.
+# Wikidata's proleptic calendar-model entity IDs. A P585 value names its day in
+# one of these, and the digits alone do not say which: in the supported range
+# (PRODUCT_CONTRACT.md:25 opens at 1900) the two calendars differ by up to 13
+# days, so the model is what fixes which day the digits denote.
+_CALENDAR_MODELS = {
+    "Q1985727": CalendarSystem.GREGORIAN,
+    "Q1985786": CalendarSystem.JULIAN,
+}
+
+
+def _calendar_system(value: dict[str, Any]) -> CalendarSystem:
+    """The calendar the P585 value states its day in, or a refusal.
+
+    Read from ``calendarmodel`` rather than presumed: an absent or unrecognized
+    model fails closed (#114), because presuming Gregorian is exactly the silent
+    13-day error the resolver exists to prevent.
+    """
+    model = value.get("calendarmodel")
+    if not isinstance(model, str):
+        raise ValueError(
+            "Wikidata occurrence date carries no calendarmodel, so its calendar "
+            "system is not established and the day is not accepted."
+        )
+    qid = model.rstrip("/").rsplit("/", 1)[-1]
+    calendar = _CALENDAR_MODELS.get(qid)
+    if calendar is None:
+        raise ValueError(
+            f"Wikidata calendarmodel {model!r} is not a calendar system this "
+            "adapter recognizes, so the day is not accepted."
+        )
+    return calendar
+
+
+def _resolve_occurrence_date(value: dict[str, Any]) -> date:
+    """The P585 day on the product's Gregorian axis, or an error.
+
+    Resolves through the shared temporal resolver so Wikidata cannot reach a
+    different profile than another publisher would for the same stated day. The
+    value states a civil day at day precision (Wikidata's ``timezone`` field is a
+    serialization artifact, always 0 by convention), so the meridian is local
+    civil and the resolver takes the day as reported.
 
     Wikidata precision 11 is a day; anything coarser cannot place the event on a
-    specific date, and this arc is date-specific enrichment. The date is parsed
-    from the P585 value itself, not from a stamped column, so it is honest for
-    any entity.
+    specific date, and this arc is date-specific enrichment. A calendar the
+    resolver does not yet restate -- Julian, deferred to #114/#120 -- is refused
+    here as ``UnresolvedDay`` (a ``ValueError``) rather than read as Gregorian.
     """
     time_text = value.get("time")
     if not isinstance(time_text, str) or value.get("precision") != 11:
         raise ValueError(
             "Wikidata occurrence date is not day-precise (expected P585 precision 11)."
         )
-    return date.fromisoformat(time_text.lstrip("+")[:10])
+    stated_day = date.fromisoformat(time_text.lstrip("+")[:10])
+    resolved = resolve_day(
+        stated_day=stated_day,
+        convention=DayConvention(
+            calendar=_calendar_system(value), meridian=Meridian.LOCAL_CIVIL
+        ),
+    )
+    return resolved.profile_date
 
 
 def _resolve_candidate(
@@ -698,12 +758,13 @@ def resolve_wikidata_event(session: Session) -> Event:
     if not isinstance(qid, str):
         raise ValueError("Wikidata identity candidate has no entity id.")
 
-    # Validate the occurrence date before any write: a bad P585 must not leave a
-    # half-resolved identity behind. The CLI commits its audit trail on failure,
-    # which would otherwise persist an identity with no event and wedge retries
-    # (the next call finds the identity, no event, and re-resolves without a
-    # supersession id).
-    occurrence_date = _parse_occurrence_date(
+    # Validate and resolve the occurrence date before any write: a bad P585, or
+    # one in a calendar the resolver does not restate (Julian, #114/#120), must
+    # not leave a half-resolved identity behind. The CLI commits its audit trail
+    # on failure, which would otherwise persist an identity with no event and
+    # wedge retries (the next call finds the identity, no event, and re-resolves
+    # without a supersession id).
+    occurrence_date = _resolve_occurrence_date(
         _candidate_value(claims["candidate_occurrence_date"])
     )
 
@@ -764,6 +825,9 @@ def resolve_wikidata_event(session: Session) -> Event:
                 start_date=occurrence_date,
                 end_date=occurrence_date,
                 temporal_precision=TemporalPrecision.DAY,
+                # REPORTED, matching how the resolver classifies a stated local
+                # civil day: a secondary source naming the day, not a direct
+                # record derived from an instant.
                 temporal_assignment=TemporalAssignment.REPORTED,
                 date_role=DateRole.OCCURRED,
                 is_primary=True,
@@ -1297,7 +1361,7 @@ def _recorded_statement_text(predicate: str, *, value: dict[str, Any]) -> str:
     if predicate == "candidate_event_type":
         return f"Wikidata classifies the entity as type {value.get('id', '')}."
     if predicate == "candidate_occurrence_date":
-        occurrence = _parse_occurrence_date(value)
+        occurrence = _resolve_occurrence_date(value)
         return (
             "Wikidata records the occurrence on "
             f"{occurrence:%B} {occurrence.day}, {occurrence.year}."
@@ -1578,9 +1642,9 @@ def publish_wikidata_event(
     # Pre-resolution it falls back to the accepted candidate purely so a collision
     # can still defer.
     if event is not None and resolved_occurrence is not None:
-        occurrence_date = _parse_occurrence_date(_resolved_value(resolved_occurrence))
+        occurrence_date = _resolve_occurrence_date(_resolved_value(resolved_occurrence))
     else:
-        occurrence_date = _parse_occurrence_date(
+        occurrence_date = _resolve_occurrence_date(
             _candidate_value(claims["candidate_occurrence_date"])
         )
 

@@ -337,6 +337,7 @@ def _reingest(
         "candidate_occurrence_date": {
             "time": occurrence_time,
             "precision": 11,
+            "calendarmodel": "http://www.wikidata.org/entity/Q1985727",
         },
     }
     for claim_type, value in values.items():
