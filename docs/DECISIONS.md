@@ -1927,15 +1927,30 @@ is the contract's whole subject.
 
 **Mechanism:** The contract carries the rule (`docs/PRODUCT_CONTRACT.md`,
 "Evidence, uncertainty, and comparison rules", beside the day-convention rule it
-is a separate axis from). Enforcement is the shared temporal resolver from D049
-/ A2: `resolve_day` already refuses an interval whose end differs from its start
-(the interim guard #113 required, so A2 could not decide this implicitly by
-taking `start_date`). Routing UCDP through that resolver is the following slice
-(A2c), which is where a multi-day interval stops being admitted on its start day
-and where an end-to-end multi-day test lands; this entry decides the policy that
-slice enforces. Because a refused interval reaches no profile, it can be no
-date's featured event (D046) and no grouped statement on one (D047); the
-interaction those entries would have with a multi-profile event does not arise.
+is a separate axis from). This axis is applied *after* D049, not beside it: the
+two share the "occurrence to local civil day" seam, and the count that decides an
+interval is over the **resolved** local civil days, not the raw stated dates.
+Each endpoint is resolved by D049 first; endpoints resolving to the same local
+civil day are a single day, and to more than one are a refused interval. The
+order matters — a source could state an interval in a convention (a UTC calendar
+day, say) whose endpoints resolve differently than their stated digits compare —
+so the contract states the resolution-then-count ordering rather than leaving it
+to the enforcement layer to imply.
+
+Enforcement is the shared temporal resolver from D049 / A2. `resolve_day` today
+carries an **interim proxy**: it refuses an interval whose stated end differs
+from its stated start (`temporal.py:257`, the guard #113 required so A2 could not
+decide this implicitly by taking `start_date`). That proxy is a raw comparison of
+the stated dates *before* convention resolution — correct only where the stated
+dates are already local civil days, which holds for every case the resolver
+accepts today (Gregorian local days; UTC and Julian are refused wholesale, and
+UCDP states civil dates). Routing UCDP through the resolver is the following slice
+(A2c), which is where the proxy is upgraded to resolve each endpoint then count,
+where a multi-day interval stops being admitted on its start day, and where an
+end-to-end multi-day test lands; this entry decides the policy that slice
+enforces. Because a refused interval reaches no profile, it can be no date's
+featured event (D046) and no grouped statement on one (D047); the interaction
+those entries would have with a multi-profile event does not arise.
 
 **Alternatives considered:** **Collapse to the start day** — today's default. It
 asserts a multi-day event "is" a start-day event, wrong in exactly the dimension
