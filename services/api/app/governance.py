@@ -1447,6 +1447,21 @@ def evaluate_featured_event(
         select(func.pg_advisory_xact_lock(func.hashtextextended(lock_key, 0)))
     )
 
+    # Validate the candidate set the same way the writer does, before either
+    # reuse path below can hand a selection back. record_featured_event_selection
+    # routes through _validated_candidates -- which is where a candidate whose
+    # primary EventTime spans more than one day is refused (D050) -- but the
+    # human-choice reuse and the unchanged standing-rule reuse both return before
+    # reaching the writer. Without this call, an event selected while single-day
+    # and later widened to a multi-day interval would be reused as the headline
+    # on a start_date it no longer owns: exactly the start-day collapse D050
+    # forbids. Applying the one gate here fails it closed on every path, and
+    # keeps the D050 eligibility check a single implementation rather than a
+    # second copy that could drift.
+    _validated_candidates(
+        session, profile_date=profile_date, candidate_root_ids=candidates
+    )
+
     keys = _featured_candidate_keys(session, candidate_root_ids=candidates)
     fingerprint = featured_candidate_fingerprint(
         session, profile_date=profile_date, candidate_root_ids=candidates
