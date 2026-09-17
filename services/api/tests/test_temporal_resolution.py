@@ -19,7 +19,9 @@ No database: the resolver is pure so the contract is checkable without one.
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime, tzinfo
+import json
+from datetime import UTC, date, datetime, time, tzinfo
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -439,3 +441,104 @@ class TestNothingStatedYieldsNothing:
     def test_refused_when_neither_a_day_nor_an_instant_is_given(self) -> None:
         with pytest.raises(UnresolvedDay):
             resolve_day(timezone_name="America/Anchorage")
+
+
+_GOLDEN_SET = (
+    Path(__file__).resolve().parents[3] / "data/golden-set/golden-dates-v1.json"
+)
+
+
+def _timezone_boundary_cohort() -> list[date]:
+    """The golden set's timezone_boundary dates, loaded so the cohort tracks it.
+
+    #109 names these 8 records as A2's test cohort. They are date + tag metadata
+    (no instants or coordinates, and they disclaim any associated event), so
+    they are the profile dates the boundary cases below resolve to, not runnable
+    publisher fixtures.
+    """
+    payload = json.loads(_GOLDEN_SET.read_text(encoding="utf-8"))
+    return sorted(
+        date.fromisoformat(record["date"])
+        for record in payload["records"]
+        if "timezone_boundary" in record.get("selection_tags", [])
+    )
+
+
+#: (IANA zone, local wall-clock time) pairs chosen so an instant at that local
+#: time on a target date lands on a *different* UTC date -- a genuine timezone
+#: boundary. Asia/Tokyo is +9 across the cohort's eras (local ahead of UTC, so
+#: an early-morning local time is the previous UTC day); America/Anchorage is
+#: strongly negative (local behind UTC, so a late-evening local time is the next
+#: UTC day). The direction is asserted per case, not assumed.
+_BOUNDARY_ZONES = (
+    ("Asia/Tokyo", time(0, 30)),
+    ("America/Anchorage", time(23, 30)),
+)
+
+
+class TestCrossPublisherInvariant:
+    """#109's headline: the same evidence files under one local civil day,
+    whichever publisher ingested it.
+
+    A2a/b/c put all three ``EventTime`` publishers on the single ``resolve_day``
+    seam: USGS derives a day from an instant (``usgs.py:244``), Wikidata files a
+    stated local civil day, UCDP files a stated single-day interval. So the same
+    timezone-boundary occurrence resolves to the same ``profile_date`` through
+    any of them -- the local civil day, never the UTC calendar day the pre-A2
+    divergence would have filed. This guard keeps that true: a future
+    publisher-specific day derivation would break it.
+
+    The cohort is the golden set's 8 ``timezone_boundary`` dates (#109), loaded
+    so it tracks the set.
+    """
+
+    @pytest.mark.parametrize("profile_date", _timezone_boundary_cohort())
+    @pytest.mark.parametrize("zone_name, local_time", _BOUNDARY_ZONES)
+    def test_every_publisher_shape_files_under_the_same_local_civil_day(
+        self, profile_date: date, zone_name: str, local_time: time
+    ) -> None:
+        zone = ZoneInfo(zone_name)
+        # An instant that is `profile_date` in local civil time but a different
+        # date in UTC -- the boundary the invariant is about. Asserted, so a
+        # zone/era that failed to straddle midnight fails here rather than
+        # passing a case that proves nothing.
+        instant = datetime.combine(profile_date, local_time, tzinfo=zone).astimezone(
+            UTC
+        )
+        assert instant.date() != profile_date, (
+            f"{zone_name} at {local_time} on {profile_date} is not a boundary"
+        )
+
+        # USGS shape: a day derived from an instant at its place of occurrence.
+        derived = resolve_day(instant=instant, timezone_name=zone_name)
+        # Wikidata shape: a stated local civil day.
+        stated = resolve_day(stated_day=profile_date, convention=GREGORIAN_LOCAL)
+        # UCDP shape: a stated single-day interval.
+        interval = resolve_day(
+            stated_day=profile_date,
+            stated_day_end=profile_date,
+            convention=GREGORIAN_LOCAL,
+        )
+
+        # The local civil day wins over the UTC calendar day, and every
+        # publisher shape converges on it.
+        assert derived.temporal_assignment is TemporalAssignment.DIRECT_RECORD
+        assert (
+            derived.profile_date
+            == stated.profile_date
+            == interval.profile_date
+            == profile_date
+        )
+
+        # The divergent path the invariant closes: the boundary's UTC calendar
+        # day, which a publisher declaring the UTC meridian would file, is
+        # refused (#120) -- it cannot re-enter through the resolver.
+        with pytest.raises(UnresolvedDay):
+            resolve_day(stated_day=instant.date(), convention=GREGORIAN_UTC)
+
+    def test_the_cohort_is_the_eight_golden_timezone_boundary_dates(self) -> None:
+        """Pin the cohort so losing timezone_boundary coverage in the golden set
+        fails this guard rather than silently shrinking it (#109)."""
+        cohort = _timezone_boundary_cohort()
+        assert len(cohort) == 8
+        assert len(set(cohort)) == 8
