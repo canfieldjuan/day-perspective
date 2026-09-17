@@ -107,16 +107,44 @@ def _value(statement: dict[str, Any]) -> Any:
 
 
 def _first(entity: dict[str, Any], property_id: str) -> dict[str, Any]:
+    """The best-ranked Wikidata statement for a property that asserts a value.
+
+    Wikidata ranks a property's statements: a ``preferred`` statement overrides
+    ``normal`` ones, and a ``deprecated`` statement records a known-wrong value
+    that must never be read as fact. Its snaktype matters too -- ``novalue`` and
+    ``somevalue`` assert the *absence* of a concrete value and carry no
+    ``datavalue`` to read. Taking ``statements[0]`` ignored all of that, so a
+    deprecated or valueless first statement could be published as the candidate.
+    This returns the first ``preferred`` statement, else the first ``normal``
+    one, considering only statements whose ``mainsnak`` snaktype is ``value``,
+    and refuses the property when none qualifies rather than read a bad value.
+    """
     claims = entity.get("claims")
     if not isinstance(claims, dict):
         raise ValueError("Wikidata entity has no claims object.")
     statements = claims.get(property_id)
     if not isinstance(statements, list) or not statements:
         raise ValueError(f"Wikidata entity is missing {property_id}.")
-    statement = statements[0]
-    if not isinstance(statement, dict):
-        raise ValueError(f"Wikidata {property_id} statement is malformed.")
-    return statement
+    preferred: dict[str, Any] | None = None
+    normal: dict[str, Any] | None = None
+    for statement in statements:
+        if not isinstance(statement, dict):
+            continue
+        mainsnak = statement.get("mainsnak")
+        if not isinstance(mainsnak, dict) or mainsnak.get("snaktype") != "value":
+            continue
+        rank = statement.get("rank")
+        if rank == "preferred" and preferred is None:
+            preferred = statement
+        elif rank == "normal" and normal is None:
+            normal = statement
+    chosen = preferred or normal
+    if chosen is None:
+        raise ValueError(
+            f"Wikidata entity has no usable {property_id} statement: every "
+            "statement is deprecated, asserts no value, or is malformed."
+        )
+    return chosen
 
 
 def _reference_count(statement: dict[str, Any]) -> int:
@@ -411,6 +439,19 @@ def ingest_wikidata_candidate(
                         ),
                     )
                 )
+            # Report whether the fatality candidate is actually unreferenced,
+            # read from the selected P1120 statement's reference count -- not a
+            # constant. The canonical fixture's P1120 has no references, so this
+            # is True there, but a referenced fatality (a live entity, or a
+            # later revision) must not be reported as unreferenced.
+            fatality_reference_count = next(
+                (
+                    int(candidate["references"])
+                    for candidate in candidates
+                    if candidate["predicate"] == "candidate_fatalities"
+                ),
+                0,
+            )
             session.add(
                 QualityCheck(
                     pipeline_run_id=run.id,
@@ -420,7 +461,8 @@ def ingest_wikidata_candidate(
                     subject_id=release.id,
                     details={
                         "candidate_count": len(candidates),
-                        "unreferenced_fatality_candidate": True,
+                        "unreferenced_fatality_candidate": fatality_reference_count
+                        == 0,
                         "candidate_only": True,
                     },
                 )
