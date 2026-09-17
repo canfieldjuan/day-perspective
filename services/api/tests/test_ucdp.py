@@ -8,7 +8,11 @@ import pytest
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.governance import SourceReleaseLicense
+from app.governance import (
+    FeaturedEventUnresolved,
+    SourceReleaseLicense,
+    record_featured_event_selection,
+)
 from app.models import (
     Claim,
     ClaimAssertionStatus,
@@ -307,8 +311,7 @@ def test_ucdp_ged_multi_day_interval_is_recorded_but_filed_under_no_single_day(
     )
     assert event_time.temporal_assignment == TemporalAssignment.REPORTED
 
-    # The enforcement: the shared resolver refuses to reduce that interval to a
-    # single local civil day, so no publisher can file it under one.
+    # The resolver refuses to reduce the interval to a single local civil day...
     with pytest.raises(UnresolvedDay):
         resolve_day(
             stated_day=date(1989, 1, 26),
@@ -316,6 +319,20 @@ def test_ucdp_ged_multi_day_interval_is_recorded_but_filed_under_no_single_day(
             convention=DayConvention(
                 calendar=CalendarSystem.GREGORIAN, meridian=Meridian.LOCAL_CIVIL
             ),
+        )
+
+    # ...and, the enforcement that actually bites: the featured-event eligibility
+    # gate refuses the multi-day event on its start day (D050). Featured
+    # selection keys on start_date and never calls resolve_day, so this is where
+    # "filed under no single day" is enforced, not the resolver's refusal.
+    with pytest.raises(FeaturedEventUnresolved, match="D050"):
+        record_featured_event_selection(
+            session,
+            profile_date=date(1989, 1, 26),
+            candidate_root_ids=[event.resolved_claim_id],
+            chosen_root_id=event.resolved_claim_id,
+            reviewer="test-human",
+            rationale="attempt to feature a multi-day interval on its start day",
         )
 
 

@@ -987,6 +987,23 @@ def _validated_candidates(
                 f"Featured-event candidate {root_id} does not occur on "
                 f"{profile_date.isoformat()}."
             )
+        if (
+            event_time.end_date is not None
+            and event_time.end_date != event_time.start_date
+        ):
+            # D050: an occurrence spanning more than one local civil day yields
+            # no date-specific event. Its span is recorded (start_date/end_date),
+            # but it is filed under no single day -- so it is not eligible to be
+            # featured on its start day. This is the enforcement point the
+            # resolver's refusal does not reach: featured selection keys on
+            # start_date and never calls resolve_day.
+            raise FeaturedEventUnresolved(
+                f"Featured-event candidate {root_id} spans "
+                f"{event_time.start_date.isoformat()} to "
+                f"{event_time.end_date.isoformat()}; a multi-day interval yields "
+                "no date-specific event (D050) and is not eligible for a "
+                "single-day profile."
+            )
     return ordered
 
 
