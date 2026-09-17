@@ -19,7 +19,8 @@ No database: the resolver is pure so the contract is checkable without one.
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, tzinfo
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -42,6 +43,24 @@ JULIAN_LOCAL = DayConvention(
 GREGORIAN_UTC = DayConvention(
     calendar=CalendarSystem.GREGORIAN, meridian=Meridian.UTC
 )
+
+
+class _NoOffset(tzinfo):
+    """A tzinfo that supplies no offset, which leaves a datetime naive.
+
+    Python's own test for awareness is `tzinfo is not None AND
+    utcoffset() is not None`; this is the second half, which a guard checking
+    only the first half misses.
+    """
+
+    def utcoffset(self, dt: datetime | None) -> None:
+        return None
+
+    def dst(self, dt: datetime | None) -> None:
+        return None
+
+    def tzname(self, dt: datetime | None) -> None:
+        return None
 
 
 class TestStatedLocalDayDenotesItself:
@@ -217,6 +236,31 @@ class TestInstantDerivesADay:
                 instant=datetime(1964, 3, 28, 3, 36, 14),
                 timezone_name="America/Anchorage",
             )
+
+    def test_refused_for_a_tzinfo_that_supplies_no_offset(self) -> None:
+        """Python calls a value naive when utcoffset() is None, tzinfo or not.
+
+        Testing only `tzinfo is None` let this through to astimezone(), which
+        reads a naive value in the HOST process's zone -- so the same source
+        data published 1964-03-27 on a UTC host and 1964-03-28 on a
+        Pacific/Kiritimati one. A date that depends on which machine ingested
+        it is the failure this module exists to prevent.
+        """
+        with pytest.raises(UnresolvedDay, match="naive"):
+            resolve_day(
+                instant=datetime(1964, 3, 28, 3, 36, 14, tzinfo=_NoOffset()),
+                timezone_name="America/Anchorage",
+            )
+
+    def test_an_ordinary_aware_instant_is_unaffected(self) -> None:
+        """The contrast: the tightened guard must not refuse a real instant."""
+        resolved = resolve_day(
+            instant=datetime(
+                1964, 3, 28, 3, 36, 14, tzinfo=ZoneInfo("America/Anchorage")
+            ),
+            timezone_name="America/Anchorage",
+        )
+        assert resolved.profile_date == date(1964, 3, 28)
 
     def test_refused_for_an_unknown_timezone(self) -> None:
         with pytest.raises(UnresolvedDay, match="IANA"):

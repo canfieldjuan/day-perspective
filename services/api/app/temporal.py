@@ -242,10 +242,17 @@ def resolve_day(
     local civil day, which is the contract's fail-closed default rather than an
     error condition.
     """
-    if instant is not None and instant.tzinfo is None:
+    # Python's definition of naive, not just a missing tzinfo: a tzinfo whose
+    # utcoffset() returns None leaves the value naive, and astimezone() would
+    # then read it in the host process's local zone -- so the same source data
+    # would publish a different day depending on which machine ingested it.
+    if instant is not None and (
+        instant.tzinfo is None or instant.utcoffset() is None
+    ):
         raise UnresolvedDay(
             "A naive datetime does not denote an instant, so no local civil "
-            "day follows from it."
+            "day follows from it. A tzinfo whose utcoffset() is None leaves "
+            "the value naive."
         )
     if stated_day_end is not None and stated_day_end != stated_day:
         raise UnresolvedDay(
