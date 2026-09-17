@@ -31,11 +31,11 @@ from app.ucdp import ingest_ucdp_annual, review_ucdp_annual
 from app.un_wpp import ingest_un_wpp, review_un_wpp
 from app.usgs import (
     LocalFilesystemRawSourceStore,
-    USGSEarthquakeAdapter,
     accept_and_resolve_release,
     ingest_usgs,
     publish_golden_profile,
 )
+from tests.helpers import seed_test_timezones, usgs_test_adapter
 
 ROOT = Path(__file__).resolve().parents[3]
 FIXTURE = ROOT / "data/fixtures/usgs/1964-prince-william-sound.geojson"
@@ -48,9 +48,10 @@ UCDP_ANNUAL_FIXTURE = (
 
 
 def ingest(session: Session, tmp_path: Path) -> IngestionResult:
+    seed_test_timezones(session)
     return ingest_usgs(
         session,
-        adapter=USGSEarthquakeAdapter(),
+        adapter=usgs_test_adapter(session),
         raw_store=LocalFilesystemRawSourceStore(tmp_path / "raw"),
         fixture_path=FIXTURE,
     )
