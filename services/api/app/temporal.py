@@ -17,7 +17,8 @@ state, and refuses the rest by name rather than mishandling them:
 - an instant, from which a day is derived (USGS);
 - a stated UTC calendar day, refused, deferred to #120;
 - a Julian civil date, refused, deferred to #114;
-- an occurrence interval, refused, deferred to #113.
+- a multi-day occurrence interval, refused per D050 (endpoint-resolution
+  enforcement in A2c).
 
 The refusals are the point of the vocabulary. `CalendarSystem` and `Meridian`
 name conventions this module declines, so an adapter whose source uses one says
@@ -257,9 +258,8 @@ def resolve_day(
     if stated_day_end is not None and stated_day_end != stated_day:
         raise UnresolvedDay(
             f"The source states an interval ({stated_day} to {stated_day_end}), "
-            "not a day. Which profile or profiles an occurrence interval "
-            "belongs to is not decided by the contract; see issue #113. "
-            "Refused rather than collapsed to the start date."
+            "not a day. A multi-day interval yields no date-specific event "
+            "(D050): it is refused rather than collapsed to its start date."
         )
 
     statement = SourceStatement(day=stated_day, convention=convention, instant=instant)

@@ -377,12 +377,16 @@ class TestEveryPathRecordsWhatTheSourceSaid:
 
 
 class TestIntervalIsRefusedRatherThanCollapsed:
-    """#109's interim guard for #113.
+    """The interval policy, decided by D050 and enforced here.
 
-    governance.py:985 admits an event to a profile only on its start_date, so
-    a multi-day interval silently becomes a start-day event. Which profile(s)
-    an interval belongs to is undecided (#113); the resolver must fail loudly
-    rather than settle it by taking start_date.
+    A multi-day occurrence yields no date-specific event: its span is recorded
+    but filed under no single day, never collapsed to its start date. The
+    resolver refuses it rather than let a future publisher inherit the
+    start_date default (`_validated_candidates` keys featured candidates by
+    start_date at governance.py:985; no publisher builds a profile from a UCDP
+    interval today). Endpoint-resolution enforcement -- resolving each endpoint
+    by convention, then counting distinct local civil days -- is A2c; this guard
+    is the interim raw-date proxy.
     """
 
     def test_a_multi_day_interval_is_refused(self) -> None:
@@ -402,9 +406,9 @@ class TestIntervalIsRefusedRatherThanCollapsed:
         )
         assert resolved.profile_date == date(1964, 3, 27)
 
-    def test_the_refusal_names_the_undecided_policy(self) -> None:
-        """A reader hitting this must find the open question, not a puzzle."""
-        with pytest.raises(UnresolvedDay, match="#113"):
+    def test_the_refusal_names_the_decided_policy(self) -> None:
+        """A reader hitting this must find the decided policy, not a puzzle."""
+        with pytest.raises(UnresolvedDay, match="D050"):
             resolve_day(
                 stated_day=date(1964, 3, 27),
                 stated_day_end=date(1964, 3, 29),
