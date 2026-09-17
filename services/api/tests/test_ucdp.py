@@ -336,6 +336,65 @@ def test_ucdp_ged_multi_day_interval_is_recorded_but_filed_under_no_single_day(
         )
 
 
+@pytest.mark.integration
+def test_ucdp_ged_review_heals_claim_temporal_assignment_on_upgrade(
+    session: Session, tmp_path: Path
+) -> None:
+    # An upgraded database: GED 6833 was ingested and reviewed under a policy
+    # that stamped DIRECT_RECORD, then this build (A2c / D049) deployed. Ingest
+    # is idempotent, so the pre-existing claims never re-enter the claim loop
+    # that would restamp them. Re-reviewing must still leave the claim evidence
+    # snapshot -- _claim_snapshot serializes claim.temporal_assignment -- equal
+    # to the resolved EventTime, not split REPORTED/DIRECT_RECORD.
+    result = ingest_ucdp_ged(
+        session,
+        fixture_path=GED_FIXTURE,
+        raw_store=LocalFilesystemRawSourceStore(tmp_path / "raw"),
+    )
+    event = review_ucdp_ged(session, result.source_release_id)
+    session.commit()
+
+    # Force the pre-A2c state: every claim and the EventTime read DIRECT_RECORD,
+    # the divergence a re-review of an upgraded database would otherwise leave.
+    claims = list(
+        session.scalars(
+            select(Claim).where(Claim.source_release_id == result.source_release_id)
+        )
+    )
+    assert claims
+    for claim in claims:
+        claim.temporal_assignment = TemporalAssignment.DIRECT_RECORD
+    event_time = session.scalar(
+        select(EventTime).where(
+            EventTime.event_id == event.id, EventTime.is_primary
+        )
+    )
+    assert event_time is not None
+    event_time.temporal_assignment = TemporalAssignment.DIRECT_RECORD
+    session.flush()
+
+    # Re-reviewing the same (idempotent) release heals both sides together.
+    review_ucdp_ged(session, result.source_release_id)
+
+    healed_event_time = session.scalar(
+        select(EventTime).where(
+            EventTime.event_id == event.id, EventTime.is_primary
+        )
+    )
+    assert healed_event_time is not None
+    assert healed_event_time.temporal_assignment == TemporalAssignment.REPORTED
+    healed_claims = list(
+        session.scalars(
+            select(Claim).where(Claim.source_release_id == result.source_release_id)
+        )
+    )
+    assert healed_claims
+    assert all(
+        claim.temporal_assignment == TemporalAssignment.REPORTED
+        for claim in healed_claims
+    ), "review must re-derive every claim's assignment to match the EventTime"
+
+
 def test_ucdp_failure_records_failed_run_without_release(
     session: Session, tmp_path: Path
 ) -> None:

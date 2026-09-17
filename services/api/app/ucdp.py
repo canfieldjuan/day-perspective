@@ -1510,6 +1510,20 @@ def review_ucdp_ged(session: Session, source_release_id: UUID) -> Event:
         temporal_assignment = resolved_day.temporal_assignment
     except UnresolvedDay:
         temporal_assignment = TemporalAssignment.REPORTED
+    # Bring the claims' recorded assignment into step with the resolved
+    # EventTime on every review. Ingest stamps the claims at creation
+    # (the loop above near ucdp.py:1324), but ingest is idempotent: a record
+    # already imported under an earlier assignment policy returns from
+    # _existing_result before the claim loop, so its claims keep the old value.
+    # review_ucdp_ged re-derives the EventTime's assignment from the shared
+    # resolver here, so it re-derives the claims' too -- _claim_snapshot
+    # (services._claim_snapshot) serializes the claim's assignment, and this
+    # keeps that snapshot equal to the EventTime for a freshly ingested and an
+    # upgraded database alike. Without it, re-reviewing an upgraded database
+    # would move the EventTime to REPORTED while the snapshot still read the
+    # superseded DIRECT_RECORD.
+    for record_claim in claims:
+        record_claim.temporal_assignment = temporal_assignment
     event_time = session.scalar(
         select(EventTime).where(EventTime.event_id == event.id, EventTime.is_primary)
     )
