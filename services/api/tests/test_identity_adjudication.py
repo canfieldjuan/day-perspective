@@ -14,7 +14,7 @@ collision deferred.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
@@ -245,6 +245,33 @@ def test_the_pair_must_share_one_profile_date(session: Session) -> None:
 
     with pytest.raises(IdentityAdjudicationError):
         _distinct(session, a, elsewhere)
+
+
+@pytest.mark.integration
+def test_a_multi_day_interval_cannot_be_adjudicated_on_its_start_day(
+    session: Session,
+) -> None:
+    """D050 on the second date-keying path: identity adjudication.
+
+    A multi-day occurrence yields no date-specific event, so it has no single
+    day to be adjudicated on. Widening one event to an interval whose start is
+    the shared date must fail closed rather than collapse to that start day --
+    the same refusal the featured-event gate makes, here on the path that keys
+    on ``_primary_occurrence_date``. The two share ``_spans_multiple_local_days``.
+    """
+    a = _make_event(session, key="A")
+    b = _make_event(session, key="B")
+    interval = session.scalar(
+        select(EventTime).where(
+            EventTime.event_id == b.id, EventTime.is_primary.is_(True)
+        )
+    )
+    assert interval is not None
+    interval.end_date = interval.start_date + timedelta(days=2)
+    session.flush()
+
+    with pytest.raises(IdentityAdjudicationError, match="D050"):
+        _distinct(session, a, b)
 
 
 @pytest.mark.integration
