@@ -102,11 +102,11 @@ many days an occurrence spans, a separate axis applied after them. Each endpoint
 of a stated interval is first resolved to its local civil day by the rules above.
 Where both endpoints resolve to the same local civil day the occurrence is not an
 interval and is filed under that day. Where they resolve to more than one, the
-occurrence yields no date-specific event: its span is preserved and shown as an
-interval, but it is filed under no single day, because assigning it to one — its
-start, or any other — would assert the event occurred on that day, a stronger and
-different claim than that its span covered it, and the archive does not conflate
-the two. The interval's end is therefore part of what withholds a date-specific
+occurrence yields no date-specific event: its span is recorded on the event as an
+interval, but the event is filed under no single day and so appears on no date
+profile, because assigning it to one — its start, or any other — would assert the
+event occurred on that day, a stronger and different claim than that its span
+covered it, and the archive does not conflate the two. The interval's end is therefore part of what withholds a date-specific
 event, not a second day the event is also filed under. Because such an interval
 reaches no profile, it is never a date's featured event or a grouped statement on
 one.

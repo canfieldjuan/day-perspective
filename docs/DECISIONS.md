@@ -1911,8 +1911,9 @@ clock, not how many days, so read as a universal it can be mistaken for
 asserting exactly one day; that is how a #110 review round surfaced this.
 
 **Decision:** An occurrence a source states as an interval covering more than
-one local civil day **yields no date-specific event**. The span is preserved
-and shown as an interval, but filed under no single day. A single-day interval
+one local civil day **yields no date-specific event**. The span is recorded on
+the event as an interval, but filed under no single day and shown on no date
+profile until the span surface (#123) exists. A single-day interval
 (`start == end`) is not an interval and files under that day. The interval's end
 is what *withholds* the assignment, not a second day the event is also filed
 under — which answers #113's requirement that `end_date` stop being stored and
