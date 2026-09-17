@@ -26,6 +26,7 @@ from app.models import (
     Event,
     EventLocation,
     EventTime,
+    Methodology,
     ResolvedClaim,
     TemporalAssignment,
     TemporalPrecision,
@@ -129,6 +130,19 @@ def test_resolve_builds_event_from_reviewed_candidate(
     )
     assert f"wikidata:{ENTITY_ID}:candidate_event_identity" in keys
     assert f"wikidata:{ENTITY_ID}:candidate_occurrence_date" in keys
+
+    # The day convention the resolver enforces is persisted and surfaced, not
+    # left only in the definition hash: the methodology description carries it,
+    # under a version distinct from the pre-convention one, so a resolution can
+    # be audited against the temporal rule it was made under.
+    methodology = session.scalars(
+        select(Methodology).where(
+            Methodology.slug == "wikidata-single-candidate"
+        )
+    ).one()
+    assert methodology.version == "2"
+    assert "calendarmodel" in methodology.description
+    assert "local civil day" in methodology.description
 
 
 @pytest.mark.integration
