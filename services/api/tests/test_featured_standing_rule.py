@@ -29,7 +29,7 @@ caught me repeatedly — when the human's chosen event stops qualifying at all.
 from __future__ import annotations
 
 import hashlib
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
@@ -48,7 +48,7 @@ from app.governance import (
     featured_candidate_fingerprint,
     resolve_featured_event,
 )
-from app.models import Event, ResolvedClaim
+from app.models import Event, EventTime, ResolvedClaim
 from app.services import canonical_json_bytes
 
 from .test_identity_adjudication import HUMAN, PROFILE_DATE, _make_event
@@ -605,3 +605,85 @@ def test_a_human_choice_landing_first_is_honoured_not_overwritten(
     assert evaluation.winning_root_id == second.resolved_claim_id
     assert evaluation.selection_origin == FEATURED_ORIGIN_HUMAN
     assert evaluation.decision_changed is False
+
+
+# --------------------------------------------------------------------------
+# A selection revalidated on reuse (D050)
+# --------------------------------------------------------------------------
+
+
+def _widen_to_multi_day(session: Session, event: Event) -> None:
+    """Widen an event's primary occurrence to a multi-day interval, in place.
+
+    The state a later review leaves behind when a source revises a single-day
+    occurrence to span several civil days: the primary ``EventTime`` row stays,
+    its ``start_date`` unchanged, its ``end_date`` pushed out. D050 says the
+    result is no longer a date-specific event, so it may no longer lead a day.
+    """
+    event_time = session.scalar(
+        select(EventTime).where(
+            EventTime.event_id == event.id, EventTime.is_primary.is_(True)
+        )
+    )
+    assert event_time is not None
+    event_time.end_date = event_time.start_date + timedelta(days=2)
+    session.flush()
+
+
+@pytest.mark.integration
+def test_a_standing_choice_that_becomes_multi_day_is_not_reused(
+    session: Session, tmp_path: Path
+) -> None:
+    """A reused standing-rule headline is revalidated, not trusted (D050).
+
+    The rule features one of two single-day events, writing a standing
+    selection. A later review widens that event's occurrence to a multi-day
+    interval. Re-evaluating takes the unchanged-standing-rule reuse path, which
+    returns the same row before the writer's eligibility gate runs -- so without
+    revalidating on reuse it would feature, on its start date, an event D050 says
+    is no longer date-specific. The gate has to run before the reuse, so the
+    stale headline fails closed.
+    """
+    first = _make_event(session, key="alpha")
+    second = _make_event(session, key="beta")
+    initial = _apply(session, [first, second])
+    assert initial is not None
+    assert initial.selection_origin == FEATURED_ORIGIN_STANDING_RULE
+
+    winner = _expected_winner(session, [first, second])
+    _widen_to_multi_day(session, winner)
+
+    with pytest.raises(FeaturedEventUnresolved, match="D050"):
+        _apply(session, [first, second])
+
+
+@pytest.mark.integration
+def test_a_human_choice_that_becomes_multi_day_is_not_reused(
+    session: Session, tmp_path: Path
+) -> None:
+    """The same revalidation on the human-choice reuse path (D038 + D050).
+
+    A person features one of two single-day events. A later review widens that
+    event to a multi-day interval. D038 stops the rule *displacing* a human's
+    choice, but it does not license reusing one the date no longer admits: an
+    event that is no longer date-specific (D050) has no start day to lead.
+    The eligibility gate runs before the human-choice reuse, so the date fails
+    closed until a person chooses again rather than reusing the stale headline.
+    """
+    first = _make_event(session, key="alpha")
+    second = _make_event(session, key="beta")
+    from app.governance import record_featured_event_selection
+
+    record_featured_event_selection(
+        session,
+        profile_date=PROFILE_DATE,
+        candidate_root_ids=[first.resolved_claim_id, second.resolved_claim_id],
+        chosen_root_id=second.resolved_claim_id,
+        reviewer=HUMAN,
+        rationale="A person chose the second event while it was single-day.",
+    )
+
+    _widen_to_multi_day(session, second)
+
+    with pytest.raises(FeaturedEventUnresolved, match="D050"):
+        _apply(session, [first, second])

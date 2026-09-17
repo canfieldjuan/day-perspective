@@ -735,6 +735,28 @@ def _canonical_pair(event_a_id: UUID, event_b_id: UUID) -> tuple[UUID, UUID]:
     return first, second
 
 
+def _multi_day_interval_end(event_time: EventTime) -> date | None:
+    """The occurrence's end when it spans more than one local civil day (D050).
+
+    The single test behind every place that keys an event to a date. It returns
+    the interval end that proves the span -- not a bare flag -- so a caller
+    renders the interval and narrows the nullable field in one step, rather than
+    re-reading ``end_date`` after a boolean check (which also loses the type
+    narrowing). An occurrence whose end differs from its start denotes more than
+    one local civil day, and D050 says such an interval yields no date-specific
+    event: it is recorded (``start_date``, ``end_date``) but filed under no
+    single day. Every consumer that reads a primary ``EventTime.start_date`` as
+    the day an event is filed under refuses the interval through this one
+    predicate, so the rule has a single implementation rather than a copy per
+    consumer that could drift or be forgotten -- review found the missing copies
+    one consumer at a time (featured selection, then identity adjudication).
+    """
+    end_date = event_time.end_date
+    if end_date is not None and end_date != event_time.start_date:
+        return end_date
+    return None
+
+
 def _primary_occurrence_date(session: Session, event_id: UUID) -> date:
     if session.get(Event, event_id) is None:
         raise IdentityAdjudicationError(
@@ -748,6 +770,18 @@ def _primary_occurrence_date(session: Session, event_id: UUID) -> date:
     if event_time is None:
         raise IdentityAdjudicationError(
             f"Event {event_id} has no primary occurrence to adjudicate on."
+        )
+    interval_end = _multi_day_interval_end(event_time)
+    if interval_end is not None:
+        # D050: the same start-date collapse the featured-event gate refuses,
+        # on the other path that keys on start_date. A multi-day occurrence
+        # yields no date-specific event, so it has no single day to be
+        # adjudicated on; fail closed rather than take its start as the date.
+        raise IdentityAdjudicationError(
+            f"Event {event_id} occurs over the interval "
+            f"{event_time.start_date.isoformat()} to "
+            f"{interval_end.isoformat()}; a multi-day interval yields no "
+            "date-specific event (D050) and cannot be adjudicated on a single day."
         )
     return event_time.start_date
 
@@ -986,6 +1020,23 @@ def _validated_candidates(
             raise FeaturedEventUnresolved(
                 f"Featured-event candidate {root_id} does not occur on "
                 f"{profile_date.isoformat()}."
+            )
+        interval_end = _multi_day_interval_end(event_time)
+        if interval_end is not None:
+            # D050: an occurrence spanning more than one local civil day yields
+            # no date-specific event. Its span is recorded (start_date/end_date),
+            # but it is filed under no single day -- so it is not eligible to be
+            # featured on its start day. This is the enforcement point the
+            # resolver's refusal does not reach: featured selection keys on
+            # start_date and never calls resolve_day. The multi-day test lives in
+            # _multi_day_interval_end, shared with the identity-adjudication path
+            # so the two cannot diverge.
+            raise FeaturedEventUnresolved(
+                f"Featured-event candidate {root_id} spans "
+                f"{event_time.start_date.isoformat()} to "
+                f"{interval_end.isoformat()}; a multi-day interval yields "
+                "no date-specific event (D050) and is not eligible for a "
+                "single-day profile."
             )
     return ordered
 
@@ -1428,6 +1479,21 @@ def evaluate_featured_event(
     lock_key = f"featured-event:{profile_date.isoformat()}"
     session.execute(
         select(func.pg_advisory_xact_lock(func.hashtextextended(lock_key, 0)))
+    )
+
+    # Validate the candidate set the same way the writer does, before either
+    # reuse path below can hand a selection back. record_featured_event_selection
+    # routes through _validated_candidates -- which is where a candidate whose
+    # primary EventTime spans more than one day is refused (D050) -- but the
+    # human-choice reuse and the unchanged standing-rule reuse both return before
+    # reaching the writer. Without this call, an event selected while single-day
+    # and later widened to a multi-day interval would be reused as the headline
+    # on a start_date it no longer owns: exactly the start-day collapse D050
+    # forbids. Applying the one gate here fails it closed on every path, and
+    # keeps the D050 eligibility check a single implementation rather than a
+    # second copy that could drift.
+    _validated_candidates(
+        session, profile_date=profile_date, candidate_root_ids=candidates
     )
 
     keys = _featured_candidate_keys(session, candidate_root_ids=candidates)

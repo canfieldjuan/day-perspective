@@ -65,6 +65,13 @@ from app.services import (
     create_source_release,
     resolve_claim,
 )
+from app.temporal import (
+    CalendarSystem,
+    DayConvention,
+    Meridian,
+    UnresolvedDay,
+    resolve_day,
+)
 
 __all__ = ["LocalFilesystemRawSourceStore"]
 
@@ -1309,7 +1316,12 @@ def ingest_ucdp_ged(
                 claim.temporal_start = interval_start
                 claim.temporal_end = interval_end
                 claim.temporal_precision = temporal_precision
-                claim.temporal_assignment = TemporalAssignment.DIRECT_RECORD
+                # REPORTED: UCDP states a civil day/interval and derives nothing
+                # from an instant (D049; DIRECT_RECORD is reserved for that). Its
+                # primary-source nature is data_status below, not here. Kept in
+                # step with the resolved EventTime and the claim evidence
+                # snapshot (services._claim_snapshot) so provenance is consistent.
+                claim.temporal_assignment = TemporalAssignment.REPORTED
                 claim.date_role = DateRole.OCCURRED
                 claim.data_status = (
                     DataStatus.ESTIMATED
@@ -1481,6 +1493,37 @@ def review_ucdp_ged(session: Session, source_release_id: UUID) -> Event:
         if int(occurrence["precision"]) == 1
         else TemporalPrecision.UNKNOWN
     )
+    # Resolve the occurrence day through the shared temporal resolver (A2c, D049):
+    # UCDP states a civil day, so a single-day occurrence is REPORTED, not a
+    # DIRECT_RECORD (which the resolver reserves for a day derived from an
+    # instant). A multi-day interval yields no date-specific event (D050); the
+    # resolver refuses it, and it is still recorded here as an interval -- span
+    # and end retained -- filed under no single day.
+    try:
+        resolved_day = resolve_day(
+            stated_day=interval_start,
+            stated_day_end=interval_end,
+            convention=DayConvention(
+                calendar=CalendarSystem.GREGORIAN, meridian=Meridian.LOCAL_CIVIL
+            ),
+        )
+        temporal_assignment = resolved_day.temporal_assignment
+    except UnresolvedDay:
+        temporal_assignment = TemporalAssignment.REPORTED
+    # Bring the claims' recorded assignment into step with the resolved
+    # EventTime on every review. Ingest stamps the claims at creation
+    # (the loop above near ucdp.py:1324), but ingest is idempotent: a record
+    # already imported under an earlier assignment policy returns from
+    # _existing_result before the claim loop, so its claims keep the old value.
+    # review_ucdp_ged re-derives the EventTime's assignment from the shared
+    # resolver here, so it re-derives the claims' too -- _claim_snapshot
+    # (services._claim_snapshot) serializes the claim's assignment, and this
+    # keeps that snapshot equal to the EventTime for a freshly ingested and an
+    # upgraded database alike. Without it, re-reviewing an upgraded database
+    # would move the EventTime to REPORTED while the snapshot still read the
+    # superseded DIRECT_RECORD.
+    for record_claim in claims:
+        record_claim.temporal_assignment = temporal_assignment
     event_time = session.scalar(
         select(EventTime).where(EventTime.event_id == event.id, EventTime.is_primary)
     )
@@ -1490,7 +1533,7 @@ def review_ucdp_ged(session: Session, source_release_id: UUID) -> Event:
             provenance_resolved_claim_id=resolved["occurrence_interval"].id,
             start_date=interval_start,
             temporal_precision=temporal_precision,
-            temporal_assignment=TemporalAssignment.DIRECT_RECORD,
+            temporal_assignment=temporal_assignment,
             date_role=DateRole.OCCURRED,
             is_primary=True,
         )
@@ -1499,6 +1542,7 @@ def review_ucdp_ged(session: Session, source_release_id: UUID) -> Event:
     event_time.start_date = interval_start
     event_time.end_date = interval_end
     event_time.temporal_precision = temporal_precision
+    event_time.temporal_assignment = temporal_assignment
     event_time.display_label = (
         f"UCDP source-record date: {interval_start.strftime('%B %-d, %Y')}"
         if interval_start == interval_end

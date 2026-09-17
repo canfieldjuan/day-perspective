@@ -8,7 +8,11 @@ import pytest
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.governance import SourceReleaseLicense
+from app.governance import (
+    FeaturedEventUnresolved,
+    SourceReleaseLicense,
+    record_featured_event_selection,
+)
 from app.models import (
     Claim,
     ClaimAssertionStatus,
@@ -31,6 +35,13 @@ from app.models import (
     TemporalAssignment,
 )
 from app.services import supersede_claim
+from app.temporal import (
+    CalendarSystem,
+    DayConvention,
+    Meridian,
+    UnresolvedDay,
+    resolve_day,
+)
 from app.ucdp import (
     LocalFilesystemRawSourceStore,
     build_ucdp_annual_profile_content,
@@ -233,7 +244,11 @@ def test_ucdp_ged_fixture_builds_bounded_direct_event_impact(
     assert event_time is not None
     assert event_time.local_date is None
     assert event_time.exact_timestamp is None
-    assert event_time.temporal_assignment == TemporalAssignment.DIRECT_RECORD
+    # UCDP states a civil day and derives nothing from an instant, so its day is
+    # REPORTED, not DIRECT_RECORD (which the shared resolver reserves for a day
+    # derived from an instant). Its primary-source nature lives in data_status
+    # (FINAL), not in temporal_assignment (A2c / D049).
+    assert event_time.temporal_assignment == TemporalAssignment.REPORTED
     assert (
         session.scalar(
             select(func.count())
@@ -258,6 +273,126 @@ def test_ucdp_ged_fixture_builds_bounded_direct_event_impact(
     assert fatality_claim is not None
     assert fatality_claim.lower_bound == Decimal("100")
     assert fatality_claim.upper_bound == Decimal("1100")
+
+
+@pytest.mark.integration
+def test_ucdp_ged_multi_day_interval_is_recorded_but_filed_under_no_single_day(
+    session: Session, tmp_path: Path
+) -> None:
+    # D050: an occurrence spanning more than one local civil day yields no
+    # date-specific event. UCDP records the interval -- span, end, and interval
+    # label -- but the shared resolver refuses to reduce it to one profile day,
+    # so a future publisher can file it under none.
+    multi_day = tmp_path / "multi-day-ged.csv"
+    multi_day.write_text(
+        GED_FIXTURE.read_text(encoding="utf-8").replace(
+            "1989-01-26 00:00:00.000,1989-01-26 00:00:00.000",
+            "1989-01-26 00:00:00.000,1989-01-28 00:00:00.000",
+        ),
+        encoding="utf-8",
+    )
+    result = ingest_ucdp_ged(
+        session,
+        fixture_path=multi_day,
+        raw_store=LocalFilesystemRawSourceStore(tmp_path / "raw"),
+    )
+    event = review_ucdp_ged(session, result.source_release_id)
+
+    event_time = session.scalar(
+        select(EventTime).where(EventTime.event_id == event.id)
+    )
+    assert event_time is not None
+    # The span is recorded on the event as an interval (D050): start, end, and an
+    # interval display label -- not collapsed to the start day.
+    assert event_time.start_date == date(1989, 1, 26)
+    assert event_time.end_date == date(1989, 1, 28)
+    assert event_time.display_label == (
+        "UCDP source-record interval: 1989-01-26 to 1989-01-28"
+    )
+    assert event_time.temporal_assignment == TemporalAssignment.REPORTED
+
+    # The resolver refuses to reduce the interval to a single local civil day...
+    with pytest.raises(UnresolvedDay):
+        resolve_day(
+            stated_day=date(1989, 1, 26),
+            stated_day_end=date(1989, 1, 28),
+            convention=DayConvention(
+                calendar=CalendarSystem.GREGORIAN, meridian=Meridian.LOCAL_CIVIL
+            ),
+        )
+
+    # ...and, the enforcement that actually bites: the featured-event eligibility
+    # gate refuses the multi-day event on its start day (D050). Featured
+    # selection keys on start_date and never calls resolve_day, so this is where
+    # "filed under no single day" is enforced, not the resolver's refusal.
+    with pytest.raises(FeaturedEventUnresolved, match="D050"):
+        record_featured_event_selection(
+            session,
+            profile_date=date(1989, 1, 26),
+            candidate_root_ids=[event.resolved_claim_id],
+            chosen_root_id=event.resolved_claim_id,
+            reviewer="test-human",
+            rationale="attempt to feature a multi-day interval on its start day",
+        )
+
+
+@pytest.mark.integration
+def test_ucdp_ged_review_heals_claim_temporal_assignment_on_upgrade(
+    session: Session, tmp_path: Path
+) -> None:
+    # An upgraded database: GED 6833 was ingested and reviewed under a policy
+    # that stamped DIRECT_RECORD, then this build (A2c / D049) deployed. Ingest
+    # is idempotent, so the pre-existing claims never re-enter the claim loop
+    # that would restamp them. Re-reviewing must still leave the claim evidence
+    # snapshot -- _claim_snapshot serializes claim.temporal_assignment -- equal
+    # to the resolved EventTime, not split REPORTED/DIRECT_RECORD.
+    result = ingest_ucdp_ged(
+        session,
+        fixture_path=GED_FIXTURE,
+        raw_store=LocalFilesystemRawSourceStore(tmp_path / "raw"),
+    )
+    event = review_ucdp_ged(session, result.source_release_id)
+    session.commit()
+
+    # Force the pre-A2c state: every claim and the EventTime read DIRECT_RECORD,
+    # the divergence a re-review of an upgraded database would otherwise leave.
+    claims = list(
+        session.scalars(
+            select(Claim).where(Claim.source_release_id == result.source_release_id)
+        )
+    )
+    assert claims
+    for claim in claims:
+        claim.temporal_assignment = TemporalAssignment.DIRECT_RECORD
+    event_time = session.scalar(
+        select(EventTime).where(
+            EventTime.event_id == event.id, EventTime.is_primary
+        )
+    )
+    assert event_time is not None
+    event_time.temporal_assignment = TemporalAssignment.DIRECT_RECORD
+    session.flush()
+
+    # Re-reviewing the same (idempotent) release heals both sides together.
+    review_ucdp_ged(session, result.source_release_id)
+
+    healed_event_time = session.scalar(
+        select(EventTime).where(
+            EventTime.event_id == event.id, EventTime.is_primary
+        )
+    )
+    assert healed_event_time is not None
+    assert healed_event_time.temporal_assignment == TemporalAssignment.REPORTED
+    healed_claims = list(
+        session.scalars(
+            select(Claim).where(Claim.source_release_id == result.source_release_id)
+        )
+    )
+    assert healed_claims
+    assert all(
+        claim.temporal_assignment == TemporalAssignment.REPORTED
+        for claim in healed_claims
+    ), "review must re-derive every claim's assignment to match the EventTime"
 
 
 def test_ucdp_failure_records_failed_run_without_release(
