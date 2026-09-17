@@ -425,6 +425,24 @@ class GeographyVersion(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class TimezoneBoundary(Base):
+    """IANA timezone polygons for coordinates->timezone resolution (A3).
+
+    Seeded from a pinned timezone-boundary-builder release; a point resolves to
+    its zone with ST_Covers. ``dataset_version`` records which release a row came
+    from, so a day derived from an instant traces to a specific boundary dataset
+    (D013).
+    """
+
+    __tablename__ = "timezone_boundaries"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tzid: Mapped[str] = mapped_column(Text, unique=True)
+    dataset_version: Mapped[str] = mapped_column(Text)
+    boundary_geometry: Mapped[Any] = mapped_column(Geometry("MULTIPOLYGON", srid=4326))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class Event(Base):
     __tablename__ = "events"
 

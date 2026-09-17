@@ -39,6 +39,7 @@ jobs:
       - run: make install
       - run: corepack pnpm --filter @day-perspective/web exec playwright install --with-deps chromium
       - run: make db-migrate
+      - run: make seed-timezones
       - run: make check
       - run: make ingest-usgs-fixture
       - run: make review-usgs-fixture
