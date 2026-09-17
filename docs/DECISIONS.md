@@ -1893,3 +1893,75 @@ a day is refused, by the rule rather than by an arbitrary narrowing.
 G4 (#97) does not start until the shared resolver (A2) merges: the live run
 writes permanent records, and eight of the hundred golden records carry the
 `timezone_boundary` selection tag.
+
+## D050: A multi-day occurrence interval yields no date-specific event
+
+**Context:** D049 fixed *which* local civil day a stated day denotes. It left
+untouched a separate axis — *how many* days an occurrence spans — that no rule
+had ever decided. On `main`, an event is admitted to a profile only where
+`event_time.start_date == profile_date` (`governance.py:985`; identity
+adjudication keys the same way, `governance.py:752`), so a UCDP GED event
+spanning `1964-03-27` to `1964-03-29` (`ucdp.py:1477-1500` parses `date_start`
+and `date_end` separately and writes both) appears on the 03-27 page and no
+other, while its own display label reads "UCDP source-record interval:
+1964-03-27 to 1964-03-29" (`ucdp.py:1502-1508`). `end_date` is stored and
+rendered but never matched against `profile_date` — start-day collapse is an
+implementation default no rule chose (#113). D049's amendment governs whose
+clock, not how many days, so read as a universal it can be mistaken for
+asserting exactly one day; that is how a #110 review round surfaced this.
+
+**Decision:** An occurrence a source states as an interval covering more than
+one local civil day **yields no date-specific event**. The span is preserved
+and shown as an interval, but filed under no single day. A single-day interval
+(`start == end`) is not an interval and files under that day. The interval's end
+is what *withholds* the assignment, not a second day the event is also filed
+under — which answers #113's requirement that `end_date` stop being stored and
+rendered yet ignored: it participates, by determining the refusal.
+
+This is the same fail-closed posture D049 takes for an unresolvable
+cross-convention day, applied to the how-many-days axis: refuse rather than
+invent precision (§12 — expose gaps rather than invent coverage). Filing a
+three-day event under March 27 asserts it *occurred on* March 27, a stronger and
+different claim than that its *span covered* March 27, and not conflating those
+is the contract's whole subject.
+
+**Mechanism:** The contract carries the rule (`docs/PRODUCT_CONTRACT.md`,
+"Evidence, uncertainty, and comparison rules", beside the day-convention rule it
+is a separate axis from). Enforcement is the shared temporal resolver from D049
+/ A2: `resolve_day` already refuses an interval whose end differs from its start
+(the interim guard #113 required, so A2 could not decide this implicitly by
+taking `start_date`). Routing UCDP through that resolver is the following slice
+(A2c), which is where a multi-day interval stops being admitted on its start day
+and where an end-to-end multi-day test lands; this entry decides the policy that
+slice enforces. Because a refused interval reaches no profile, it can be no
+date's featured event (D046) and no grouped statement on one (D047); the
+interaction those entries would have with a multi-profile event does not arise.
+
+**Alternatives considered:** **Collapse to the start day** — today's default. It
+asserts a multi-day event "is" a start-day event, wrong in exactly the dimension
+this product exists to protect, and leaves `end_date` a value stored and shown
+but ignored by assignment. **Appear on every covered day** — honest about
+coverage, but a mid-span date page would assert the event *occurred on* that
+date, and D046 could make it that date's headline; it fans one event across up
+to N profiles, N featured-candidate sets, and N grouping contexts, conflating
+"occurred on" with "span covered". **A distinct span role/precision now** — model
+the interval under its own `DateRole` so a profile can surface "an event whose
+span covered this date" as a claim distinct from occurrence, keeping the evidence
+on every covered day while staying honest. This is the better end-state and the
+reason the present rule is "yields no date-specific event" rather than "is
+discarded": the span is retained, awaiting that surface. It was not built here
+because it spans the contract, the resolver, the assignment layer, and a
+reader-facing surface, and D046/D047 behavior for a multi-profile span-event is
+its own design — deferred to #123 rather than decided in passing.
+
+**Consequences:** Preventive, not remedial. No multi-day interval is published
+date-specifically today (the GED path is fixture-only, `context_cli.py:62`
+requires `--fixture`, and no Wikidata event publishes at all), so no wrong date
+is corrected — a false single-day claim is prevented before the path goes live.
+The cost is real and named: until the span role exists, a genuinely multi-day
+UCDP event contributes no recorded event to any date page. That is the
+fail-closed price, and #123 is where keeping the evidence is taken up.
+
+**Revisit trigger:** a source of high-value multi-day events whose exclusion
+materially thins the archive, or the span-role surface being built — either makes
+the retained-but-unshown interval worth surfacing rather than only withholding.
