@@ -1898,17 +1898,21 @@ writes permanent records, and eight of the hundred golden records carry the
 
 **Context:** D049 fixed *which* local civil day a stated day denotes. It left
 untouched a separate axis — *how many* days an occurrence spans — that no rule
-had ever decided. On `main`, an event is admitted to a profile only where
-`event_time.start_date == profile_date` (`governance.py:985`; identity
-adjudication keys the same way, `governance.py:752`), so a UCDP GED event
-spanning `1964-03-27` to `1964-03-29` (`ucdp.py:1477-1500` parses `date_start`
-and `date_end` separately and writes both) appears on the 03-27 page and no
-other, while its own display label reads "UCDP source-record interval:
-1964-03-27 to 1964-03-29" (`ucdp.py:1502-1508`). `end_date` is stored and
-rendered but never matched against `profile_date` — start-day collapse is an
-implementation default no rule chose (#113). D049's amendment governs whose
-clock, not how many days, so read as a universal it can be mistaken for
-asserting exactly one day; that is how a #110 review round surfaced this.
+had ever decided. The UCDP GED adapter parses `date_start` and `date_end`
+separately and writes both to an interval `EventTime`, with a display label that
+reads "UCDP source-record interval: 1964-03-27 to 1964-03-29" when they differ
+(`ucdp.py:1477-1508`); it then persists and stops. No UCDP publisher exists
+(`ucdp.py` calls no profile builder), so a GED interval reaches no date page
+today — the start-day collapse is latent, not live. Where it would surface is
+the `start_date` keying two paths already use: `_validated_candidates` admits a
+featured candidate to a date only where `event_time.start_date == profile_date`
+(`governance.py:985`), and identity adjudication keys the same way
+(`governance.py:752`). A future publisher resting on those would file a multi-day
+event under its start day alone, with `end_date` stored and rendered but never
+matched against `profile_date` — an implementation default no rule chose (#113).
+D049's amendment governs whose clock, not how many days, so read as a universal
+it can be mistaken for asserting exactly one day; that is how a #110 review round
+surfaced this.
 
 **Decision:** An occurrence a source states as an interval covering more than
 one local civil day **yields no date-specific event**. The span is recorded on
@@ -1947,15 +1951,16 @@ dates are already local civil days, which holds for every case the resolver
 accepts today (Gregorian local days; UTC and Julian are refused wholesale, and
 UCDP states civil dates). Routing UCDP through the resolver is the following slice
 (A2c), which is where the proxy is upgraded to resolve each endpoint then count,
-where a multi-day interval stops being admitted on its start day, and where an
-end-to-end multi-day test lands; this entry decides the policy that slice
-enforces. Because a refused interval reaches no profile, it can be no date's
+where a UCDP publisher first exists and a multi-day interval is refused rather
+than filed under its start day, and where an end-to-end multi-day test lands;
+this entry decides the policy that slice enforces. Because a refused interval reaches no profile, it can be no date's
 featured event (D046) and no grouped statement on one (D047); the interaction
 those entries would have with a multi-profile event does not arise.
 
-**Alternatives considered:** **Collapse to the start day** — today's default. It
-asserts a multi-day event "is" a start-day event, wrong in exactly the dimension
-this product exists to protect, and leaves `end_date` a value stored and shown
+**Alternatives considered:** **Collapse to the start day** — the latent default a
+publisher on the current `start_date` keying would inherit. It asserts a
+multi-day event "is" a start-day event, wrong in exactly the dimension this
+product exists to protect, and leaves `end_date` a value stored and shown
 but ignored by assignment. **Appear on every covered day** — honest about
 coverage, but a mid-span date page would assert the event *occurred on* that
 date, and D046 could make it that date's headline; it fans one event across up
