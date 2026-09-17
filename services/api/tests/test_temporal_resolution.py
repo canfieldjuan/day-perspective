@@ -20,6 +20,7 @@ from app.temporal import (
     CalendarSystem,
     CivilDate,
     DayConvention,
+    HowAssigned,
     Meridian,
     UnresolvedDay,
     resolve_day,
@@ -415,6 +416,113 @@ class TestTheInterpretationStatesWhatTheSourceActuallySaid:
         assert "UTC" in resolved.interpretation
         assert resolved.source_calendar is CalendarSystem.JULIAN
         assert resolved.source_meridian is Meridian.UTC
+
+
+class TestEveryPathRecordsWhatTheSourceSaid:
+    """Provenance is built once, from the whole statement, on every route.
+
+    Four review rounds each found a provenance defect and three were created
+    by the previous round's fix, because the text was assembled at the end
+    from whatever the resolving branch had in scope. These pin the property
+    that replaced that: no path omits an input it did not use, and no stated
+    triple is rendered as its conversion.
+    """
+
+    def test_a_stated_triple_is_never_shown_as_its_conversion(self) -> None:
+        """Julian 1964-01-02 UTC restates to Gregorian 1964-01-15, and Julian
+        local 1964-01-01 to 1964-01-14. Neither Gregorian value may be
+        presented as something the source said in the Julian calendar."""
+        resolved = resolve_day(
+            stated_day=CivilDate(1964, 1, 2),
+            convention=DayConvention(
+                calendar=CalendarSystem.JULIAN, meridian=Meridian.UTC
+            ),
+            stated_local_day=CivilDate(1964, 1, 1),
+            timezone_name="America/Anchorage",
+        )
+        said, _, _ = resolved.interpretation.partition(". ")
+        assert "1964-01-02" in said
+        assert "1964-01-01" in said
+        assert "1964-01-14" not in said
+        assert "1964-01-15" not in said
+
+    def test_the_instant_path_still_records_the_stated_utc_day(self) -> None:
+        """An instant resolving a straddling UTC day used to return early,
+        past provenance construction, leaving a record indistinguishable from
+        an instant-only source."""
+        resolved = resolve_day(
+            stated_day=date(1964, 3, 28),
+            convention=GREGORIAN_UTC,
+            instant=datetime(1964, 3, 28, 3, 36, 14, tzinfo=UTC),
+            timezone_name="America/Anchorage",
+        )
+        assert "1964-03-28" in resolved.interpretation
+        assert resolved.source_meridian is Meridian.UTC
+        assert resolved.statement.day == CivilDate(1964, 3, 28)
+
+    def test_an_instant_only_source_is_distinguishable_from_one(self) -> None:
+        """The contrast that makes the previous test meaningful."""
+        resolved = resolve_day(
+            instant=datetime(1964, 3, 28, 3, 36, 14, tzinfo=UTC),
+            timezone_name="America/Anchorage",
+        )
+        assert resolved.statement.day is None
+        assert resolved.source_meridian is None
+
+    def test_the_statement_survives_on_the_record(self) -> None:
+        """Retained whole, so a reader can check the source against itself."""
+        resolved = resolve_day(
+            stated_day=date(1964, 3, 28),
+            convention=GREGORIAN_UTC,
+            stated_local_day=date(1964, 3, 27),
+            instant=datetime(1964, 3, 28, 3, 36, 14, tzinfo=UTC),
+            timezone_name="America/Anchorage",
+        )
+        assert resolved.statement.day == CivilDate(1964, 3, 28)
+        assert resolved.statement.local_day == CivilDate(1964, 3, 27)
+        assert resolved.statement.instant is not None
+        assert resolved.how_assigned is HowAssigned.UTC_DAY_RESOLVED_BY_LOCAL_STATEMENT
+
+
+class TestNoCalendarIsPresumed:
+    """"A convention fixes both the calendar system that names a day and the
+    meridian at which a day begins; neither is presumed." """
+
+    def test_a_civil_date_without_a_convention_is_refused(self) -> None:
+        """A CivilDate carries no calendar -- that is why the type exists --
+        so nothing establishes one. 1917-10-25 is where the presumption bites:
+        Gregorian it is itself, Julian it is 1917-11-07."""
+        with pytest.raises(UnresolvedDay):
+            resolve_day(stated_local_day=CivilDate(1917, 10, 25))
+
+    def test_a_stated_day_without_a_convention_is_refused(self) -> None:
+        with pytest.raises(UnresolvedDay):
+            resolve_day(stated_day=CivilDate(1917, 10, 25))
+
+    def test_a_local_day_with_an_explicit_convention_resolves(self) -> None:
+        resolved = resolve_day(
+            stated_local_day=CivilDate(1917, 10, 25), convention=JULIAN_LOCAL
+        )
+        assert resolved.profile_date == date(1917, 11, 7)
+
+
+class TestASourceContradictingItselfOnLocalDays:
+    def test_two_different_local_days_are_refused(self) -> None:
+        """Both stated as local civil days, and they differ."""
+        with pytest.raises(UnresolvedDay, match="disagrees"):
+            resolve_day(
+                stated_day=date(1964, 3, 27),
+                convention=GREGORIAN_LOCAL,
+                stated_local_day=date(1964, 3, 28),
+            )
+
+    def test_the_same_local_day_twice_resolves(self) -> None:
+        resolved = resolve_day(
+            stated_day=date(1964, 3, 27),
+            convention=GREGORIAN_LOCAL,
+            stated_local_day=date(1964, 3, 27),
+        )
+        assert resolved.profile_date == date(1964, 3, 27)
 
 
 class TestUnestablishedConventionDenotesNothing:
