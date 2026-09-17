@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import math
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -79,6 +80,7 @@ from app.services import (
     resolve_claim,
 )
 from app.temporal import resolve_day
+from app.timezone_boundaries import TimezoneResolution
 from app.ucdp import build_ucdp_annual_profile_content
 from app.un_wpp import build_un_wpp_profile_content
 
@@ -95,7 +97,6 @@ USGS_QUERY_URL = (
     "?format=geojson&starttime=1964-03-27&endtime=1964-03-29&minmagnitude=8"
 )
 GOLDEN_DATE = date(1964, 3, 27)
-ALASKA_TIMEZONE = "America/Anchorage"
 USGS_TERMS_URL = (
     "https://www.usgs.gov/information-policies-and-instructions/"
     "copyrights-and-credits"
@@ -209,6 +210,16 @@ class USGSEarthquakeAdapter:
         ),
     )
 
+    def __init__(
+        self,
+        *,
+        resolve_timezone: Callable[[float, float], TimezoneResolution | None],
+    ) -> None:
+        # Injected because the day is derived from the epicenter's timezone,
+        # which lives in a PostGIS table (A3): the resolver is bound to a session
+        # by the caller, since record_to_claims drafts claims without one.
+        self._resolve_timezone = resolve_timezone
+
     def retrieve(self, *, fixture_path: Path | None = None) -> bytes:
         if fixture_path is not None:
             return fixture_path.read_bytes()
@@ -241,9 +252,13 @@ class USGSEarthquakeAdapter:
                 "the current claim and publication schema"
             )
         occurrence = datetime.fromtimestamp(record.properties.time / 1000, tz=UTC)
-        resolved_day = resolve_day(
-            instant=occurrence, timezone_name=ALASKA_TIMEZONE
-        )
+        zone = self._resolve_timezone(latitude, longitude)
+        if zone is None:
+            raise ValueError(
+                "The USGS epicenter is not covered by any timezone boundary, so "
+                "its occurrence instant yields no local civil day (A3)."
+            )
+        resolved_day = resolve_day(instant=occurrence, timezone_name=zone.tzid)
         local_date = resolved_day.profile_date
         if local_date != GOLDEN_DATE:
             raise ValueError("USGS occurrence does not map to the expected Alaska civil date.")
@@ -263,8 +278,9 @@ class USGSEarthquakeAdapter:
                 local_date.isoformat(),
                 {
                     "date": local_date.isoformat(),
-                    "timezone": ALASKA_TIMEZONE,
+                    "timezone": zone.tzid,
                     "utc_offset_minutes": resolved_day.utc_offset_minutes,
+                    "timezone_dataset_version": zone.dataset_version,
                 },
                 temporal_precision=TemporalPrecision.DAY,
                 temporal_assignment=TemporalAssignment.INFERRED,

@@ -6,6 +6,7 @@ from pathlib import Path
 from app.config import get_settings
 from app.database import SessionLocal
 from app.services import LocalFilesystemPublishedProfileStore
+from app.timezone_boundaries import resolve_timezone_from_coordinates
 from app.usgs import (
     LocalFilesystemRawSourceStore,
     USGSEarthquakeAdapter,
@@ -29,7 +30,9 @@ def main() -> None:
             try:
                 result = ingest_usgs(
                     session,
-                    adapter=USGSEarthquakeAdapter(),
+                    adapter=USGSEarthquakeAdapter(
+                        resolve_timezone=resolve_timezone_from_coordinates(session)
+                    ),
                     raw_store=LocalFilesystemRawSourceStore(settings.raw_source_root),
                     fixture_path=args.fixture,
                     dry_run=args.dry_run,

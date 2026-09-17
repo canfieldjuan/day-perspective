@@ -1,9 +1,41 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from sqlalchemy.orm import Session
 
 from app.models import LegalReviewStatus, Source, SourceRelease
 from app.services import create_source_release
+from app.timezone_boundaries import (
+    resolve_timezone_from_coordinates,
+    seed_timezone_boundaries,
+)
+from app.usgs import USGSEarthquakeAdapter
+
+_MINI_TIMEZONES = Path(__file__).parent / "fixtures" / "mini_timezones.geojson"
+
+
+def seed_test_timezones(session: Session) -> None:
+    """Seed the mini timezone-boundary fixture (covers the USGS golden epicenter).
+
+    The real ~170MB release is a pinned download the suite never fetches; this
+    small committed fixture gives ``ST_Covers`` the America/Anchorage polygon a
+    USGS ingest needs to derive its day from coordinates (A3b).
+    """
+    seed_timezone_boundaries(
+        session,
+        url="",
+        sha256="",
+        dataset_version="mini-test",
+        fixture_path=_MINI_TIMEZONES,
+    )
+
+
+def usgs_test_adapter(session: Session) -> USGSEarthquakeAdapter:
+    """A USGS adapter whose day derivation reads this session's tz boundary table."""
+    return USGSEarthquakeAdapter(
+        resolve_timezone=resolve_timezone_from_coordinates(session)
+    )
 
 
 def source_release(session: Session) -> SourceRelease:

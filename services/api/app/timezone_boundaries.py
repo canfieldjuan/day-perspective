@@ -20,7 +20,8 @@ import io
 import json
 import urllib.request
 import zipfile
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
 
@@ -30,6 +31,20 @@ from sqlalchemy.orm import Session
 
 class TimezoneDatasetError(RuntimeError):
     """The timezone boundary dataset could not be retrieved, verified, or parsed."""
+
+
+@dataclass(frozen=True)
+class TimezoneResolution:
+    """A resolved zone and the dataset release it came from.
+
+    The ``dataset_version`` travels with the ``tzid`` so a day derived from an
+    instant can record which boundary release placed it, not just which zone
+    (D013). It is the row's own value, not configuration, so the provenance is
+    what the table actually holds.
+    """
+
+    tzid: str
+    dataset_version: str
 
 
 def _verify_checksum(payload: bytes, expected_sha256: str) -> None:
@@ -163,8 +178,8 @@ def seed_timezone_boundaries(
 
 def timezone_for_coordinates(
     session: Session, *, latitude: float, longitude: float
-) -> str | None:
-    """The IANA timezone whose boundary covers the point, or ``None``.
+) -> TimezoneResolution | None:
+    """The timezone whose boundary covers the point, with its dataset, or ``None``.
 
     ``None`` when no boundary covers it -- an open-ocean or otherwise unlocated
     point -- so a caller deriving a day from an instant refuses rather than
@@ -175,11 +190,28 @@ def timezone_for_coordinates(
     """
     row = session.execute(
         text(
-            "SELECT tzid FROM timezone_boundaries "
+            "SELECT tzid, dataset_version FROM timezone_boundaries "
             "WHERE ST_Covers(boundary_geometry, "
             "ST_SetSRID(ST_MakePoint(:longitude, :latitude), 4326)) "
             "ORDER BY tzid LIMIT 1"
         ),
         {"latitude": latitude, "longitude": longitude},
     ).first()
-    return None if row is None else str(row[0])
+    if row is None:
+        return None
+    return TimezoneResolution(tzid=str(row[0]), dataset_version=str(row[1]))
+
+
+def resolve_timezone_from_coordinates(
+    session: Session,
+) -> Callable[[float, float], TimezoneResolution | None]:
+    """A ``(latitude, longitude) -> TimezoneResolution | None`` callable bound to
+    a session, for a publisher that derives its day from coordinates at ingest
+    (A3b). The session is captured so the adapter -- which drafts claims without
+    one -- can still reach the boundary table.
+    """
+
+    def resolve(latitude: float, longitude: float) -> TimezoneResolution | None:
+        return timezone_for_coordinates(session, latitude=latitude, longitude=longitude)
+
+    return resolve

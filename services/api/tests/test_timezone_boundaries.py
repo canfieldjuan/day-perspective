@@ -103,15 +103,16 @@ def test_a_covered_point_resolves_to_its_zone(session: Session, tmp_path: Path) 
     _seed_mini(session)
 
     # The USGS golden epicenter (Prince William Sound) sits inside the Anchorage
-    # polygon; A3b relies on exactly this resolving to America/Anchorage.
-    assert (
-        timezone_for_coordinates(session, latitude=60.9, longitude=-147.6)
-        == "America/Anchorage"
-    )
-    assert (
-        timezone_for_coordinates(session, latitude=50.5, longitude=10.5)
-        == "Europe/Berlin"
-    )
+    # polygon; A3b relies on exactly this resolving to America/Anchorage, and on
+    # the resolution carrying the dataset version for provenance.
+    anchorage = timezone_for_coordinates(session, latitude=60.9, longitude=-147.6)
+    assert anchorage is not None
+    assert anchorage.tzid == "America/Anchorage"
+    assert anchorage.dataset_version == "mini-test"
+
+    berlin = timezone_for_coordinates(session, latitude=50.5, longitude=10.5)
+    assert berlin is not None
+    assert berlin.tzid == "Europe/Berlin"
 
 
 @pytest.mark.integration

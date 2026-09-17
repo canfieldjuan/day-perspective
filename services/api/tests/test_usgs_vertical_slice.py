@@ -58,6 +58,7 @@ from app.usgs import (
     ingest_usgs,
     publish_golden_profile,
 )
+from tests.helpers import seed_test_timezones, usgs_test_adapter
 
 ROOT = Path(__file__).resolve().parents[3]
 FIXTURE = ROOT / "data/fixtures/usgs/1964-prince-william-sound.geojson"
@@ -78,9 +79,10 @@ def test_display_number_preserves_significant_integer_zeroes() -> None:
 def ingest(
     session: Session, tmp_path: Path, fixture_path: Path = FIXTURE
 ) -> IngestionResult:
+    seed_test_timezones(session)
     return ingest_usgs(
         session,
-        adapter=USGSEarthquakeAdapter(),
+        adapter=usgs_test_adapter(session),
         raw_store=LocalFilesystemRawSourceStore(tmp_path / "raw"),
         fixture_path=fixture_path,
     )
@@ -153,6 +155,43 @@ def test_source_canonical_url_is_a_page_a_reader_can_use(
     assert source is not None
     assert source.canonical_url == "https://earthquake.usgs.gov/earthquakes/"
     assert "fdsnws" not in source.canonical_url
+
+
+def test_usgs_derives_its_zone_from_coordinates_with_dataset_provenance(
+    session: Session, tmp_path: Path
+) -> None:
+    """A3b: the day is derived from the epicenter's timezone looked up in the
+    boundary table (not a hardcode), and the dataset version rides the
+    local_civil_date claim so the derivation traces to a specific release."""
+    result = ingest(session, tmp_path)  # ingest() seeds the mini tz fixture
+
+    local_civil = session.scalar(
+        select(Claim).where(
+            Claim.source_release_id == result.source_release_id,
+            Claim.claim_type == "local_civil_date",
+        )
+    )
+    assert local_civil is not None
+    value = local_civil.assertion_json
+    assert value is not None
+    assert value["date"] == GOLDEN_DATE.isoformat()
+    assert value["timezone"] == "America/Anchorage"
+    assert value["timezone_dataset_version"] == "mini-test"
+
+
+def test_usgs_refuses_when_no_boundary_covers_the_epicenter(
+    session: Session, tmp_path: Path
+) -> None:
+    """Without a boundary covering the epicenter the instant yields no local
+    civil day, so ingest fails closed rather than assign a meridian (A3). No
+    tz table is seeded here, so the resolver returns None."""
+    with pytest.raises(ValueError, match="not covered by any timezone boundary"):
+        ingest_usgs(
+            session,
+            adapter=usgs_test_adapter(session),
+            raw_store=LocalFilesystemRawSourceStore(tmp_path / "raw"),
+            fixture_path=FIXTURE,
+        )
 
 
 def test_ingest_corrects_an_already_recorded_source_url(
@@ -265,9 +304,10 @@ def test_claim_transformation_preserves_predicates_hash_units_and_bounds(
 def test_dry_run_records_validation_without_importing_release_or_claims(
     session: Session, tmp_path: Path
 ) -> None:
+    seed_test_timezones(session)
     result = ingest_usgs(
         session,
-        adapter=USGSEarthquakeAdapter(),
+        adapter=usgs_test_adapter(session),
         raw_store=LocalFilesystemRawSourceStore(tmp_path / "raw"),
         fixture_path=FIXTURE,
         dry_run=True,
@@ -664,7 +704,7 @@ def test_failed_validation_records_failure_and_cannot_publish(
     with pytest.raises(ValueError, match="exactly one"):
         ingest_usgs(
             session,
-            adapter=USGSEarthquakeAdapter(),
+            adapter=usgs_test_adapter(session),
             raw_store=LocalFilesystemRawSourceStore(tmp_path / "raw"),
             fixture_path=invalid,
         )
@@ -822,7 +862,7 @@ def test_subsecond_usgs_timestamp_fails_before_release_creation(
     with pytest.raises(ValueError, match="subsecond precision"):
         ingest_usgs(
             session,
-            adapter=USGSEarthquakeAdapter(),
+            adapter=usgs_test_adapter(session),
             raw_store=LocalFilesystemRawSourceStore(tmp_path / "raw"),
             fixture_path=fixture,
         )
@@ -855,9 +895,10 @@ def test_canonical_event_type_comes_from_resolved_source_claim(
     payload = json.loads(FIXTURE.read_text(encoding="utf-8"))
     payload["features"][0]["properties"]["type"] = "seismic-event"
     fixture.write_text(json.dumps(payload), encoding="utf-8")
+    seed_test_timezones(session)
     result = ingest_usgs(
         session,
-        adapter=USGSEarthquakeAdapter(),
+        adapter=usgs_test_adapter(session),
         raw_store=LocalFilesystemRawSourceStore(tmp_path / "raw"),
         fixture_path=fixture,
     )
