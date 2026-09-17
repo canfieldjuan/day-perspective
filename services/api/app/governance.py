@@ -735,23 +735,26 @@ def _canonical_pair(event_a_id: UUID, event_b_id: UUID) -> tuple[UUID, UUID]:
     return first, second
 
 
-def _spans_multiple_local_days(event_time: EventTime) -> bool:
-    """Whether an occurrence covers more than one local civil day (D050).
+def _multi_day_interval_end(event_time: EventTime) -> date | None:
+    """The occurrence's end when it spans more than one local civil day (D050).
 
-    The single test behind every place that keys an event to a date. An
-    occurrence whose end differs from its start denotes more than one local
-    civil day, and D050 says such an interval yields no date-specific event: it
-    is recorded (``start_date``, ``end_date``) but filed under no single day.
-    Every consumer that reads a primary ``EventTime.start_date`` as the day an
-    event is filed under refuses the interval through this one predicate, so the
-    rule has a single implementation rather than a copy per consumer that could
-    drift or be forgotten -- review found the missing copies one consumer at a
-    time (featured selection, then identity adjudication).
+    The single test behind every place that keys an event to a date. It returns
+    the interval end that proves the span -- not a bare flag -- so a caller
+    renders the interval and narrows the nullable field in one step, rather than
+    re-reading ``end_date`` after a boolean check (which also loses the type
+    narrowing). An occurrence whose end differs from its start denotes more than
+    one local civil day, and D050 says such an interval yields no date-specific
+    event: it is recorded (``start_date``, ``end_date``) but filed under no
+    single day. Every consumer that reads a primary ``EventTime.start_date`` as
+    the day an event is filed under refuses the interval through this one
+    predicate, so the rule has a single implementation rather than a copy per
+    consumer that could drift or be forgotten -- review found the missing copies
+    one consumer at a time (featured selection, then identity adjudication).
     """
-    return (
-        event_time.end_date is not None
-        and event_time.end_date != event_time.start_date
-    )
+    end_date = event_time.end_date
+    if end_date is not None and end_date != event_time.start_date:
+        return end_date
+    return None
 
 
 def _primary_occurrence_date(session: Session, event_id: UUID) -> date:
@@ -768,7 +771,8 @@ def _primary_occurrence_date(session: Session, event_id: UUID) -> date:
         raise IdentityAdjudicationError(
             f"Event {event_id} has no primary occurrence to adjudicate on."
         )
-    if _spans_multiple_local_days(event_time):
+    interval_end = _multi_day_interval_end(event_time)
+    if interval_end is not None:
         # D050: the same start-date collapse the featured-event gate refuses,
         # on the other path that keys on start_date. A multi-day occurrence
         # yields no date-specific event, so it has no single day to be
@@ -776,7 +780,7 @@ def _primary_occurrence_date(session: Session, event_id: UUID) -> date:
         raise IdentityAdjudicationError(
             f"Event {event_id} occurs over the interval "
             f"{event_time.start_date.isoformat()} to "
-            f"{event_time.end_date.isoformat()}; a multi-day interval yields no "
+            f"{interval_end.isoformat()}; a multi-day interval yields no "
             "date-specific event (D050) and cannot be adjudicated on a single day."
         )
     return event_time.start_date
@@ -1017,19 +1021,20 @@ def _validated_candidates(
                 f"Featured-event candidate {root_id} does not occur on "
                 f"{profile_date.isoformat()}."
             )
-        if _spans_multiple_local_days(event_time):
+        interval_end = _multi_day_interval_end(event_time)
+        if interval_end is not None:
             # D050: an occurrence spanning more than one local civil day yields
             # no date-specific event. Its span is recorded (start_date/end_date),
             # but it is filed under no single day -- so it is not eligible to be
             # featured on its start day. This is the enforcement point the
             # resolver's refusal does not reach: featured selection keys on
             # start_date and never calls resolve_day. The multi-day test lives in
-            # _spans_multiple_local_days, shared with the identity-adjudication
-            # path so the two cannot diverge.
+            # _multi_day_interval_end, shared with the identity-adjudication path
+            # so the two cannot diverge.
             raise FeaturedEventUnresolved(
                 f"Featured-event candidate {root_id} spans "
                 f"{event_time.start_date.isoformat()} to "
-                f"{event_time.end_date.isoformat()}; a multi-day interval yields "
+                f"{interval_end.isoformat()}; a multi-day interval yields "
                 "no date-specific event (D050) and is not eligible for a "
                 "single-day profile."
             )

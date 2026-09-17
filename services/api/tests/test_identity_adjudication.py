@@ -257,7 +257,7 @@ def test_a_multi_day_interval_cannot_be_adjudicated_on_its_start_day(
     day to be adjudicated on. Widening one event to an interval whose start is
     the shared date must fail closed rather than collapse to that start day --
     the same refusal the featured-event gate makes, here on the path that keys
-    on ``_primary_occurrence_date``. The two share ``_spans_multiple_local_days``.
+    on ``_primary_occurrence_date``. The two share ``_multi_day_interval_end``.
     """
     a = _make_event(session, key="A")
     b = _make_event(session, key="B")
