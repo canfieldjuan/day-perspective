@@ -54,6 +54,7 @@ from app.models import (
     Event,
     EventTime,
     LegalReviewStatus,
+    Methodology,
     ProfileType,
     PublicationManifest,
     PublicationStatementEvidence,
@@ -700,6 +701,54 @@ def test_publish_binds_provenance_to_the_resolution_not_the_latest_release(
         name_statement["provenance"]["source_release"]["release"]
         == original_release.release_label
     )
+
+
+@pytest.mark.integration
+def test_publish_binds_provenance_to_the_resolution_methodology_not_the_current(
+    session: Session, tmp_path: Path
+) -> None:
+    # Statement provenance must name the methodology each claim was RESOLVED
+    # under, not the current publication methodology. On an upgraded database a
+    # claim resolved under an earlier methodology version is republished under
+    # newer code; labelling it with the current version would assert a temporal
+    # rule that never governed that resolution -- and contradict the immutable
+    # evidence snapshot, which reads resolved.methodology_id.
+    _prepare_for_publication(session, tmp_path)
+
+    # Simulate resolutions made under an earlier methodology version, as an
+    # upgraded database holds: repoint the resolved claims off the current row.
+    prior = Methodology(
+        slug="wikidata-single-candidate",
+        version="0",
+        name="Wikidata single-candidate resolution",
+        description="Prior version, before the calendar convention was recorded.",
+        method_kind="single_source_resolution",
+        formula=None,
+        code_version="0.0.1",
+        definition_hash="0" * 64,
+        legal_review_status=LegalReviewStatus.NOT_REQUIRED,
+    )
+    session.add(prior)
+    session.flush()
+    for predicate in PUBLISHED_PREDICATES:
+        resolved = _resolved(session, predicate)
+        assert resolved is not None
+        assert resolved.methodology_id is not None
+        assert resolved.methodology_id != prior.id  # currently the v2 row
+        resolved.methodology_id = prior.id
+    session.flush()
+
+    store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
+    outcome = publish_wikidata_event(session, store=store)
+
+    manifest = session.get(PublicationManifest, outcome.manifest_id)
+    assert manifest is not None
+    payload = store.read(manifest.storage_uri, manifest.content_hash)
+    recorded = payload["sections"]["recorded_on_this_date"]
+    assert recorded
+    for item in recorded:
+        # The resolution methodology (version 0), never the current one.
+        assert item["provenance"]["methodology"]["version"] == "0"
 
 
 @pytest.mark.integration

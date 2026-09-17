@@ -1282,7 +1282,7 @@ def _wikidata_statement_provenance(
     resolved: ResolvedClaim,
     release: SourceRelease,
     source: Source,
-    methodology: Methodology,
+    methodology: Methodology | None,
 ) -> dict[str, Any]:
     return {
         "root_type": "resolved_claim",
@@ -1312,11 +1312,15 @@ def _wikidata_statement_provenance(
             "raw_checksum_sha256": release.raw_checksum_sha256,
             "retrieved_at": release.retrieved_at.isoformat(),
         },
-        "methodology": {
-            "name": methodology.name,
-            "version": methodology.version,
-            "description": methodology.description,
-        },
+        "methodology": (
+            {
+                "name": methodology.name,
+                "version": methodology.version,
+                "description": methodology.description,
+            }
+            if methodology is not None
+            else None
+        ),
     }
 
 
@@ -1682,6 +1686,9 @@ def publish_wikidata_event(
         raise ValueError(
             "The Wikidata candidate must be resolved into an event before publication."
         )
+    # The methodology of this publication act (bound to the manifest below),
+    # which happens now under the current version. Distinct from each statement's
+    # resolution methodology, read per-claim from resolved.methodology_id.
     methodology = _wikidata_methodology(session)
     profile_type = profile_type_for_date(occurrence_date)
     if profile_type is None:
@@ -1759,7 +1766,17 @@ def publish_wikidata_event(
                     resolved=resolved,
                     release=lineage_release,
                     source=source,
-                    methodology=methodology,
+                    # The methodology the claim was RESOLVED under, read from
+                    # the claim itself -- the same source the immutable evidence
+                    # snapshot uses (services._resolved_claim_evidence_snapshot),
+                    # so payload and snapshot agree. Not the current publication
+                    # methodology below: a claim resolved under an older version
+                    # must not be relabelled with the current one on republish.
+                    methodology=(
+                        session.get(Methodology, resolved.methodology_id)
+                        if resolved.methodology_id is not None
+                        else None
+                    ),
                 ),
             }
         )
