@@ -255,17 +255,15 @@ def resolve_day(
             "day follows from it. A tzinfo whose utcoffset() is None leaves "
             "the value naive."
         )
-    if stated_day_end is not None and stated_day_end != stated_day:
-        raise UnresolvedDay(
-            f"The source states an interval ({stated_day} to {stated_day_end}), "
-            "not a day. A multi-day interval yields no date-specific event "
-            "(D050): it is refused rather than collapsed to its start date."
-        )
-
     statement = SourceStatement(day=stated_day, convention=convention, instant=instant)
     zone = _zone(timezone_name)
 
     if statement.day is None:
+        if stated_day_end is not None:
+            raise UnresolvedDay(
+                f"The source states an interval end ({stated_day_end}) with no "
+                "start, so it denotes no day."
+            )
         if statement.convention is not None:
             raise UnresolvedDay(
                 "A day convention describes a stated day, and the source "
@@ -313,6 +311,19 @@ def resolve_day(
             "day denotes exactly one local civil day depends on the place of "
             "occurrence and is not implemented; see issue #120. Refused rather "
             "than read as a local civil day, which it need not be."
+        )
+
+    # Resolve-then-count (D050), applied after the convention is validated above:
+    # an interval's endpoints share that convention, so each resolves to its own
+    # local civil day, and the interval denotes more than one exactly when they
+    # differ. On the supported Gregorian-local axis that resolution is the
+    # identity, so the endpoints are compared directly; a non-Gregorian interval
+    # has already been refused on its calendar or meridian, before reaching here.
+    if stated_day_end is not None and stated_day_end != statement.day:
+        raise UnresolvedDay(
+            f"The source states an interval ({stated_day} to {stated_day_end}), "
+            "not a day. A multi-day interval yields no date-specific event "
+            "(D050): it is refused rather than collapsed to its start date."
         )
 
     # A day already stated as the conventional local civil day denotes itself,

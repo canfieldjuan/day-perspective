@@ -31,6 +31,13 @@ from app.models import (
     TemporalAssignment,
 )
 from app.services import supersede_claim
+from app.temporal import (
+    CalendarSystem,
+    DayConvention,
+    Meridian,
+    UnresolvedDay,
+    resolve_day,
+)
 from app.ucdp import (
     LocalFilesystemRawSourceStore,
     build_ucdp_annual_profile_content,
@@ -233,7 +240,11 @@ def test_ucdp_ged_fixture_builds_bounded_direct_event_impact(
     assert event_time is not None
     assert event_time.local_date is None
     assert event_time.exact_timestamp is None
-    assert event_time.temporal_assignment == TemporalAssignment.DIRECT_RECORD
+    # UCDP states a civil day and derives nothing from an instant, so its day is
+    # REPORTED, not DIRECT_RECORD (which the shared resolver reserves for a day
+    # derived from an instant). Its primary-source nature lives in data_status
+    # (FINAL), not in temporal_assignment (A2c / D049).
+    assert event_time.temporal_assignment == TemporalAssignment.REPORTED
     assert (
         session.scalar(
             select(func.count())
@@ -258,6 +269,54 @@ def test_ucdp_ged_fixture_builds_bounded_direct_event_impact(
     assert fatality_claim is not None
     assert fatality_claim.lower_bound == Decimal("100")
     assert fatality_claim.upper_bound == Decimal("1100")
+
+
+@pytest.mark.integration
+def test_ucdp_ged_multi_day_interval_is_recorded_but_filed_under_no_single_day(
+    session: Session, tmp_path: Path
+) -> None:
+    # D050: an occurrence spanning more than one local civil day yields no
+    # date-specific event. UCDP records the interval -- span, end, and interval
+    # label -- but the shared resolver refuses to reduce it to one profile day,
+    # so a future publisher can file it under none.
+    multi_day = tmp_path / "multi-day-ged.csv"
+    multi_day.write_text(
+        GED_FIXTURE.read_text(encoding="utf-8").replace(
+            "1989-01-26 00:00:00.000,1989-01-26 00:00:00.000",
+            "1989-01-26 00:00:00.000,1989-01-28 00:00:00.000",
+        ),
+        encoding="utf-8",
+    )
+    result = ingest_ucdp_ged(
+        session,
+        fixture_path=multi_day,
+        raw_store=LocalFilesystemRawSourceStore(tmp_path / "raw"),
+    )
+    event = review_ucdp_ged(session, result.source_release_id)
+
+    event_time = session.scalar(
+        select(EventTime).where(EventTime.event_id == event.id)
+    )
+    assert event_time is not None
+    # The span is recorded on the event as an interval (D050): start, end, and an
+    # interval display label -- not collapsed to the start day.
+    assert event_time.start_date == date(1989, 1, 26)
+    assert event_time.end_date == date(1989, 1, 28)
+    assert event_time.display_label == (
+        "UCDP source-record interval: 1989-01-26 to 1989-01-28"
+    )
+    assert event_time.temporal_assignment == TemporalAssignment.REPORTED
+
+    # The enforcement: the shared resolver refuses to reduce that interval to a
+    # single local civil day, so no publisher can file it under one.
+    with pytest.raises(UnresolvedDay):
+        resolve_day(
+            stated_day=date(1989, 1, 26),
+            stated_day_end=date(1989, 1, 28),
+            convention=DayConvention(
+                calendar=CalendarSystem.GREGORIAN, meridian=Meridian.LOCAL_CIVIL
+            ),
+        )
 
 
 def test_ucdp_failure_records_failed_run_without_release(

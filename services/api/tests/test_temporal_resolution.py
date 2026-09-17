@@ -421,6 +421,19 @@ class TestIntervalIsRefusedRatherThanCollapsed:
                 stated_day_end=date(1964, 3, 29), convention=GREGORIAN_LOCAL
             )
 
+    def test_an_interval_endpoint_is_resolved_before_it_is_counted(self) -> None:
+        """D050 counts distinct *local civil days*, so each endpoint is resolved
+        by convention first. A Julian interval therefore refuses on the calendar
+        it cannot restate (#114), not on being an interval -- the endpoint
+        resolution precedes the interval count.
+        """
+        with pytest.raises(UnresolvedDay, match="#114"):
+            resolve_day(
+                stated_day=date(1917, 10, 25),
+                stated_day_end=date(1917, 10, 27),
+                convention=JULIAN_LOCAL,
+            )
+
 
 class TestNothingStatedYieldsNothing:
     def test_refused_when_neither_a_day_nor_an_instant_is_given(self) -> None:
