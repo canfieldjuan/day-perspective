@@ -534,14 +534,15 @@ REQUIRED_EVENT_CLAIMS = (
 
 
 def _wikidata_methodology(session: Session) -> Methodology:
-    existing = session.scalar(
-        select(Methodology).where(
-            Methodology.slug == "wikidata-single-candidate",
-            Methodology.version == "1",
-        )
-    )
-    if existing is not None:
-        return existing
+    # Version 2 records the day convention the resolver now enforces. It is a new
+    # version, not an edit to version 1: an existing database already holds
+    # version 1 and would return it unchanged (the lookup is by slug + version),
+    # so a convention added to version 1's definition would never be written.
+    # Bumping the version forces the new row, and events resolved under version 1
+    # keep pointing at it -- they were resolved before the calendar convention
+    # was enforced, and the version is how that difference stays auditable. The
+    # convention lives in `description`, which the provenance snapshot surfaces
+    # (`services._methodology_core_snapshot`); the raw definition is only hashed.
     definition = {
         "authority": "Wikidata contributors (Wikimedia Foundation)",
         "resolution": (
@@ -557,14 +558,22 @@ def _wikidata_methodology(session: Session) -> Methodology:
             "unrecognized model fails closed rather than presuming a calendar."
         ),
     }
+    existing = session.scalar(
+        select(Methodology).where(
+            Methodology.slug == "wikidata-single-candidate",
+            Methodology.version == "2",
+        )
+    )
+    if existing is not None:
+        return existing
     row = Methodology(
         slug="wikidata-single-candidate",
-        version="1",
+        version="2",
         name="Wikidata single-candidate resolution",
-        description=definition["resolution"],
+        description=f"{definition['resolution']} {definition['day_convention']}",
         method_kind="single_source_resolution",
         formula=None,
-        code_version="0.1.0",
+        code_version="0.2.0",
         definition_hash=hashlib.sha256(canonical_json_bytes(definition)).hexdigest(),
         legal_review_status=LegalReviewStatus.NOT_REQUIRED,
     )
