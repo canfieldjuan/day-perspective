@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
+import urllib.request
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 from uuid import UUID
 
 from geoalchemy2.elements import WKTElement
@@ -79,10 +81,14 @@ from app.temporal import (
 )
 
 __all__ = [
+    "HttpWikidataEntityFetcher",
     "LocalFilesystemRawSourceStore",
     "WikidataEnrichmentOutcome",
+    "WikidataEntityFetcher",
     "WikidataPublishOutcome",
     "attempt_wikidata_enrichment",
+    "ingest_wikidata_candidate",
+    "ingest_wikidata_entity",
     "publish_wikidata_event",
     "resolve_wikidata_event",
 ]
@@ -90,10 +96,73 @@ __all__ = [
 WIKIDATA_SOURCE_SLUG = "wikidata-candidates"
 ENTITY_ID = "Q749610"
 REVISION_ID = 2497659168
-ENTITY_URL = (
-    "https://www.wikidata.org/wiki/Special:EntityData/"
-    f"{ENTITY_ID}.json?revision={REVISION_ID}"
+WIKIDATA_USER_AGENT = (
+    "day-perspective-candidate-ingestion/0.4 "
+    "(https://github.com/canfieldjuan/day-perspective)"
 )
+# Wikidata asks clients to keep request rates modest and identify themselves.
+WIKIDATA_REQUEST_INTERVAL_SECONDS = 1.0
+
+
+def _schema_check_name(entity_id: str) -> str:
+    """The quality-check name for one entity's schema validation.
+
+    Per-entity rather than a shared constant so a failed check names the entity
+    it failed on. The pinned fixture keeps its historical name, so the golden
+    pipeline's recorded quality contract is unchanged by this slice.
+    """
+    if entity_id == ENTITY_ID:
+        return "wikidata_q749610_schema"
+    return f"wikidata_{entity_id.lower()}_schema"
+
+
+class WikidataEntityFetcher(Protocol):
+    """Retrieves one entity document.
+
+    A protocol so the ingest path can be tested without the network, and so a
+    live run is the only thing that ever reaches Wikidata. Returns the bytes as
+    served together with the revision they represent -- the caller records that
+    revision, so an unpinned fetch is still reproducible after the fact.
+    """
+
+    def fetch(self, entity_id: str, revision_id: int | None) -> tuple[bytes, int]: ...
+
+
+class HttpWikidataEntityFetcher:
+    """Fetches an entity over HTTPS from Special:EntityData."""
+
+    def __init__(self, *, timeout: int = 30, interval: float | None = None) -> None:
+        self._timeout = timeout
+        self._interval = (
+            WIKIDATA_REQUEST_INTERVAL_SECONDS if interval is None else interval
+        )
+        self._last_request: float | None = None
+
+    def _throttle(self) -> None:
+        if self._last_request is not None:
+            elapsed = time.monotonic() - self._last_request
+            if elapsed < self._interval:
+                time.sleep(self._interval - elapsed)
+        self._last_request = time.monotonic()
+
+    def fetch(self, entity_id: str, revision_id: int | None) -> tuple[bytes, int]:
+        url = f"https://www.wikidata.org/wiki/Special:EntityData/{entity_id}.json"
+        if revision_id is not None:
+            url = f"{url}?revision={revision_id}"
+        self._throttle()
+        request = urllib.request.Request(
+            url, headers={"User-Agent": WIKIDATA_USER_AGENT}
+        )
+        with urllib.request.urlopen(request, timeout=self._timeout) as response:
+            payload: bytes = response.read()
+        document: Any = json.loads(payload)
+        entity = (document.get("entities") or {}).get(entity_id)
+        if not isinstance(entity, dict):
+            raise ValueError(f"Wikidata did not serve {entity_id}.")
+        served = entity.get("lastrevid")
+        if not isinstance(served, int):
+            raise ValueError(f"Wikidata served {entity_id} without a revision id.")
+        return payload, served
 
 
 def _value(statement: dict[str, Any]) -> Any:
@@ -106,25 +175,19 @@ def _value(statement: dict[str, Any]) -> Any:
     return datavalue["value"]
 
 
-def _first(entity: dict[str, Any], property_id: str) -> dict[str, Any]:
-    """The best-ranked Wikidata statement for a property that asserts a value.
+def _best_statement(statements: list[Any]) -> dict[str, Any] | None:
+    """The best-ranked statement in a property's list that asserts a value.
 
     Wikidata ranks a property's statements: a ``preferred`` statement overrides
     ``normal`` ones, and a ``deprecated`` statement records a known-wrong value
-    that must never be read as fact. Its snaktype matters too -- ``novalue`` and
+    that must never be read as fact. Snaktype matters too -- ``novalue`` and
     ``somevalue`` assert the *absence* of a concrete value and carry no
-    ``datavalue`` to read. Taking ``statements[0]`` ignored all of that, so a
-    deprecated or valueless first statement could be published as the candidate.
-    This returns the first ``preferred`` statement, else the first ``normal``
-    one, considering only statements whose ``mainsnak`` snaktype is ``value``,
-    and refuses the property when none qualifies rather than read a bad value.
+    ``datavalue`` to read. This returns the first ``preferred`` statement, else
+    the first ``normal`` one, considering only statements whose ``mainsnak``
+    snaktype is ``value``, or None when nothing qualifies. Shared by ``_first``
+    (a required property) and ``_optional`` (one an entity may omit), so both
+    apply the same selection.
     """
-    claims = entity.get("claims")
-    if not isinstance(claims, dict):
-        raise ValueError("Wikidata entity has no claims object.")
-    statements = claims.get(property_id)
-    if not isinstance(statements, list) or not statements:
-        raise ValueError(f"Wikidata entity is missing {property_id}.")
     preferred: dict[str, Any] | None = None
     normal: dict[str, Any] | None = None
     for statement in statements:
@@ -138,7 +201,23 @@ def _first(entity: dict[str, Any], property_id: str) -> dict[str, Any]:
             preferred = statement
         elif rank == "normal" and normal is None:
             normal = statement
-    chosen = preferred or normal
+    return preferred or normal
+
+
+def _first(entity: dict[str, Any], property_id: str) -> dict[str, Any]:
+    """The best-ranked value statement for a required property, or an error.
+
+    See ``_best_statement`` for the rank/snaktype selection. A required property
+    (P31/P585/P625) refuses when nothing qualifies rather than read a bad value,
+    instead of the old ``statements[0]`` which ignored rank and snaktype.
+    """
+    claims = entity.get("claims")
+    if not isinstance(claims, dict):
+        raise ValueError("Wikidata entity has no claims object.")
+    statements = claims.get(property_id)
+    if not isinstance(statements, list) or not statements:
+        raise ValueError(f"Wikidata entity is missing {property_id}.")
+    chosen = _best_statement(statements)
     if chosen is None:
         raise ValueError(
             f"Wikidata entity has no usable {property_id} statement: every "
@@ -147,25 +226,61 @@ def _first(entity: dict[str, Any], property_id: str) -> dict[str, Any]:
     return chosen
 
 
+def _optional(entity: dict[str, Any], property_id: str) -> dict[str, Any] | None:
+    """The best-ranked value statement for a property an entity may omit, or None.
+
+    Same rank/snaktype selection as ``_first`` (via ``_best_statement``); only
+    the missing outcome differs. None when the entity carries no statement for
+    the property, or none that asserts a value (a deprecated-only or valueless
+    property) -- so an absent optional property yields no candidate rather than a
+    bad or null-valued one.
+    """
+    claims = entity.get("claims")
+    if not isinstance(claims, dict):
+        return None
+    statements = claims.get(property_id)
+    if not isinstance(statements, list) or not statements:
+        return None
+    return _best_statement(statements)
+
+
 def _reference_count(statement: dict[str, Any]) -> int:
     references = statement.get("references")
     return len(references) if isinstance(references, list) else 0
 
 
-def _parse(payload: bytes) -> tuple[dict[str, Any], tuple[dict[str, Any], ...]]:
+def _parse(
+    payload: bytes,
+    *,
+    entity_id: str = ENTITY_ID,
+    revision_id: int | None = REVISION_ID,
+) -> tuple[dict[str, Any], tuple[dict[str, Any], ...]]:
+    """Read one entity's candidate predicates out of a Wikidata entity document.
+
+    ``entity_id`` and ``revision_id`` are parameters rather than the module
+    constants they used to be, so a second entity can be ingested at all. The
+    served entity must still be the one asked for -- a redirect or a mistyped id
+    would otherwise file one event's evidence under another's identity.
+
+    ``revision_id`` of None accepts whatever revision was served; the caller
+    records the entity's own ``lastrevid``, so the artifact stays reproducible
+    without pinning being mandatory.
+    """
     document: Any = json.loads(payload)
     if not isinstance(document, dict):
-        raise ValueError("Wikidata fixture must be a JSON object.")
+        raise ValueError("Wikidata payload must be a JSON object.")
     entities = document.get("entities")
     if not isinstance(entities, dict):
-        raise ValueError("Wikidata fixture has no entities map.")
-    entity = entities.get(ENTITY_ID)
-    if not isinstance(entity, dict) or entity.get("id") != ENTITY_ID:
-        raise ValueError(f"Wikidata fixture must contain {ENTITY_ID}.")
+        raise ValueError("Wikidata payload has no entities map.")
+    entity = entities.get(entity_id)
+    if not isinstance(entity, dict) or entity.get("id") != entity_id:
+        raise ValueError(f"Wikidata payload must contain {entity_id}.")
     pageid = entity.get("pageid")
     lastrevid = entity.get("lastrevid")
-    if not isinstance(pageid, int) or lastrevid != REVISION_ID:
-        raise ValueError("Wikidata fixture is not the pinned entity revision.")
+    if not isinstance(pageid, int) or not isinstance(lastrevid, int):
+        raise ValueError("Wikidata entity is missing a page or revision id.")
+    if revision_id is not None and lastrevid != revision_id:
+        raise ValueError("Wikidata payload is not the pinned entity revision.")
     labels = entity.get("labels")
     aliases = entity.get("aliases")
     if not isinstance(labels, dict) or not isinstance(aliases, dict):
@@ -180,15 +295,11 @@ def _parse(payload: bytes) -> tuple[dict[str, Any], tuple[dict[str, Any], ...]]:
     time_value = _value(time_statement)
     if not isinstance(time_value, dict):
         raise ValueError("Wikidata point-in-time value is malformed.")
-    coordinates_statement = _first(entity, "P625")
-    coordinate_value = _value(coordinates_statement)
-    if not isinstance(coordinate_value, dict):
-        raise ValueError("Wikidata coordinate value is malformed.")
-    candidates = (
+    candidates: list[dict[str, Any]] = [
         {
             "predicate": "candidate_event_identity",
             "value": {
-                "entity_id": ENTITY_ID,
+                "entity_id": entity_id,
                 "pageid": pageid,
                 "revision_id": lastrevid,
             },
@@ -216,31 +327,39 @@ def _parse(payload: bytes) -> tuple[dict[str, Any], tuple[dict[str, Any], ...]]:
             "value": time_value,
             "references": _reference_count(time_statement),
         },
-        {
-            "predicate": "candidate_coordinates",
-            "value": coordinate_value,
-            "references": _reference_count(coordinates_statement),
-        },
-        {
-            "predicate": "candidate_magnitude",
-            "value": _value(_first(entity, "P2527")),
-            "references": _reference_count(_first(entity, "P2527")),
-        },
-        {
-            "predicate": "candidate_depth",
-            "value": _value(_first(entity, "P4511")),
-            "references": _reference_count(_first(entity, "P4511")),
-        },
-        {
-            "predicate": "candidate_fatalities",
-            "value": _value(_first(entity, "P1120")),
-            "references": _reference_count(_first(entity, "P1120")),
-        },
-    )
-    return entity, candidates
+    ]
+    # Coordinates, magnitude, depth and fatalities describe an earthquake. Most
+    # of the Golden-100 is not one -- the selection tags span conflicts,
+    # pandemics, cultural milestones and births -- and REQUIRED_EVENT_CLAIMS asks
+    # only for identity, type, name and date. An absent property yields no
+    # candidate at all rather than a null-valued one, so the payload never
+    # asserts a magnitude the entity did not state.
+    for predicate, property_id in (
+        ("candidate_coordinates", "P625"),
+        ("candidate_magnitude", "P2527"),
+        ("candidate_depth", "P4511"),
+        ("candidate_fatalities", "P1120"),
+    ):
+        statement = _optional(entity, property_id)
+        if statement is None:
+            continue
+        candidates.append(
+            {
+                "predicate": predicate,
+                "value": _value(statement),
+                "references": _reference_count(statement),
+            }
+        )
+    return entity, tuple(candidates)
 
 
-def _license(session: Session, release_id: UUID) -> None:
+def _license(
+    session: Session,
+    release_id: UUID,
+    *,
+    entity_id: str = ENTITY_ID,
+    revision_id: int | None = REVISION_ID,
+) -> None:
     register_release_license(
         session,
         source_release_id=release_id,
@@ -255,9 +374,13 @@ def _license(session: Session, release_id: UUID) -> None:
             redistribution_permission=True,
             derivatives_permission=True,
             attribution_required=False,
+            # Derived from the ingested entity/revision, not a constant: CC0 does
+            # not require attribution, but a record that credited Q749610 for a
+            # different entity's data would be a false provenance claim surviving
+            # into the licensing audit trail.
             attribution_text=(
-                "Wikidata Q749610 revision 2497659168; attribution retained as "
-                "provenance even though CC0 does not require it."
+                f"Wikidata {entity_id} revision {revision_id}; attribution "
+                "retained as provenance even though CC0 does not require it."
             ),
             public_display_permission=True,
             raw_download_permission=True,
@@ -274,32 +397,148 @@ def ingest_wikidata_candidate(
     raw_store: RawSourceStore,
     dry_run: bool = False,
 ) -> IngestionResult:
-    payload = fixture_path.read_bytes()
-    checksum = hashlib.sha256(payload).hexdigest()
-    run = PipelineRun(
+    """Ingest the pinned offline entity. Behaviour unchanged from before B2.
+
+    Delegates to the shared core with the fixture's own entity and revision, so
+    the golden pipeline sees the same release, locator, metadata and quality
+    check it did before live ingest existed.
+    """
+    return _ingest_entity_payload(
+        session,
+        payload=fixture_path.read_bytes(),
+        entity_id=ENTITY_ID,
+        revision_id=REVISION_ID,
+        fixture=True,
+        raw_store=raw_store,
+        dry_run=dry_run,
+    )
+
+
+def ingest_wikidata_entity(
+    session: Session,
+    *,
+    entity_id: str,
+    fetcher: WikidataEntityFetcher,
+    raw_store: RawSourceStore,
+    revision_id: int | None = None,
+    dry_run: bool = False,
+) -> IngestionResult:
+    """Ingest a live entity fetched from Wikidata.
+
+    ``revision_id`` pins a specific revision when given. When omitted the
+    entity's own ``lastrevid`` is recorded as what was ingested -- "latest" is
+    never left as an unrecorded moving target, because a release nobody can
+    reproduce is not provenance.
+    """
+    # The fetch run is created before the fetch, not after. DNS failures,
+    # timeouts and HTTP errors are the most likely way a live ingest fails, and
+    # the CLI commits ingestion failures specifically so the failed run survives
+    # -- but a fetch that raised before any run existed left nothing to commit,
+    # so the commonest failure was the one with no audit trail.
+    fetch_run = PipelineRun(
         pipeline_name="wikidata-candidate-adapter",
-        code_version="0.3.0",
+        code_version="0.4.0",
         configuration_hash=content_hash(
             {
-                "entity": ENTITY_ID,
-                "revision": REVISION_ID,
-                "fixture": True,
+                "entity": entity_id,
+                "revision": revision_id,
+                "fixture": False,
+                "dry_run": dry_run,
+                "stage": "fetch",
+            }
+        ),
+        status="running",
+        details={"mode": "live", "dry_run": dry_run, "stage": "fetch"},
+    )
+    session.add(fetch_run)
+    session.flush()
+    try:
+        payload, served_revision = fetcher.fetch(entity_id, revision_id)
+    except Exception as error:
+        fetch_run.status = "failed"
+        fetch_run.completed_at = datetime.now(UTC)
+        fetch_run.details = {
+            **fetch_run.details,
+            "error": f"{type(error).__name__}: {error}",
+        }
+        session.add(
+            QualityCheck(
+                pipeline_run_id=fetch_run.id,
+                check_name=_schema_check_name(entity_id),
+                status="failed",
+                subject_type="pipeline_run",
+                subject_id=fetch_run.id,
+                details={"stage": "fetch", "error": str(error)},
+            )
+        )
+        session.flush()
+        raise
+    fetch_run.status = "succeeded"
+    fetch_run.completed_at = datetime.now(UTC)
+    fetch_run.details = {**fetch_run.details, "revision_served": served_revision}
+    session.flush()
+    return _ingest_entity_payload(
+        session,
+        payload=payload,
+        entity_id=entity_id,
+        revision_id=revision_id if revision_id is not None else served_revision,
+        fixture=False,
+        raw_store=raw_store,
+        dry_run=dry_run,
+    )
+
+
+def _ingest_entity_payload(
+    session: Session,
+    *,
+    payload: bytes,
+    entity_id: str,
+    revision_id: int | None,
+    fixture: bool,
+    raw_store: RawSourceStore,
+    dry_run: bool = False,
+) -> IngestionResult:
+    """Ingest one entity document, from a fixture or a live fetch.
+
+    The fixture and live paths differ only in where the bytes come from and what
+    they claim about themselves (``fixture`` flag, provenance), not in what they
+    do with the entity, so both run through here.
+    """
+    checksum = hashlib.sha256(payload).hexdigest()
+    mode = "fixture" if fixture else "live"
+    run = PipelineRun(
+        pipeline_name="wikidata-candidate-adapter",
+        code_version="0.4.0",
+        configuration_hash=content_hash(
+            {
+                "entity": entity_id,
+                "revision": revision_id,
+                "fixture": fixture,
                 "dry_run": dry_run,
             }
         ),
         status="running",
-        details={"mode": "fixture", "dry_run": dry_run},
+        details={"mode": mode, "dry_run": dry_run},
     )
     session.add(run)
     session.flush()
     try:
         with session.begin_nested():
-            entity, candidates = _parse(payload)
+            entity, candidates = _parse(
+                payload, entity_id=entity_id, revision_id=revision_id
+            )
+            # Derive the occurrence day from P585 through the shared resolver, so
+            # a live entity's claims carry its own date rather than a constant
+            # (the pinned fixture resolves to the same 1964-03-27 it was stamped
+            # with before). A date coarser than a day, or a calendar the resolver
+            # does not restate, is refused here rather than approximated; lifting
+            # the sub-day refusal is B3.
+            occurrence = _resolve_occurrence_date(_value(_first(entity, "P585")))
             if dry_run:
                 session.add(
                     QualityCheck(
                         pipeline_run_id=run.id,
-                        check_name="wikidata_q749610_schema",
+                        check_name=_schema_check_name(entity_id),
                         status="passed",
                         subject_type="pipeline_run",
                         subject_id=run.id,
@@ -341,7 +580,12 @@ def ingest_wikidata_candidate(
                 )
             )
             if existing is not None:
-                _license(session, existing.id)
+                _license(
+                    session,
+                    existing.id,
+                    entity_id=entity_id,
+                    revision_id=revision_id,
+                )
                 run.status = "succeeded"
                 run.completed_at = datetime.now(UTC)
                 run.details = {**run.details, "idempotent": True}
@@ -362,33 +606,46 @@ def ingest_wikidata_candidate(
                     False,
                 )
             storage_uri = raw_store.write(WIKIDATA_SOURCE_SLUG, checksum, payload)
+            # The Special:EntityData URL of the exact revision -- the URL a live
+            # fetch reads, and for the pinned fixture identical to what it
+            # recorded before B2.
+            source_url = (
+                f"https://www.wikidata.org/wiki/Special:EntityData/{entity_id}.json"
+            )
+            if revision_id is not None:
+                source_url = f"{source_url}?revision={revision_id}"
             release = create_source_release(
                 session,
                 source_id=source.id,
-                release_label=f"wikidata-{ENTITY_ID}-revision-{REVISION_ID}",
-                source_url=ENTITY_URL,
+                release_label=f"wikidata-{entity_id}-revision-{revision_id}",
+                source_url=source_url,
                 raw_storage_uri=storage_uri,
                 raw_bytes=payload,
                 raw_record_count=1,
                 pipeline_run_id=run.id,
                 metadata_json={
-                    "entity_id": ENTITY_ID,
+                    "entity_id": entity_id,
                     "quality_contract_version": "1",
-                    "required_quality_checks": ["wikidata_q749610_schema"],
-                    "revision_id": REVISION_ID,
-                    "fixture": "official pinned entity JSON",
+                    "required_quality_checks": [_schema_check_name(entity_id)],
+                    "revision_id": revision_id,
+                    "fixture": "official pinned entity JSON" if fixture else False,
                     "license": "CC0-1.0",
                     "candidate_only": True,
                 },
                 legal_review_status=LegalReviewStatus.NOT_REQUIRED,
             )
-            _license(session, release.id)
+            _license(
+                session,
+                release.id,
+                entity_id=entity_id,
+                revision_id=revision_id,
+            )
             record_hash = hashlib.sha256(canonical_json_bytes(entity)).hexdigest()
-            locator = f"https://www.wikidata.org/wiki/{ENTITY_ID}?oldid={REVISION_ID}"
+            locator = f"https://www.wikidata.org/wiki/{entity_id}?oldid={revision_id}"
             session.add(
                 RawSourceRecord(
                     source_release_id=release.id,
-                    source_record_id=ENTITY_ID,
+                    source_record_id=entity_id,
                     source_record_locator=locator,
                     raw_storage_uri=storage_uri,
                     raw_checksum_sha256=record_hash,
@@ -416,8 +673,8 @@ def ingest_wikidata_candidate(
                     assertion_json=assertion_json,
                     assertion_status=ClaimAssertionStatus.CANDIDATE,
                 )
-                claim.temporal_start = date(1964, 3, 27)
-                claim.temporal_end = date(1964, 3, 27)
+                claim.temporal_start = occurrence
+                claim.temporal_end = occurrence
                 claim.temporal_precision = TemporalPrecision.DAY
                 claim.temporal_assignment = TemporalAssignment.REPORTED
                 claim.date_role = DateRole.OCCURRED
@@ -455,7 +712,7 @@ def ingest_wikidata_candidate(
             session.add(
                 QualityCheck(
                     pipeline_run_id=run.id,
-                    check_name="wikidata_q749610_schema",
+                    check_name=_schema_check_name(entity_id),
                     status="passed",
                     subject_type="source_release",
                     subject_id=release.id,
@@ -486,7 +743,7 @@ def ingest_wikidata_candidate(
         session.add(
             QualityCheck(
                 pipeline_run_id=run.id,
-                check_name="wikidata_q749610_schema",
+                check_name=_schema_check_name(entity_id),
                 status="failed",
                 subject_type="pipeline_run",
                 subject_id=run.id,
