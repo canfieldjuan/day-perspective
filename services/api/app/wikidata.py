@@ -79,6 +79,7 @@ from app.temporal import (
     Meridian,
     resolve_day,
 )
+from app.timezone_boundaries import timezone_for_coordinates
 
 __all__ = [
     "HttpWikidataEntityFetcher",
@@ -530,10 +531,21 @@ def _ingest_entity_payload(
             # Derive the occurrence day from P585 through the shared resolver, so
             # a live entity's claims carry its own date rather than a constant
             # (the pinned fixture resolves to the same 1964-03-27 it was stamped
-            # with before). A date coarser than a day, or a calendar the resolver
-            # does not restate, is refused here rather than approximated; lifting
-            # the sub-day refusal is B3.
-            occurrence = _resolve_occurrence_date(_value(_first(entity, "P585")))
+            # with before). A day-precision P585 is taken as reported; a
+            # second-precision instant is placed on its local civil day via the
+            # coordinates' timezone (B3). Coarser or hour/minute precision, a
+            # non-Gregorian calendar, or a sub-day instant whose place no boundary
+            # covers is refused here rather than approximated.
+            coordinates_statement = _optional(entity, "P625")
+            occurrence = _resolve_occurrence(
+                session,
+                occurrence_value=_value(_first(entity, "P585")),
+                coordinates_value=(
+                    _value(coordinates_statement)
+                    if coordinates_statement is not None
+                    else None
+                ),
+            ).profile_date
             if dry_run:
                 session.add(
                     QualityCheck(
@@ -948,6 +960,101 @@ def _resolve_occurrence_date(value: dict[str, Any]) -> date:
     return resolved.profile_date
 
 
+@dataclass(frozen=True)
+class _OccurrenceResolution:
+    """A resolved P585 occurrence: the local civil day plus what the ``EventTime``
+    needs to record how it was arrived at (D013).
+
+    For a reported day-precision P585 the derived fields stay None, exactly as the
+    reported EventTime path always left them. For a second-precision instant they
+    carry the instant, its zone, and the offset used to place it on a local day.
+    """
+
+    profile_date: date
+    temporal_assignment: TemporalAssignment
+    temporal_precision: TemporalPrecision
+    exact_timestamp: datetime | None = None
+    timezone_name: str | None = None
+    utc_offset_minutes: int | None = None
+    interpretation: str | None = None
+
+
+def _resolve_occurrence(
+    session: Session,
+    *,
+    occurrence_value: dict[str, Any],
+    coordinates_value: dict[str, Any] | None,
+) -> _OccurrenceResolution:
+    """Resolve a P585 occurrence to one local civil day, with provenance (B3).
+
+    Day precision (11) is a stated local civil day, taken as reported (the
+    coordinates are not consulted and the derived fields stay None, exactly as the
+    reported path always has). Second precision (14) is an instant: the local
+    civil day is derived from it via the coordinates' timezone (A3,
+    ``timezone_for_coordinates``) and the shared resolver, and the D013 fields
+    record how.
+
+    Refused per the contract rather than approximated: a precision coarser than a
+    day (which cannot place an event on a date); hour or minute precision (12/13),
+    which the day/second-only ``TemporalPrecision`` cannot record without
+    overstating -- tracked in #133; a non-Gregorian sub-day calendar (#114); and a
+    second-precise instant with no coordinates, or coordinates no boundary covers
+    (the place of occurrence is unknown, so no date-specific event follows).
+    """
+    precision = occurrence_value.get("precision")
+    if precision == 11:
+        return _OccurrenceResolution(
+            profile_date=_resolve_occurrence_date(occurrence_value),
+            temporal_assignment=TemporalAssignment.REPORTED,
+            temporal_precision=TemporalPrecision.DAY,
+        )
+    if precision != 14:
+        raise ValueError(
+            "Wikidata occurrence date is not day-precise or second-precise "
+            "(expected P585 precision 11 or 14). Coarser precision cannot place "
+            "the event on a date; hour and minute precision are not yet "
+            "supported (#133)."
+        )
+    time_text = occurrence_value.get("time")
+    if not isinstance(time_text, str):
+        raise ValueError("Wikidata occurrence instant is malformed.")
+    calendar = _calendar_system(occurrence_value)
+    if calendar is not CalendarSystem.GREGORIAN:
+        raise ValueError(
+            "Wikidata states a sub-day instant in the "
+            f"{calendar.value.capitalize()} calendar; restating it on the "
+            "product's Gregorian axis is not implemented (#114)."
+        )
+    if coordinates_value is None:
+        raise ValueError(
+            "Wikidata states a sub-day instant with no coordinates, so its place "
+            "of occurrence is unknown and it yields no date-specific event."
+        )
+    latitude = coordinates_value.get("latitude")
+    longitude = coordinates_value.get("longitude")
+    if not (isinstance(latitude, int | float) and isinstance(longitude, int | float)):
+        raise ValueError("Wikidata coordinates are malformed.")
+    zone = timezone_for_coordinates(
+        session, latitude=float(latitude), longitude=float(longitude)
+    )
+    if zone is None:
+        raise ValueError(
+            "No timezone boundary covers the Wikidata coordinates, so the sub-day "
+            "instant yields no local civil day."
+        )
+    instant = datetime.fromisoformat(time_text.lstrip("+").replace("Z", "+00:00"))
+    resolved = resolve_day(instant=instant, timezone_name=zone.tzid)
+    return _OccurrenceResolution(
+        profile_date=resolved.profile_date,
+        temporal_assignment=resolved.temporal_assignment,
+        temporal_precision=TemporalPrecision.SECOND,
+        exact_timestamp=resolved.exact_timestamp,
+        timezone_name=resolved.timezone_name,
+        utc_offset_minutes=resolved.utc_offset_minutes,
+        interpretation=resolved.interpretation,
+    )
+
+
 def _resolve_candidate(
     session: Session, *, qid: str, claim: Claim, methodology: Methodology
 ) -> ResolvedClaim:
@@ -1066,14 +1173,27 @@ def resolve_wikidata_event(session: Session) -> Event:
     if not isinstance(qid, str):
         raise ValueError("Wikidata identity candidate has no entity id.")
 
-    # Validate and resolve the occurrence date before any write: a bad P585, or
-    # one in a calendar the resolver does not restate (Julian, #114/#120), must
-    # not leave a half-resolved identity behind. The CLI commits its audit trail
-    # on failure, which would otherwise persist an identity with no event and
-    # wedge retries (the next call finds the identity, no event, and re-resolves
-    # without a supersession id).
-    occurrence_date = _resolve_occurrence_date(
-        _candidate_value(claims["candidate_occurrence_date"])
+    # Validate and resolve the occurrence before any write: a bad P585, or one in
+    # a calendar the resolver does not restate (Julian, #114/#120), must not leave
+    # a half-resolved identity behind. The CLI commits its audit trail on failure,
+    # which would otherwise persist an identity with no event and wedge retries
+    # (the next call finds the identity, no event, and re-resolves without a
+    # supersession id). A second-precision instant is placed on its local civil
+    # day via the coordinates' timezone (B3); its place evidence must be an
+    # accepted coordinate, or the instant has no reviewed place and is refused.
+    coordinates_claim = claims.get("candidate_coordinates")
+    occurrence = _resolve_occurrence(
+        session,
+        occurrence_value=_candidate_value(claims["candidate_occurrence_date"]),
+        coordinates_value=(
+            _candidate_value(coordinates_claim)
+            if coordinates_claim is not None
+            and coordinates_claim.assertion_status is ClaimAssertionStatus.ACCEPTED
+            else None
+        ),
+    )
+    occurrence_derived = (
+        occurrence.temporal_assignment is not TemporalAssignment.REPORTED
     )
 
     # Serialize per entity so two concurrent resolves cannot double-create the
@@ -1126,19 +1246,38 @@ def resolve_wikidata_event(session: Session) -> Event:
         )
         session.add(event)
         session.flush()
+        # A derived day rests on the place evidence: resolve the accepted
+        # coordinate now so the EventTime can cite it as the local-date
+        # provenance. _ensure_event_location below reuses this resolved claim.
+        local_date_provenance_id = (
+            _resolve_candidate(
+                session,
+                qid=qid,
+                claim=claims["candidate_coordinates"],
+                methodology=methodology,
+            ).id
+            if occurrence_derived
+            else None
+        )
         session.add(
             EventTime(
                 event_id=event.id,
                 provenance_resolved_claim_id=resolved["candidate_occurrence_date"].id,
-                start_date=occurrence_date,
-                end_date=occurrence_date,
-                temporal_precision=TemporalPrecision.DAY,
-                # REPORTED, matching how the resolver classifies a stated local
-                # civil day: a secondary source naming the day, not a direct
-                # record derived from an instant.
-                temporal_assignment=TemporalAssignment.REPORTED,
+                local_date_provenance_resolved_claim_id=local_date_provenance_id,
+                start_date=occurrence.profile_date,
+                end_date=occurrence.profile_date,
+                # DAY / REPORTED for a stated local civil day (a secondary source
+                # naming the day); SECOND / DIRECT_RECORD for a day derived from a
+                # second-precision instant, whose D013 fields record how.
+                temporal_precision=occurrence.temporal_precision,
+                temporal_assignment=occurrence.temporal_assignment,
                 date_role=DateRole.OCCURRED,
                 is_primary=True,
+                exact_timestamp=occurrence.exact_timestamp,
+                local_date=occurrence.profile_date if occurrence_derived else None,
+                timezone_name=occurrence.timezone_name,
+                utc_offset_minutes=occurrence.utc_offset_minutes,
+                interpretation=occurrence.interpretation,
             )
         )
 
@@ -1663,20 +1802,29 @@ def _resolution_lineage(
     return claim, release
 
 
-def _recorded_statement_text(predicate: str, *, value: dict[str, Any]) -> str:
+def _recorded_statement_text(
+    predicate: str, *, value: dict[str, Any], occurrence_date: date | None = None
+) -> str:
     """Honest, data-derived statement text for one recorded predicate.
 
     Every value is read from the resolved candidate; nothing is invented (§12).
+    The occurrence day is the one resolution filed the event under -- passed in
+    from the EventTime rather than re-derived -- so a second-precision instant's
+    derived local day is rendered, not a day this text-only path cannot compute.
     """
     if predicate == "candidate_name":
         return f'Wikidata records this event as "{value.get("label", "")}".'
     if predicate == "candidate_event_type":
         return f"Wikidata classifies the entity as type {value.get('id', '')}."
     if predicate == "candidate_occurrence_date":
-        occurrence = _resolve_occurrence_date(value)
+        if occurrence_date is None:
+            raise ValueError(
+                "Rendering the Wikidata occurrence statement requires the "
+                "resolved occurrence date."
+            )
         return (
             "Wikidata records the occurrence on "
-            f"{occurrence:%B} {occurrence.day}, {occurrence.year}."
+            f"{occurrence_date:%B} {occurrence_date.day}, {occurrence_date.year}."
         )
     if predicate == "candidate_coordinates":
         return (
@@ -1948,17 +2096,33 @@ def publish_wikidata_event(
         session, qid=qid, predicate="candidate_occurrence_date"
     )
 
-    # The occurrence date is the resolution's once resolved, so the collision guard
-    # and the publish target are the same date -- a re-ingest that moves P585 cannot
-    # let the guard miss a recorded event on the date we actually publish on.
-    # Pre-resolution it falls back to the accepted candidate purely so a collision
-    # can still defer.
-    if event is not None and resolved_occurrence is not None:
-        occurrence_date = _resolve_occurrence_date(_resolved_value(resolved_occurrence))
-    else:
-        occurrence_date = _resolve_occurrence_date(
-            _candidate_value(claims["candidate_occurrence_date"])
+    # Once resolved, the occurrence date is the resolved event's own primary
+    # EventTime -- the exact date it publishes on, derived or reported -- so the
+    # collision guard and the publish target cannot diverge, and a
+    # second-precision instant's derived day is read from where resolution wrote
+    # it rather than re-derived. Pre-resolution it falls back to the accepted
+    # candidate purely so a collision can still defer.
+    if event is not None:
+        event_time = session.scalar(
+            select(EventTime).where(
+                EventTime.event_id == event.id, EventTime.is_primary.is_(True)
+            )
         )
+        if event_time is None:
+            raise ValueError("The resolved Wikidata event has no primary occurrence time.")
+        occurrence_date = event_time.start_date
+    else:
+        coordinates_claim = claims.get("candidate_coordinates")
+        occurrence_date = _resolve_occurrence(
+            session,
+            occurrence_value=_candidate_value(claims["candidate_occurrence_date"]),
+            coordinates_value=(
+                _candidate_value(coordinates_claim)
+                if coordinates_claim is not None
+                and coordinates_claim.assertion_status is ClaimAssertionStatus.ACCEPTED
+                else None
+            ),
+        ).profile_date
 
     # Dedup before minting a competing recorded event: a date that already
     # publishes a different recorded event defers to human merge review.
@@ -2054,7 +2218,9 @@ def publish_wikidata_event(
                     "_", "-"
                 ),
                 "statement": _recorded_statement_text(
-                    predicate, value=_resolved_value(resolved)
+                    predicate,
+                    value=_resolved_value(resolved),
+                    occurrence_date=event_time.start_date,
                 ),
                 "details": details,
                 "provenance_note": (
