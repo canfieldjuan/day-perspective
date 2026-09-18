@@ -271,7 +271,7 @@ def test_second_precision_coordinates_no_boundary_covers_is_refused(
         latitude=0.0,
         longitude=0.0,
     )
-    with pytest.raises(ValueError, match="no timezone boundary covers"):
+    with pytest.raises(ValueError, match="[Nn]o timezone boundary covers"):
         _ingest(session, payload, 700004, tmp_path)
 
 

@@ -333,33 +333,6 @@ def test_a_date_we_would_have_to_round_is_refused(
 
 
 @pytest.mark.integration
-def test_a_sub_day_timestamp_is_refused_pending_B3(
-    session: Session, tmp_path: Path
-) -> None:
-    """Finer than a day is refused for now.
-
-    The shared resolver accepts only P585 precision 11 today; deriving a local
-    civil day from a sub-day instant needs A3's coordinates->timezone and is
-    B3's slice. Until then a sub-day P585 is refused, not silently truncated.
-    """
-    payload = entity_document(
-        entity_id="Q108precise",
-        revision_id=999011,
-        occurrence="1969-07-20",
-        precision=14,
-    )
-
-    with pytest.raises(ValueError, match="day-precise"):
-        ingest_wikidata_entity(
-            session,
-            entity_id="Q108precise",
-            revision_id=999011,
-            fetcher=RecordingFetcher(payload, 999011),
-            raw_store=LocalFilesystemRawSourceStore(tmp_path / "raw"),
-        )
-
-
-@pytest.mark.integration
 def test_a_served_entity_that_is_not_the_one_requested_is_refused(
     session: Session, tmp_path: Path
 ) -> None:
