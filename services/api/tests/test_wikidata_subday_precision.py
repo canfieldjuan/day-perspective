@@ -26,6 +26,7 @@ from sqlalchemy.orm import Session
 
 from app.governance import ReviewDecisionValue, record_claim_review
 from app.models import Claim, EventTime, TemporalAssignment, TemporalPrecision
+from app.timezone_boundaries import load_timezone_boundaries
 from app.wikidata import (
     LocalFilesystemRawSourceStore,
     _recorded_statement_text,
@@ -362,3 +363,64 @@ def test_reported_occurrence_statement_reads_as_wikidatas_stated_day() -> None:
         occurrence_date=date(1964, 3, 27),
     )
     assert text == "Wikidata records the occurrence on March 27, 1964."
+
+
+@pytest.mark.integration
+def test_resolution_reuses_the_ingest_derivation_after_a_boundary_reseed(
+    session: Session, tmp_path: Path
+) -> None:
+    """A reseed between ingest and resolution must not change the derived day.
+
+    Ingest records the derivation (zone + day + dataset version) on the claim,
+    which the human reviews. If resolution re-ran the boundary lookup against a
+    reseeded table, the EventTime could get a different zone/day than the
+    reviewed candidate and the immutable claim snapshot -- self-contradictory
+    evidence. Resolution reuses the persisted derivation instead.
+    """
+    seed_test_timezones(session)
+    payload = _entity_document(
+        entity_id="Q108subday",
+        revision_id=700007,
+        timestamp="1969-07-20T23:30:00Z",
+        precision=14,
+    )
+    _ingest(session, payload, 700007, tmp_path)
+    _accept_core(session)
+
+    # Reseed so the same coordinates would now resolve to a different zone AND a
+    # different local day (New York, UTC-4, puts 23:30Z on the 20th, not the
+    # Berlin 21st) under a new dataset version.
+    reseed = {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "properties": {"tzid": "America/New_York"},
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [[[10, 50], [11, 50], [11, 51], [10, 51], [10, 50]]],
+                },
+            }
+        ],
+    }
+    load_timezone_boundaries(
+        session, geojson_text=json.dumps(reseed), dataset_version="reseed-v2"
+    )
+
+    event = resolve_wikidata_event(session)
+    event_time = session.scalars(
+        select(EventTime).where(
+            EventTime.event_id == event.id, EventTime.is_primary.is_(True)
+        )
+    ).one()
+    # The reviewed (ingest) derivation stands: Berlin, the 21st -- not New York /
+    # the 20th the reseeded table would now produce.
+    assert event_time.start_date == date(1969, 7, 21)
+    assert event_time.timezone_name == "Europe/Berlin"
+
+    occurrence_claim = session.scalars(
+        select(Claim).where(Claim.claim_type == "candidate_occurrence_date")
+    ).one()
+    derived = (occurrence_claim.assertion_json or {})["derived_local_date"]
+    assert derived["timezone"] == "Europe/Berlin"
+    assert derived["timezone_dataset_version"] == "mini-test"

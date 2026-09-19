@@ -1107,6 +1107,47 @@ def _resolve_occurrence(
     )
 
 
+def _persisted_occurrence(claim: Claim) -> _OccurrenceResolution:
+    """Rebuild the occurrence resolution from what ingest recorded on the claim.
+
+    Ingest is the single point that consults the timezone-boundary table
+    (``_resolve_occurrence``); resolve and publish reuse the recorded derivation
+    rather than re-running the lookup. Re-running it would read a table that may
+    have been reseeded since ingest, so a coordinate could resolve to a different
+    zone or day than the reviewed candidate carried -- and the fresh EventTime
+    would then contradict the immutable claim snapshot, which retains the
+    ingested ``derived_local_date`` and dataset version.
+
+    ``resolve_day`` from the recorded instant and tzid is pure (no table), so it
+    reproduces exactly what ingest derived; the dataset version is carried through
+    from the recorded block. A day-precision occurrence has no block and is the
+    reported day, exactly as before.
+    """
+    assertion = claim.assertion_json or {}
+    block = assertion.get("derived_local_date")
+    if isinstance(block, dict):
+        resolved = resolve_day(
+            instant=datetime.fromisoformat(str(block["instant"])),
+            timezone_name=str(block["timezone"]),
+        )
+        return _OccurrenceResolution(
+            profile_date=resolved.profile_date,
+            temporal_assignment=resolved.temporal_assignment,
+            temporal_precision=TemporalPrecision.SECOND,
+            exact_timestamp=resolved.exact_timestamp,
+            timezone_name=resolved.timezone_name,
+            utc_offset_minutes=resolved.utc_offset_minutes,
+            timezone_dataset_version=block.get("timezone_dataset_version"),
+            interpretation=resolved.interpretation,
+        )
+    value = assertion.get("value")
+    return _OccurrenceResolution(
+        profile_date=_resolve_occurrence_date(value if isinstance(value, dict) else {}),
+        temporal_assignment=TemporalAssignment.REPORTED,
+        temporal_precision=TemporalPrecision.DAY,
+    )
+
+
 def _resolve_candidate(
     session: Session, *, qid: str, claim: Claim, methodology: Methodology
 ) -> ResolvedClaim:
@@ -1225,28 +1266,29 @@ def resolve_wikidata_event(session: Session) -> Event:
     if not isinstance(qid, str):
         raise ValueError("Wikidata identity candidate has no entity id.")
 
-    # Validate and resolve the occurrence before any write: a bad P585, or one in
-    # a calendar the resolver does not restate (Julian, #114/#120), must not leave
-    # a half-resolved identity behind. The CLI commits its audit trail on failure,
-    # which would otherwise persist an identity with no event and wedge retries
-    # (the next call finds the identity, no event, and re-resolves without a
-    # supersession id). A second-precision instant is placed on its local civil
-    # day via the coordinates' timezone (B3); its place evidence must be an
-    # accepted coordinate, or the instant has no reviewed place and is refused.
-    coordinates_claim = claims.get("candidate_coordinates")
-    occurrence = _resolve_occurrence(
-        session,
-        occurrence_value=_candidate_value(claims["candidate_occurrence_date"]),
-        coordinates_value=(
-            _candidate_value(coordinates_claim)
-            if coordinates_claim is not None
-            and coordinates_claim.assertion_status is ClaimAssertionStatus.ACCEPTED
-            else None
-        ),
-    )
+    # Validate and resolve the occurrence before any write: a bad P585 must not
+    # leave a half-resolved identity behind (the CLI commits its audit trail on
+    # failure, which would otherwise persist an identity with no event and wedge
+    # retries). The derivation itself was done at ingest and recorded on the
+    # claim; reuse it (``_persisted_occurrence``) rather than re-running the
+    # boundary lookup, so a reseed between ingest and this human resolution cannot
+    # make the EventTime disagree with the immutable claim snapshot. A derived
+    # (second-precision) day still requires its place evidence -- the coordinate
+    # -- to be an accepted candidate, or the instant has no reviewed place.
+    occurrence = _persisted_occurrence(claims["candidate_occurrence_date"])
     occurrence_derived = (
         occurrence.temporal_assignment is not TemporalAssignment.REPORTED
     )
+    coordinates_claim = claims.get("candidate_coordinates")
+    if occurrence_derived and (
+        coordinates_claim is None
+        or coordinates_claim.assertion_status is not ClaimAssertionStatus.ACCEPTED
+    ):
+        raise ValueError(
+            "A second-precision Wikidata event's local day is derived from its "
+            "coordinates, so the coordinate candidate must be human-accepted "
+            "before it can be resolved into an event."
+        )
 
     # Serialize per entity so two concurrent resolves cannot double-create the
     # event or its location (the governance writers' advisory-lock pattern).
@@ -2180,16 +2222,11 @@ def publish_wikidata_event(
             raise ValueError("The resolved Wikidata event has no primary occurrence time.")
         occurrence_date = event_time.start_date
     else:
-        coordinates_claim = claims.get("candidate_coordinates")
-        occurrence_date = _resolve_occurrence(
-            session,
-            occurrence_value=_candidate_value(claims["candidate_occurrence_date"]),
-            coordinates_value=(
-                _candidate_value(coordinates_claim)
-                if coordinates_claim is not None
-                and coordinates_claim.assertion_status is ClaimAssertionStatus.ACCEPTED
-                else None
-            ),
+        # Pre-resolution: reuse the day ingest recorded on the candidate (the
+        # same recorded derivation resolution will use), not a fresh boundary
+        # lookup, so the collision guard matches the eventual publish date.
+        occurrence_date = _persisted_occurrence(
+            claims["candidate_occurrence_date"]
         ).profile_date
 
     # Dedup before minting a competing recorded event: a date that already
