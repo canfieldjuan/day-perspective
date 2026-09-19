@@ -140,7 +140,7 @@ def test_resolve_builds_event_from_reviewed_candidate(
             Methodology.slug == "wikidata-single-candidate"
         )
     ).one()
-    assert methodology.version == "2"
+    assert methodology.version == "3"
     assert "calendarmodel" in methodology.description
     assert "local civil day" in methodology.description
 

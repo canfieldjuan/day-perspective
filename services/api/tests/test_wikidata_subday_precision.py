@@ -28,6 +28,7 @@ from app.governance import ReviewDecisionValue, record_claim_review
 from app.models import Claim, EventTime, TemporalAssignment, TemporalPrecision
 from app.wikidata import (
     LocalFilesystemRawSourceStore,
+    _recorded_statement_text,
     ingest_wikidata_entity,
     resolve_wikidata_event,
 )
@@ -69,7 +70,9 @@ def _p585(iso_timestamp: str, precision: int) -> dict[str, Any]:
     }
 
 
-def _p625(latitude: float, longitude: float) -> dict[str, Any]:
+def _p625(
+    latitude: float, longitude: float, globe: str = "http://www.wikidata.org/entity/Q2"
+) -> dict[str, Any]:
     return {
         "mainsnak": {
             "snaktype": "value",
@@ -79,7 +82,7 @@ def _p625(latitude: float, longitude: float) -> dict[str, Any]:
                     "latitude": latitude,
                     "longitude": longitude,
                     "precision": 0.0001,
-                    "globe": "http://www.wikidata.org/entity/Q2",
+                    "globe": globe,
                 },
                 "type": "globecoordinate",
             },
@@ -114,6 +117,7 @@ def _entity_document(
     precision: int,
     latitude: float = BERLIN_LAT,
     longitude: float = BERLIN_LON,
+    globe: str = "http://www.wikidata.org/entity/Q2",
     with_coordinates: bool = True,
 ) -> bytes:
     """A structurally faithful, synthetic Wikidata entity document (§12: test-only)."""
@@ -122,7 +126,7 @@ def _entity_document(
         "P585": [_p585(timestamp, precision)],
     }
     if with_coordinates:
-        claims["P625"] = [_p625(latitude, longitude)]
+        claims["P625"] = [_p625(latitude, longitude, globe)]
     entity = {
         "type": "item",
         "id": entity_id,
@@ -206,6 +210,24 @@ def test_second_precision_p585_is_derived_to_its_local_civil_day(
     assert event_time.utc_offset_minutes == 60
     # The derived day cites its place evidence (the coordinates), not nothing.
     assert event_time.local_date_provenance_resolved_claim_id is not None
+
+    # The occurrence CLAIM (frozen into immutable publication evidence) must
+    # agree with the EventTime: SECOND / DIRECT_RECORD, not DAY / REPORTED, and
+    # carry the derived provenance including the boundary dataset version so the
+    # day is reproducible after a reseed.
+    occurrence_claim = session.scalars(
+        select(Claim).where(Claim.claim_type == "candidate_occurrence_date")
+    ).one()
+    assert occurrence_claim.temporal_precision is TemporalPrecision.SECOND
+    assert occurrence_claim.temporal_assignment is TemporalAssignment.DIRECT_RECORD
+    assert occurrence_claim.temporal_start == date(1969, 7, 21)
+    derived = (occurrence_claim.assertion_json or {}).get("derived_local_date")
+    assert derived is not None
+    assert derived["date"] == "1969-07-21"
+    assert derived["timezone"] == "Europe/Berlin"
+    assert derived["utc_offset_minutes"] == 60
+    assert derived["timezone_dataset_version"] == "mini-test"
+    assert derived["instant"] == "1969-07-20T23:30:00+00:00"
 
 
 @pytest.mark.integration
@@ -291,3 +313,52 @@ def test_hour_and_minute_precision_are_refused(
     )
     with pytest.raises(ValueError, match="precision 11 or 14"):
         _ingest(session, payload, 700005, tmp_path)
+
+
+@pytest.mark.integration
+def test_second_precision_non_earth_coordinates_are_refused(
+    session: Session, tmp_path: Path
+) -> None:
+    # P625 on another globe (here the Moon, Q405) must not be read against Earth
+    # timezone polygons even if its numeric point lands inside one; it fails closed.
+    seed_test_timezones(session)
+    payload = _entity_document(
+        entity_id="Q108subday",
+        revision_id=700006,
+        timestamp="1969-07-20T23:30:00Z",
+        precision=14,
+        globe="http://www.wikidata.org/entity/Q405",
+    )
+    with pytest.raises(ValueError, match="not on Earth"):
+        _ingest(session, payload, 700006, tmp_path)
+
+
+def test_derived_occurrence_statement_does_not_attribute_the_local_day_to_wikidata() -> (
+    None
+):
+    """§12: the derived local day is the product's conversion, not Wikidata's claim.
+
+    DB-free. For a second-precision instant the rendered statement attributes the
+    INSTANT to Wikidata and states the local-day conversion as the product's,
+    never 'Wikidata records the occurrence on {derived day}'.
+    """
+    text = _recorded_statement_text(
+        "candidate_occurrence_date",
+        value={},
+        occurrence_date=date(1969, 7, 21),
+        occurrence_instant=datetime(1969, 7, 20, 23, 30, tzinfo=UTC),
+        occurrence_timezone="Europe/Berlin",
+    )
+    assert "July 20, 1969 23:30 UTC" in text  # the instant, attributed to Wikidata
+    assert "Europe/Berlin civil time that is July 21, 1969" in text
+    assert "records the occurrence on July 21" not in text
+
+
+def test_reported_occurrence_statement_reads_as_wikidatas_stated_day() -> None:
+    """DB-free. A day-precision (reported) occurrence still reads as the stated day."""
+    text = _recorded_statement_text(
+        "candidate_occurrence_date",
+        value={},
+        occurrence_date=date(1964, 3, 27),
+    )
+    assert text == "Wikidata records the occurrence on March 27, 1964."
