@@ -337,13 +337,11 @@ PRs on current `main`; #107 is closed as superseded.
   civil day by deriving it from the instant and the timezone whose boundary
   wholly covers the P625 precision footprint (A3), recording D013 provenance on
   the `EventTime` and the occurrence claim. Day precision (11) stays a reported
-  stated day, unchanged. Ingest is the single boundary-table consumer;
-  resolve/publish reconstruct the occurrence from the persisted
-  `derived_local_date` block rather than re-running the boundary lookup or tzdata,
-  so a boundary reseed or a tzdata correction between ingest and resolution cannot
-  move a derived day. (That guards against reseed/tzdata drift only; the working
-  claim stays editable per `DECISIONS.md`, and the immutable record is the
-  publication-evidence snapshot minted at publish, not the claim itself.)
+  stated day, unchanged. Ingest is the single consumer of the timezone-boundary
+  table and tzdata; resolution reconstructs the occurrence from the persisted
+  `derived_local_date` block rather than re-running that lookup, so a boundary
+  reseed or a tzdata correction between ingest and resolution cannot move the
+  derived day, and publication then reads the resolved `EventTime`.
 
 Deferred (tracked in #133): hour/minute precision (needs a `TemporalPrecision`
 modelling decision) and antimeridian footprint wrapping (a fail-closed
