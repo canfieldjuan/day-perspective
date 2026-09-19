@@ -1042,9 +1042,11 @@ def _resolve_occurrence(
     Refused per the contract rather than approximated: a precision coarser than a
     day (which cannot place an event on a date); hour or minute precision (12/13),
     which the day/second-only ``TemporalPrecision`` cannot record without
-    overstating -- tracked in #133; a non-Gregorian sub-day calendar (#114); and a
-    second-precise instant with no coordinates, or coordinates no boundary covers
-    (the place of occurrence is unknown, so no date-specific event follows).
+    overstating -- tracked in #133; a non-Gregorian sub-day calendar (#114); a
+    second-precise value whose before/after uncertainty bounds are nonzero (an
+    interval, not one exact instant); and a second-precise instant with no
+    coordinates, or coordinates no boundary covers (the place of occurrence is
+    unknown, so no date-specific event follows).
     """
     precision = occurrence_value.get("precision")
     if precision == 11:
@@ -1069,6 +1071,20 @@ def _resolve_occurrence(
             "Wikidata states a sub-day instant in the "
             f"{calendar.value.capitalize()} calendar; restating it on the "
             "product's Gregorian axis is not implemented (#114)."
+        )
+    # A P585 time value carries before/after uncertainty bounds (units of its
+    # precision). At precision 14 a nonzero bound makes the value an interval, not
+    # one exact instant: taking the central ``time`` as an exact SECOND /
+    # DIRECT_RECORD instant would overstate the source, and an interval crossing
+    # local midnight would not name one civil day. Only an exact instant (both
+    # bounds zero) is accepted; anything else fails closed, with the other sub-day
+    # limits tracked in #133.
+    if occurrence_value.get("before") != 0 or occurrence_value.get("after") != 0:
+        raise ValueError(
+            "Wikidata states the sub-day instant with a nonzero before/after "
+            "uncertainty interval, so it does not name one exact instant (nor "
+            "necessarily one local civil day); it is not accepted as a "
+            "second-precise occurrence."
         )
     if coordinates_value is None:
         raise ValueError(

@@ -49,7 +49,9 @@ CORE_CLAIMS = (
 )
 
 
-def _p585(iso_timestamp: str, precision: int) -> dict[str, Any]:
+def _p585(
+    iso_timestamp: str, precision: int, *, before: int = 0, after: int = 0
+) -> dict[str, Any]:
     return {
         "mainsnak": {
             "snaktype": "value",
@@ -58,8 +60,8 @@ def _p585(iso_timestamp: str, precision: int) -> dict[str, Any]:
                 "value": {
                     "time": f"+{iso_timestamp}",
                     "timezone": 0,
-                    "before": 0,
-                    "after": 0,
+                    "before": before,
+                    "after": after,
                     "precision": precision,
                     "calendarmodel": GREGORIAN,
                 },
@@ -117,6 +119,8 @@ def _entity_document(
     revision_id: int,
     timestamp: str,
     precision: int,
+    before: int = 0,
+    after: int = 0,
     latitude: float = BERLIN_LAT,
     longitude: float = BERLIN_LON,
     globe: str = "http://www.wikidata.org/entity/Q2",
@@ -125,7 +129,7 @@ def _entity_document(
     """A structurally faithful, synthetic Wikidata entity document (§12: test-only)."""
     claims: dict[str, Any] = {
         "P31": [_p31()],
-        "P585": [_p585(timestamp, precision)],
+        "P585": [_p585(timestamp, precision, before=before, after=after)],
     }
     if with_coordinates:
         claims["P625"] = [_p625(latitude, longitude, globe)]
@@ -315,6 +319,29 @@ def test_hour_and_minute_precision_are_refused(
     )
     with pytest.raises(ValueError, match="precision 11 or 14"):
         _ingest(session, payload, 700005, tmp_path)
+
+
+@pytest.mark.integration
+def test_second_precision_with_nonzero_uncertainty_is_refused(
+    session: Session, tmp_path: Path
+) -> None:
+    # A precision-14 P585 carries before/after uncertainty bounds (in seconds). If
+    # they are nonzero the value is an interval, not one exact instant: reading the
+    # central time as an exact SECOND/DIRECT_RECORD instant would overstate the
+    # source (honest data), and an interval crossing local midnight would place the
+    # event on a day the evidence does not uniquely determine. It fails closed, like
+    # hour/minute precision -- accepted only when both bounds are zero.
+    seed_test_timezones(session)
+    payload = _entity_document(
+        entity_id="Q108subday",
+        revision_id=700009,
+        timestamp="1969-07-20T23:30:00Z",
+        precision=14,
+        before=1,
+        after=1,
+    )
+    with pytest.raises(ValueError, match="uncertainty"):
+        _ingest(session, payload, 700009, tmp_path)
 
 
 @pytest.mark.integration
