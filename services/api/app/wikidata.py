@@ -698,6 +698,9 @@ def _ingest_entity_payload(
                             if occurrence_resolution.exact_timestamp is not None
                             else None
                         ),
+                        # Recorded so resolve/publish reconstruct the same text
+                        # without re-running resolve_day (whose tzdata may change).
+                        "interpretation": occurrence_resolution.interpretation,
                     }
                 claim = create_claim(
                     session,
@@ -1108,37 +1111,30 @@ def _resolve_occurrence(
 
 
 def _persisted_occurrence(claim: Claim) -> _OccurrenceResolution:
-    """Rebuild the occurrence resolution from what ingest recorded on the claim.
+    """Rebuild the occurrence resolution purely from what ingest recorded.
 
-    Ingest is the single point that consults the timezone-boundary table
-    (``_resolve_occurrence``); resolve and publish reuse the recorded derivation
-    rather than re-running the lookup. Re-running it would read a table that may
-    have been reseeded since ingest, so a coordinate could resolve to a different
-    zone or day than the reviewed candidate carried -- and the fresh EventTime
-    would then contradict the immutable claim snapshot, which retains the
-    ingested ``derived_local_date`` and dataset version.
-
-    ``resolve_day`` from the recorded instant and tzid is pure (no table), so it
-    reproduces exactly what ingest derived; the dataset version is carried through
-    from the recorded block. A day-precision occurrence has no block and is the
-    reported day, exactly as before.
+    Ingest is the single point that consults the timezone-boundary table AND the
+    runtime tzdata (``_resolve_occurrence`` -> ``resolve_day``); it records the
+    derived day, offset, timezone, dataset version, instant, and interpretation
+    on the claim. Resolve and publish rebuild from those recorded values without
+    re-running any lookup: neither the boundary table (which may be reseeded) nor
+    ``ZoneInfo`` (whose tzdata may be corrected) is consulted, so the EventTime
+    and rendered statement cannot drift from the immutable claim snapshot the
+    reviewer accepted. A day-precision occurrence has no block and is the reported
+    day (that path derives no offset and consults no tzdata).
     """
     assertion = claim.assertion_json or {}
     block = assertion.get("derived_local_date")
     if isinstance(block, dict):
-        resolved = resolve_day(
-            instant=datetime.fromisoformat(str(block["instant"])),
-            timezone_name=str(block["timezone"]),
-        )
         return _OccurrenceResolution(
-            profile_date=resolved.profile_date,
-            temporal_assignment=resolved.temporal_assignment,
+            profile_date=date.fromisoformat(str(block["date"])),
+            temporal_assignment=TemporalAssignment.DIRECT_RECORD,
             temporal_precision=TemporalPrecision.SECOND,
-            exact_timestamp=resolved.exact_timestamp,
-            timezone_name=resolved.timezone_name,
-            utc_offset_minutes=resolved.utc_offset_minutes,
+            exact_timestamp=datetime.fromisoformat(str(block["instant"])),
+            timezone_name=str(block["timezone"]),
+            utc_offset_minutes=int(block["utc_offset_minutes"]),
             timezone_dataset_version=block.get("timezone_dataset_version"),
-            interpretation=resolved.interpretation,
+            interpretation=block.get("interpretation"),
         )
     value = assertion.get("value")
     return _OccurrenceResolution(

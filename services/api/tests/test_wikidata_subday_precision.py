@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from sqlalchemy import select
@@ -29,6 +29,7 @@ from app.models import Claim, EventTime, TemporalAssignment, TemporalPrecision
 from app.timezone_boundaries import load_timezone_boundaries
 from app.wikidata import (
     LocalFilesystemRawSourceStore,
+    _persisted_occurrence,
     _recorded_statement_text,
     ingest_wikidata_entity,
     resolve_wikidata_event,
@@ -363,6 +364,58 @@ def test_reported_occurrence_statement_reads_as_wikidatas_stated_day() -> None:
         occurrence_date=date(1964, 3, 27),
     )
     assert text == "Wikidata records the occurrence on March 27, 1964."
+
+
+def test_persisted_occurrence_rebuilds_purely_from_the_recorded_block() -> None:
+    """DB-free. Reconstruction reads the recorded values verbatim -- no resolve_day,
+    no tzdata, no boundary lookup -- so neither a boundary reseed nor a tzdata
+    correction can make it drift from the immutable claim snapshot.
+    """
+    from types import SimpleNamespace
+
+    claim = SimpleNamespace(
+        assertion_json={
+            "value": {"time": "+1969-07-20T23:30:00Z", "precision": 14},
+            "derived_local_date": {
+                "date": "1969-07-21",
+                "timezone": "Europe/Berlin",
+                "utc_offset_minutes": 60,
+                "timezone_dataset_version": "mini-test",
+                "instant": "1969-07-20T23:30:00+00:00",
+                "interpretation": "derived under Europe/Berlin rules",
+            },
+        }
+    )
+    resolution = _persisted_occurrence(cast(Claim, claim))
+    assert resolution.profile_date == date(1969, 7, 21)
+    assert resolution.temporal_precision is TemporalPrecision.SECOND
+    assert resolution.temporal_assignment is TemporalAssignment.DIRECT_RECORD
+    assert resolution.exact_timestamp == datetime(1969, 7, 20, 23, 30, tzinfo=UTC)
+    assert resolution.timezone_name == "Europe/Berlin"
+    assert resolution.utc_offset_minutes == 60
+    assert resolution.timezone_dataset_version == "mini-test"
+    assert resolution.interpretation == "derived under Europe/Berlin rules"
+
+
+def test_persisted_occurrence_of_a_day_precision_claim_is_reported() -> None:
+    """DB-free. A claim with no derived block is the reported stated day."""
+    from types import SimpleNamespace
+
+    claim = SimpleNamespace(
+        assertion_json={
+            "value": {
+                "time": "+1964-03-27T00:00:00Z",
+                "precision": 11,
+                "calendarmodel": GREGORIAN,
+            }
+        }
+    )
+    resolution = _persisted_occurrence(cast(Claim, claim))
+    assert resolution.profile_date == date(1964, 3, 27)
+    assert resolution.temporal_precision is TemporalPrecision.DAY
+    assert resolution.temporal_assignment is TemporalAssignment.REPORTED
+    assert resolution.exact_timestamp is None
+    assert resolution.timezone_name is None
 
 
 @pytest.mark.integration
