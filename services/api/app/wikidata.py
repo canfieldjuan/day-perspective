@@ -79,7 +79,10 @@ from app.temporal import (
     Meridian,
     resolve_day,
 )
-from app.timezone_boundaries import timezone_for_coordinates
+from app.timezone_boundaries import (
+    timezone_for_coordinates,
+    timezones_intersecting_footprint,
+)
 
 __all__ = [
     "HttpWikidataEntityFetcher",
@@ -1044,9 +1047,11 @@ def _resolve_occurrence(
     which the day/second-only ``TemporalPrecision`` cannot record without
     overstating -- tracked in #133; a non-Gregorian sub-day calendar (#114); a
     second-precise value whose before/after uncertainty bounds are nonzero (an
-    interval, not one exact instant); and a second-precise instant with no
+    interval, not one exact instant); a second-precise instant with no
     coordinates, or coordinates no boundary covers (the place of occurrence is
-    unknown, so no date-specific event follows).
+    unknown, so no date-specific event follows); and coordinates with no positive
+    precision or whose precision footprint spans more than one timezone (the local
+    civil day is not uniquely determined).
     """
     precision = occurrence_value.get("precision")
     if precision == 11:
@@ -1111,6 +1116,30 @@ def _resolve_occurrence(
         raise ValueError(
             "No timezone boundary covers the Wikidata coordinates, so the sub-day "
             "instant yields no local civil day."
+        )
+    # The coordinates carry their own precision footprint (in degrees). If that
+    # footprint spans more than the point's zone, the instant's local civil day is
+    # not uniquely determined -- a different zone within the footprint could place
+    # it on another day near local midnight. Require a known footprint that
+    # resolves wholly to the one zone; otherwise fail closed. Finer
+    # same-civil-day-across-zones handling is tracked in #133.
+    footprint_precision = coordinates_value.get("precision")
+    if not isinstance(footprint_precision, int | float) or footprint_precision <= 0:
+        raise ValueError(
+            "Wikidata coordinates carry no positive precision, so the instant's "
+            "place is not bounded well enough to name one timezone; the sub-day "
+            "instant is not accepted."
+        )
+    if timezones_intersecting_footprint(
+        session,
+        latitude=float(latitude),
+        longitude=float(longitude),
+        radius_degrees=float(footprint_precision),
+    ) != {zone.tzid}:
+        raise ValueError(
+            "The Wikidata coordinate precision footprint spans more than one "
+            "timezone, so the sub-day instant's local civil day is not uniquely "
+            "determined; it is not accepted."
         )
     instant = datetime.fromisoformat(time_text.lstrip("+").replace("Z", "+00:00"))
     resolved = resolve_day(instant=instant, timezone_name=zone.tzid)

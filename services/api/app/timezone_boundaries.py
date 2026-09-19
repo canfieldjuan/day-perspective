@@ -202,6 +202,39 @@ def timezone_for_coordinates(
     return TimezoneResolution(tzid=str(row[0]), dataset_version=str(row[1]))
 
 
+def timezones_intersecting_footprint(
+    session: Session, *, latitude: float, longitude: float, radius_degrees: float
+) -> set[str]:
+    """The distinct tzids whose boundary intersects the coordinate's footprint.
+
+    A P625 point carries a ``precision`` in degrees; the footprint modeled here is
+    the lat/lon box of +/- ``radius_degrees`` around the point (a conservative
+    over-approximation of the circular footprint). An instant's local civil day is
+    only well-defined when its place lies within a single timezone, so a caller
+    compares this set to the point's own zone and refuses when it spans more --
+    otherwise a coarse coordinate near a boundary could silently pick one of two
+    civil days near local midnight (D013 / the contract's honest-data rule).
+
+    ``ST_Intersects`` over the same table and dataset ``timezone_for_coordinates``
+    reads, so the footprint is checked against the boundary release the day is
+    derived under.
+    """
+    rows = session.execute(
+        text(
+            "SELECT DISTINCT tzid FROM timezone_boundaries "
+            "WHERE ST_Intersects(boundary_geometry, "
+            "ST_MakeEnvelope(:min_lon, :min_lat, :max_lon, :max_lat, 4326))"
+        ),
+        {
+            "min_lon": longitude - radius_degrees,
+            "min_lat": latitude - radius_degrees,
+            "max_lon": longitude + radius_degrees,
+            "max_lat": latitude + radius_degrees,
+        },
+    ).all()
+    return {str(row[0]) for row in rows}
+
+
 def resolve_timezone_from_coordinates(
     session: Session,
 ) -> Callable[[float, float], TimezoneResolution | None]:

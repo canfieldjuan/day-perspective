@@ -75,21 +75,23 @@ def _p585(
 
 
 def _p625(
-    latitude: float, longitude: float, globe: str = "http://www.wikidata.org/entity/Q2"
+    latitude: float,
+    longitude: float,
+    globe: str = "http://www.wikidata.org/entity/Q2",
+    precision: float | None = 0.0001,
 ) -> dict[str, Any]:
+    value: dict[str, Any] = {
+        "latitude": latitude,
+        "longitude": longitude,
+        "globe": globe,
+    }
+    if precision is not None:
+        value["precision"] = precision
     return {
         "mainsnak": {
             "snaktype": "value",
             "property": "P625",
-            "datavalue": {
-                "value": {
-                    "latitude": latitude,
-                    "longitude": longitude,
-                    "precision": 0.0001,
-                    "globe": globe,
-                },
-                "type": "globecoordinate",
-            },
+            "datavalue": {"value": value, "type": "globecoordinate"},
             "datatype": "globe-coordinate",
         },
         "type": "statement",
@@ -124,6 +126,7 @@ def _entity_document(
     latitude: float = BERLIN_LAT,
     longitude: float = BERLIN_LON,
     globe: str = "http://www.wikidata.org/entity/Q2",
+    coordinate_precision: float | None = 0.0001,
     with_coordinates: bool = True,
 ) -> bytes:
     """A structurally faithful, synthetic Wikidata entity document (§12: test-only)."""
@@ -132,7 +135,7 @@ def _entity_document(
         "P585": [_p585(timestamp, precision, before=before, after=after)],
     }
     if with_coordinates:
-        claims["P625"] = [_p625(latitude, longitude, globe)]
+        claims["P625"] = [_p625(latitude, longitude, globe, coordinate_precision)]
     entity = {
         "type": "item",
         "id": entity_id,
@@ -342,6 +345,70 @@ def test_second_precision_with_nonzero_uncertainty_is_refused(
     )
     with pytest.raises(ValueError, match="uncertainty"):
         _ingest(session, payload, 700009, tmp_path)
+
+
+@pytest.mark.integration
+def test_second_precision_coordinate_footprint_spanning_two_timezones_is_refused(
+    session: Session, tmp_path: Path
+) -> None:
+    # A P625 precision footprint that straddles a timezone boundary does not name
+    # one civil day: near local midnight the two zones can differ. Only a footprint
+    # that resolves wholly to one timezone is accepted; otherwise fail closed.
+    two_zones = {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "properties": {"tzid": "Europe/Berlin"},
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [[[10, 50], [11, 50], [11, 51], [10, 51], [10, 50]]],
+                },
+            },
+            {
+                "type": "Feature",
+                "properties": {"tzid": "Europe/Amsterdam"},
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [[[9, 50], [10, 50], [10, 51], [9, 51], [9, 50]]],
+                },
+            },
+        ],
+    }
+    load_timezone_boundaries(
+        session, geojson_text=json.dumps(two_zones), dataset_version="two-zone-test"
+    )
+    # The central point (10.3, 50.5) is clearly inside Berlin, but a +/-0.5deg
+    # footprint reaches west of lon 10 into Amsterdam, so it spans both zones.
+    payload = _entity_document(
+        entity_id="Q108subday",
+        revision_id=700010,
+        timestamp="1969-07-20T23:30:00Z",
+        precision=14,
+        latitude=50.5,
+        longitude=10.3,
+        coordinate_precision=0.5,
+    )
+    with pytest.raises(ValueError, match="footprint spans more than one"):
+        _ingest(session, payload, 700010, tmp_path)
+
+
+@pytest.mark.integration
+def test_second_precision_coordinate_without_precision_is_refused(
+    session: Session, tmp_path: Path
+) -> None:
+    # Without a coordinate precision the footprint is unknown, so it cannot be shown
+    # to resolve to one timezone; fail closed rather than assume an exact point.
+    seed_test_timezones(session)
+    payload = _entity_document(
+        entity_id="Q108subday",
+        revision_id=700011,
+        timestamp="1969-07-20T23:30:00Z",
+        precision=14,
+        coordinate_precision=None,
+    )
+    with pytest.raises(ValueError, match="no positive precision"):
+        _ingest(session, payload, 700011, tmp_path)
 
 
 @pytest.mark.integration
