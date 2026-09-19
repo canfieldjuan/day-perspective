@@ -322,3 +322,27 @@ armed-conflict count as period context, sourced from the live v26.1 release
 - Republication and recovery commands, counts and elapsed times are in
   `docs/HANDOFF.md`.
 
+
+## Wikidata temporal semantics: B1/B2/B3 arc complete (2026-09-19, epic #109 / #133)
+
+The temporal-semantics re-slice of the stale PR #107 landed as three sequenced
+PRs on current `main`; #107 is closed as superseded.
+
+- **B1 (#134)** -- Wikidata statement selection honours rank/snaktype; the
+  fatality quality-check reads reference counts.
+- **B2 (#135)** -- live Wikidata ingest: a fetcher port + `--entity`/`--revision`
+  CLI, derived `_license` attribution, and the candidate occurrence day from the
+  shared resolver rather than a hardcoded date.
+- **B3 (#136)** -- a second-precision P585 (precision 14) is placed on its local
+  civil day by deriving it from the instant and the timezone whose boundary
+  wholly covers the P625 precision footprint (A3), recording D013 provenance on
+  the `EventTime` and the occurrence claim. Day precision (11) stays a reported
+  stated day, unchanged. Ingest is the single consumer of the timezone-boundary
+  table and tzdata; resolution reconstructs the occurrence from the persisted
+  `derived_local_date` block rather than re-running that lookup, so a boundary
+  reseed or a tzdata correction between ingest and resolution cannot move the
+  derived day, and publication then reads the resolved `EventTime`.
+
+Deferred (tracked in #133): hour/minute precision (needs a `TemporalPrecision`
+modelling decision) and antimeridian footprint wrapping (a fail-closed
+over-refusal). The multi-entity release-selection gap remains open in #108.

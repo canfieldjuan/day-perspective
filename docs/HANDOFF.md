@@ -716,3 +716,28 @@ and, on a single-date page, more precise. The check now accepts both forms
 and still rejects a statement carrying no caveat at all. The archive was
 right; the check was wrong.
 
+
+## Wikidata second-precision (B3 #136) -- operational notes (2026-09-19)
+
+Second-precision P585 ingest derives the local civil day from the instant plus
+the A3 timezone-boundary table, so it is DB-bound: the sub-day derivation and its
+fail-closed refusals (no coordinates; a footprint no single timezone wholly
+covers; nonzero before/after uncertainty; non-Gregorian sub-day calendar;
+hour/minute precision) are exercised by the integration tests in
+`services/api/tests/test_wikidata_subday_precision.py` under CI's `verify`, which
+seeds the mini timezone fixture. The reported (day-precision) path and the golden
+pipeline (USGS 1964-03-27, Wikidata fixture precision 11) are unchanged.
+
+Ingest is the single consumer of the timezone-boundary table and tzdata;
+resolution reconstructs the occurrence from the persisted `derived_local_date`
+block rather than re-running that lookup, so a boundary reseed or a tzdata
+correction between ingest and resolution cannot move the derived day. Publication
+reads the resolved `EventTime` (it consults the persisted block only in the
+pre-resolution collision fallback, and refuses to publish an unresolved
+candidate). The covering zone and its dataset release are resolved in one atomic
+query, so the recorded dataset version is exactly the one that passed the
+footprint coverage check.
+
+Known limitation (deferred, #133): a coordinate whose precision footprint crosses
+the antimeridian (+/-180 degrees) is over-refused (fail-closed) because
+`ST_MakeEnvelope` does not wrap.
