@@ -204,32 +204,41 @@ def timezone_for_coordinates(
 
 def timezone_covering_footprint(
     session: Session, *, latitude: float, longitude: float, radius_degrees: float
-) -> str | None:
-    """The single tzid whose boundary wholly covers the coordinate's footprint.
+) -> TimezoneResolution | None:
+    """The single zone, with its dataset release, that wholly covers the footprint.
 
     A P625 point carries a ``precision`` in degrees; the footprint modeled here is
     the lat/lon box of +/- ``radius_degrees`` around the point (a conservative
     over-approximation of the circular footprint). An instant's local civil day is
     only well-defined when the whole footprint lies inside one timezone, so this
-    returns a tzid only when a single zone's boundary ``ST_Covers`` the entire box
-    -- and ``None`` when the box spans a zone boundary OR reaches an area with no
-    established timezone (open ocean, an unmapped gap). The caller refuses on
+    returns a resolution only when a single zone's boundary ``ST_Covers`` the
+    entire box -- and ``None`` when the box spans a zone boundary, reaches an area
+    with no established timezone (open ocean, an unmapped gap), or covers nothing
+    at all (an uncovered point is a box no zone covers). The caller refuses on
     ``None``, so a coarse coordinate near a boundary or coastline cannot silently
     pick one of two civil days near local midnight (D013 / the contract's
     honest-data rule).
 
-    Timezones do not overlap, so at most one zone can cover the box: the per-tzid
-    ``ST_Covers(ST_Union(...), box)`` yields that one zone or no row. Checked over
-    the same table and dataset ``timezone_for_coordinates`` reads.
+    The ``tzid`` and its ``dataset_version`` come from the SAME statement that
+    checks coverage, so the boundary release recorded as provenance is exactly the
+    one that passed the check -- there is no window (as a separate point lookup
+    would leave) for a reseed to make them disagree. Timezones do not overlap, so
+    at most one zone covers the box; ``ORDER BY tzid`` makes the rare overlap
+    deterministic.
+
+    Limitation: ``ST_MakeEnvelope`` does not wrap the antimeridian, so a footprint
+    crossing +/-180 degrees is refused even if one zone spans it -- a fail-closed
+    geographic edge tracked in #133.
     """
     row = session.execute(
         text(
-            "SELECT tzid FROM timezone_boundaries "
+            "SELECT tzid, dataset_version FROM timezone_boundaries "
             "WHERE ST_Intersects(boundary_geometry, "
             "ST_MakeEnvelope(:min_lon, :min_lat, :max_lon, :max_lat, 4326)) "
-            "GROUP BY tzid "
+            "GROUP BY tzid, dataset_version "
             "HAVING ST_Covers(ST_Union(boundary_geometry), "
             "ST_MakeEnvelope(:min_lon, :min_lat, :max_lon, :max_lat, 4326)) "
+            "ORDER BY tzid "
             "LIMIT 1"
         ),
         {
@@ -239,7 +248,9 @@ def timezone_covering_footprint(
             "max_lat": latitude + radius_degrees,
         },
     ).first()
-    return str(row[0]) if row is not None else None
+    if row is None:
+        return None
+    return TimezoneResolution(tzid=str(row[0]), dataset_version=str(row[1]))
 
 
 def resolve_timezone_from_coordinates(

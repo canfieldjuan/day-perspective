@@ -79,10 +79,7 @@ from app.temporal import (
     Meridian,
     resolve_day,
 )
-from app.timezone_boundaries import (
-    timezone_covering_footprint,
-    timezone_for_coordinates,
-)
+from app.timezone_boundaries import timezone_covering_footprint
 
 __all__ = [
     "HttpWikidataEntityFetcher",
@@ -1054,8 +1051,9 @@ def _resolve_occurrence(
     Day precision (11) is a stated local civil day, taken as reported (the
     coordinates are not consulted and the derived fields stay None, exactly as the
     reported path always has). Second precision (14) is an instant: the local
-    civil day is derived from it via the coordinates' timezone (A3,
-    ``timezone_for_coordinates``) and the shared resolver, and the D013 fields
+    civil day is derived from it via the single timezone whose boundary wholly
+    covers the coordinates' precision footprint (A3,
+    ``timezone_covering_footprint``) and the shared resolver, and the D013 fields
     record how.
 
     Refused per the contract rather than approximated: a precision coarser than a
@@ -1064,10 +1062,10 @@ def _resolve_occurrence(
     overstating -- tracked in #133; a non-Gregorian sub-day calendar (#114); a
     second-precise value whose before/after uncertainty bounds are nonzero (an
     interval, not one exact instant); a second-precise instant with no
-    coordinates, or coordinates no boundary covers (the place of occurrence is
-    unknown, so no date-specific event follows); and coordinates with no positive
-    precision or whose precision footprint spans more than one timezone (the local
-    civil day is not uniquely determined).
+    coordinates; and coordinates with no positive precision, or whose precision
+    footprint no single timezone wholly covers -- it spans a zone boundary or
+    reaches an area with no established timezone (the local civil day is not
+    uniquely determined).
     """
     precision = occurrence_value.get("precision")
     if precision == 11:
@@ -1125,21 +1123,11 @@ def _resolve_occurrence(
     longitude = coordinates_value.get("longitude")
     if not (isinstance(latitude, int | float) and isinstance(longitude, int | float)):
         raise ValueError("Wikidata coordinates are malformed.")
-    zone = timezone_for_coordinates(
-        session, latitude=float(latitude), longitude=float(longitude)
-    )
-    if zone is None:
-        raise ValueError(
-            "No timezone boundary covers the Wikidata coordinates, so the sub-day "
-            "instant yields no local civil day."
-        )
-    # The coordinates carry their own precision footprint (in degrees). Unless
-    # that whole footprint lies inside the point's one zone, the instant's local
-    # civil day is not uniquely determined -- a different zone, or an uncovered
-    # gap/ocean, within the footprint could place it on another day near local
-    # midnight. Require a known footprint that a single zone wholly covers;
-    # otherwise fail closed. Finer same-civil-day-across-zones handling is
-    # tracked in #133.
+    # The coordinates carry their own precision footprint (in degrees). The
+    # instant's local civil day is only well-defined when a single timezone wholly
+    # covers that footprint: otherwise a different zone, or an uncovered gap/ocean,
+    # within the footprint could place it on another day near local midnight. A
+    # missing/non-positive precision leaves the footprint unbounded, so refuse.
     footprint_precision = coordinates_value.get("precision")
     if not isinstance(footprint_precision, int | float) or footprint_precision <= 0:
         raise ValueError(
@@ -1147,20 +1135,26 @@ def _resolve_occurrence(
             "place is not bounded well enough to name one timezone; the sub-day "
             "instant is not accepted."
         )
-    if (
-        timezone_covering_footprint(
-            session,
-            latitude=float(latitude),
-            longitude=float(longitude),
-            radius_degrees=float(footprint_precision),
-        )
-        != zone.tzid
-    ):
+    # One atomic query resolves the covering zone AND its boundary-dataset release
+    # together. Combining the zone lookup with the coverage check in a single
+    # statement means the release recorded as provenance is exactly the one that
+    # passed coverage -- a separate point lookup would leave a window in which a
+    # reseed committing between the two queries could make the recorded dataset
+    # and the checked footprint disagree. Finer same-civil-day-across-zones and
+    # antimeridian-wrapping handling are tracked in #133.
+    zone = timezone_covering_footprint(
+        session,
+        latitude=float(latitude),
+        longitude=float(longitude),
+        radius_degrees=float(footprint_precision),
+    )
+    if zone is None:
         raise ValueError(
-            "The Wikidata coordinate precision footprint is not wholly within a "
-            "single timezone (it spans a zone boundary or reaches an area with no "
-            "established timezone), so the sub-day instant's local civil day is "
-            "not uniquely determined; it is not accepted."
+            "No single timezone boundary wholly covers the Wikidata coordinate "
+            "precision footprint (the coordinates are uncovered, or the footprint "
+            "spans a zone boundary or reaches an area with no established "
+            "timezone), so the sub-day instant's local civil day is not uniquely "
+            "determined; it is not accepted."
         )
     instant = datetime.fromisoformat(time_text.lstrip("+").replace("Z", "+00:00"))
     resolved = resolve_day(instant=instant, timezone_name=zone.tzid)

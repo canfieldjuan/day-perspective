@@ -302,7 +302,7 @@ def test_second_precision_coordinates_no_boundary_covers_is_refused(
         latitude=0.0,
         longitude=0.0,
     )
-    with pytest.raises(ValueError, match="[Nn]o timezone boundary covers"):
+    with pytest.raises(ValueError, match="wholly covers"):
         _ingest(session, payload, 700004, tmp_path)
 
 
@@ -389,7 +389,7 @@ def test_second_precision_coordinate_footprint_spanning_two_timezones_is_refused
         longitude=10.3,
         coordinate_precision=0.5,
     )
-    with pytest.raises(ValueError, match="not wholly within a single timezone"):
+    with pytest.raises(ValueError, match="wholly covers"):
         _ingest(session, payload, 700010, tmp_path)
 
 
@@ -429,7 +429,7 @@ def test_second_precision_coordinate_footprint_reaching_uncovered_area_is_refuse
         longitude=10.9,
         coordinate_precision=0.5,
     )
-    with pytest.raises(ValueError, match="not wholly within a single timezone"):
+    with pytest.raises(ValueError, match="wholly covers"):
         _ingest(session, payload, 700013, tmp_path)
 
 
