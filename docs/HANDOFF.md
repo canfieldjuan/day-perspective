@@ -729,11 +729,14 @@ seeds the mini timezone fixture. The reported (day-precision) path and the golde
 pipeline (USGS 1964-03-27, Wikidata fixture precision 11) are unchanged.
 
 Ingest is the single consumer of the timezone-boundary table and tzdata; resolve
-and publish rebuild the occurrence purely from the persisted `derived_local_date`
-block, so a boundary reseed or a tzdata correction between ingest and human
-resolution cannot move a derived day. The covering zone and its dataset release
-are resolved in one atomic query, so the recorded dataset version is exactly the
-one that passed the footprint coverage check.
+and publish rebuild the occurrence from the persisted `derived_local_date` block
+rather than re-running the boundary lookup or tzdata, so a boundary reseed or a
+tzdata correction between ingest and human resolution cannot move a derived day.
+That guards against reseed/tzdata drift only, not against edits: the working claim
+stays mutable (`DECISIONS.md`), and the immutable record is the
+publication-evidence snapshot minted at publish. The covering zone and its dataset
+release are resolved in one atomic query, so the recorded dataset version is
+exactly the one that passed the footprint coverage check.
 
 Known limitation (deferred, #133): a coordinate whose precision footprint crosses
 the antimeridian (+/-180 degrees) is over-refused (fail-closed) because

@@ -336,11 +336,14 @@ PRs on current `main`; #107 is closed as superseded.
 - **B3 (#136)** -- a second-precision P585 (precision 14) is placed on its local
   civil day by deriving it from the instant and the timezone whose boundary
   wholly covers the P625 precision footprint (A3), recording D013 provenance on
-  the `EventTime` and the immutable occurrence claim. Day precision (11) stays a
-  reported stated day, unchanged. Ingest is the single boundary-table consumer;
-  resolve/publish reconstruct purely from the persisted `derived_local_date`
-  block, so neither a boundary reseed nor a tzdata correction can make the
-  `EventTime` or rendered statement drift from the reviewed claim snapshot.
+  the `EventTime` and the occurrence claim. Day precision (11) stays a reported
+  stated day, unchanged. Ingest is the single boundary-table consumer;
+  resolve/publish reconstruct the occurrence from the persisted
+  `derived_local_date` block rather than re-running the boundary lookup or tzdata,
+  so a boundary reseed or a tzdata correction between ingest and resolution cannot
+  move a derived day. (That guards against reseed/tzdata drift only; the working
+  claim stays editable per `DECISIONS.md`, and the immutable record is the
+  publication-evidence snapshot minted at publish, not the claim itself.)
 
 Deferred (tracked in #133): hour/minute precision (needs a `TemporalPrecision`
 modelling decision) and antimeridian footprint wrapping (a fail-closed
