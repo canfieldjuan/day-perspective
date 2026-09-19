@@ -479,3 +479,47 @@ def test_resolution_reuses_the_ingest_derivation_after_a_boundary_reseed(
     derived = (occurrence_claim.assertion_json or {})["derived_local_date"]
     assert derived["timezone"] == "Europe/Berlin"
     assert derived["timezone_dataset_version"] == "mini-test"
+
+
+@pytest.mark.integration
+def test_publish_refuses_a_derived_candidate_before_its_coordinates_are_accepted(
+    session: Session, tmp_path: Path
+) -> None:
+    """The publish pre-resolution fallback must not derive a day from unaccepted
+    place evidence -- doing so would open a merge-review task asserting an
+    occurrence on a day derived from unreviewed coordinates, unactionable because
+    the event cannot resolve. Publish refuses instead.
+    """
+    from app.services import LocalFilesystemPublishedProfileStore
+    from app.wikidata import publish_wikidata_event
+
+    seed_test_timezones(session)
+    payload = _entity_document(
+        entity_id="Q108subday",
+        revision_id=700008,
+        timestamp="1969-07-20T23:30:00Z",
+        precision=14,
+    )
+    _ingest(session, payload, 700008, tmp_path)
+    # Accept the core claims but NOT the coordinates (place evidence unreviewed).
+    for claim_type in (
+        "candidate_event_identity",
+        "candidate_event_type",
+        "candidate_name",
+        "candidate_occurrence_date",
+    ):
+        record_claim_review(
+            session,
+            claim=session.scalars(
+                select(Claim).where(Claim.claim_type == claim_type)
+            ).one(),
+            decision=ReviewDecisionValue.ACCEPTED,
+            rationale="Core reviewed; coordinates deliberately left pending.",
+            reviewed_by="test-human",
+        )
+
+    with pytest.raises(ValueError, match="coordinate candidate must be human-accepted"):
+        publish_wikidata_event(
+            session,
+            store=LocalFilesystemPublishedProfileStore(tmp_path / "published"),
+        )

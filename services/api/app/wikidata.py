@@ -2221,9 +2221,26 @@ def publish_wikidata_event(
         # Pre-resolution: reuse the day ingest recorded on the candidate (the
         # same recorded derivation resolution will use), not a fresh boundary
         # lookup, so the collision guard matches the eventual publish date.
-        occurrence_date = _persisted_occurrence(
-            claims["candidate_occurrence_date"]
-        ).profile_date
+        occurrence_claim = claims["candidate_occurrence_date"]
+        coordinates_claim = claims.get("candidate_coordinates")
+        derived = isinstance(
+            (occurrence_claim.assertion_json or {}).get("derived_local_date"), dict
+        )
+        if derived and (
+            coordinates_claim is None
+            or coordinates_claim.assertion_status is not ClaimAssertionStatus.ACCEPTED
+        ):
+            # A derived (second-precision) day rests on its coordinates. Until
+            # those are accepted the event cannot resolve, so running the
+            # collision check here would open a merge-review task asserting an
+            # occurrence on a day derived from unreviewed place evidence, and
+            # leave it unactionable. Refuse rather than assert it.
+            raise ValueError(
+                "A second-precision Wikidata event's day is derived from its "
+                "coordinates, so the coordinate candidate must be human-accepted "
+                "and the event resolved before publication."
+            )
+        occurrence_date = _persisted_occurrence(occurrence_claim).profile_date
 
     # Dedup before minting a competing recorded event: a date that already
     # publishes a different recorded event defers to human merge review.
