@@ -1924,7 +1924,7 @@ def _recorded_statement_text(
             return (
                 "Wikidata records the occurrence at "
                 f"{occurrence_instant:%B} {occurrence_instant.day}, "
-                f"{occurrence_instant.year} {occurrence_instant:%H:%M} UTC; under "
+                f"{occurrence_instant.year} {occurrence_instant:%H:%M:%S} UTC; under "
                 f"{occurrence_timezone} civil time that is "
                 f"{occurrence_date:%B} {occurrence_date.day}, {occurrence_date.year}."
             )

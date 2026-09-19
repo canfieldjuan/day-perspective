@@ -344,14 +344,16 @@ def test_derived_occurrence_statement_does_not_attribute_the_local_day_to_wikida
     INSTANT to Wikidata and states the local-day conversion as the product's,
     never 'Wikidata records the occurrence on {derived day}'.
     """
+    # Nonzero seconds: the SECOND-precision instant must render its seconds, not
+    # be truncated to the minute (which would understate the classified precision).
     text = _recorded_statement_text(
         "candidate_occurrence_date",
         value={},
         occurrence_date=date(1969, 7, 21),
-        occurrence_instant=datetime(1969, 7, 20, 23, 30, tzinfo=UTC),
+        occurrence_instant=datetime(1969, 7, 20, 23, 30, 45, tzinfo=UTC),
         occurrence_timezone="Europe/Berlin",
     )
-    assert "July 20, 1969 23:30 UTC" in text  # the instant, attributed to Wikidata
+    assert "July 20, 1969 23:30:45 UTC" in text  # the instant, attributed to Wikidata
     assert "Europe/Berlin civil time that is July 21, 1969" in text
     assert "records the occurrence on July 21" not in text
 
