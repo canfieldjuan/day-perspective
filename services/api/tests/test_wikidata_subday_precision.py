@@ -37,6 +37,7 @@ from app.wikidata import (
 from tests.helpers import seed_test_timezones
 
 GREGORIAN = "http://www.wikidata.org/entity/Q1985727"
+JULIAN = "http://www.wikidata.org/entity/Q1985786"
 # Inside the mini fixture's Europe/Berlin box (lon 10-11, lat 50-51).
 BERLIN_LAT = 50.5
 BERLIN_LON = 10.5
@@ -50,7 +51,12 @@ CORE_CLAIMS = (
 
 
 def _p585(
-    iso_timestamp: str, precision: int, *, before: int = 0, after: int = 0
+    iso_timestamp: str,
+    precision: int,
+    *,
+    before: int = 0,
+    after: int = 0,
+    calendarmodel: str = GREGORIAN,
 ) -> dict[str, Any]:
     return {
         "mainsnak": {
@@ -63,7 +69,7 @@ def _p585(
                     "before": before,
                     "after": after,
                     "precision": precision,
-                    "calendarmodel": GREGORIAN,
+                    "calendarmodel": calendarmodel,
                 },
                 "type": "time",
             },
@@ -123,6 +129,7 @@ def _entity_document(
     precision: int,
     before: int = 0,
     after: int = 0,
+    calendarmodel: str = GREGORIAN,
     latitude: float = BERLIN_LAT,
     longitude: float = BERLIN_LON,
     globe: str = "http://www.wikidata.org/entity/Q2",
@@ -132,7 +139,9 @@ def _entity_document(
     """A structurally faithful, synthetic Wikidata entity document (§12: test-only)."""
     claims: dict[str, Any] = {
         "P31": [_p31()],
-        "P585": [_p585(timestamp, precision, before=before, after=after)],
+        "P585": [
+            _p585(timestamp, precision, before=before, after=after, calendarmodel=calendarmodel)
+        ],
     }
     if with_coordinates:
         claims["P625"] = [_p625(latitude, longitude, globe, coordinate_precision)]
@@ -454,6 +463,26 @@ def test_second_precision_coordinate_without_precision_is_refused(
     )
     with pytest.raises(ValueError, match="no positive precision"):
         _ingest(session, payload, 700011, tmp_path)
+
+
+@pytest.mark.integration
+def test_second_precision_non_gregorian_calendar_is_refused(
+    session: Session, tmp_path: Path
+) -> None:
+    # A sub-day instant stated in a non-Gregorian calendar (Julian) is refused
+    # rather than read on the product's Gregorian axis, which would name a
+    # different day (#114). Exercised on the second-precision integration path,
+    # not only the day-precision resolver.
+    seed_test_timezones(session)
+    payload = _entity_document(
+        entity_id="Q108subday",
+        revision_id=700016,
+        timestamp="1969-07-20T23:30:00Z",
+        precision=14,
+        calendarmodel=JULIAN,
+    )
+    with pytest.raises(ValueError, match="Gregorian axis is not implemented"):
+        _ingest(session, payload, 700016, tmp_path)
 
 
 @pytest.mark.integration
