@@ -307,21 +307,26 @@ def test_second_precision_coordinates_no_boundary_covers_is_refused(
 
 
 @pytest.mark.integration
+@pytest.mark.parametrize(
+    ("precision", "revision_id"),
+    [(12, 700005), (13, 700015)],  # hour, minute
+)
 def test_hour_and_minute_precision_are_refused(
-    session: Session, tmp_path: Path
+    session: Session, tmp_path: Path, precision: int, revision_id: int
 ) -> None:
     # The operator scoped B3 to second precision: TemporalPrecision has no HOUR
-    # or MINUTE, so 12/13 have no honest precision to record and stay refused,
-    # tracked in #133 rather than mapped to SECOND (which would overstate).
+    # or MINUTE, so hour (12) and minute (13) have no honest precision to record
+    # and both stay refused, tracked in #133 rather than mapped to SECOND (which
+    # would overstate).
     seed_test_timezones(session)
     payload = _entity_document(
         entity_id="Q108subday",
-        revision_id=700005,
+        revision_id=revision_id,
         timestamp="1969-07-20T23:00:00Z",
-        precision=13,
+        precision=precision,
     )
     with pytest.raises(ValueError, match="precision 11 or 14"):
-        _ingest(session, payload, 700005, tmp_path)
+        _ingest(session, payload, revision_id, tmp_path)
 
 
 @pytest.mark.integration
