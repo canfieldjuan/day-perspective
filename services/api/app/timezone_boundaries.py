@@ -202,6 +202,46 @@ def timezone_for_coordinates(
     return TimezoneResolution(tzid=str(row[0]), dataset_version=str(row[1]))
 
 
+def timezone_covering_footprint(
+    session: Session, *, latitude: float, longitude: float, radius_degrees: float
+) -> str | None:
+    """The single tzid whose boundary wholly covers the coordinate's footprint.
+
+    A P625 point carries a ``precision`` in degrees; the footprint modeled here is
+    the lat/lon box of +/- ``radius_degrees`` around the point (a conservative
+    over-approximation of the circular footprint). An instant's local civil day is
+    only well-defined when the whole footprint lies inside one timezone, so this
+    returns a tzid only when a single zone's boundary ``ST_Covers`` the entire box
+    -- and ``None`` when the box spans a zone boundary OR reaches an area with no
+    established timezone (open ocean, an unmapped gap). The caller refuses on
+    ``None``, so a coarse coordinate near a boundary or coastline cannot silently
+    pick one of two civil days near local midnight (D013 / the contract's
+    honest-data rule).
+
+    Timezones do not overlap, so at most one zone can cover the box: the per-tzid
+    ``ST_Covers(ST_Union(...), box)`` yields that one zone or no row. Checked over
+    the same table and dataset ``timezone_for_coordinates`` reads.
+    """
+    row = session.execute(
+        text(
+            "SELECT tzid FROM timezone_boundaries "
+            "WHERE ST_Intersects(boundary_geometry, "
+            "ST_MakeEnvelope(:min_lon, :min_lat, :max_lon, :max_lat, 4326)) "
+            "GROUP BY tzid "
+            "HAVING ST_Covers(ST_Union(boundary_geometry), "
+            "ST_MakeEnvelope(:min_lon, :min_lat, :max_lon, :max_lat, 4326)) "
+            "LIMIT 1"
+        ),
+        {
+            "min_lon": longitude - radius_degrees,
+            "min_lat": latitude - radius_degrees,
+            "max_lon": longitude + radius_degrees,
+            "max_lat": latitude + radius_degrees,
+        },
+    ).first()
+    return str(row[0]) if row is not None else None
+
+
 def resolve_timezone_from_coordinates(
     session: Session,
 ) -> Callable[[float, float], TimezoneResolution | None]:
