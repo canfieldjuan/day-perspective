@@ -16,7 +16,7 @@ instant at 23:30Z there falls on the next local day).
 from __future__ import annotations
 
 import json
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, cast
 
@@ -379,7 +379,7 @@ def test_second_precision_coordinate_footprint_spanning_two_timezones_is_refused
         session, geojson_text=json.dumps(two_zones), dataset_version="two-zone-test"
     )
     # The central point (10.3, 50.5) is clearly inside Berlin, but a +/-0.5deg
-    # footprint reaches west of lon 10 into Amsterdam, so it spans both zones.
+    # footprint reaches west of lon 10 into Amsterdam, so no single zone covers it.
     payload = _entity_document(
         entity_id="Q108subday",
         revision_id=700010,
@@ -389,8 +389,48 @@ def test_second_precision_coordinate_footprint_spanning_two_timezones_is_refused
         longitude=10.3,
         coordinate_precision=0.5,
     )
-    with pytest.raises(ValueError, match="footprint spans more than one"):
+    with pytest.raises(ValueError, match="not wholly within a single timezone"):
         _ingest(session, payload, 700010, tmp_path)
+
+
+@pytest.mark.integration
+def test_second_precision_coordinate_footprint_reaching_uncovered_area_is_refused(
+    session: Session, tmp_path: Path
+) -> None:
+    # Even with a single zone, a footprint that pokes out of it into an uncovered
+    # gap/ocean is not wholly within one timezone: the permitted location is not
+    # fully bounded to a known zone, so fail closed rather than assume the point's
+    # zone covers the whole footprint. (A single intersecting tzid is not enough;
+    # it must COVER the box.)
+    one_zone = {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "properties": {"tzid": "Europe/Berlin"},
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [[[10, 50], [11, 50], [11, 51], [10, 51], [10, 50]]],
+                },
+            }
+        ],
+    }
+    load_timezone_boundaries(
+        session, geojson_text=json.dumps(one_zone), dataset_version="one-zone-test"
+    )
+    # (50.5, 10.9) is inside Berlin, but +/-0.5deg reaches east past lon 11 into
+    # uncovered area, so no single zone covers the whole footprint.
+    payload = _entity_document(
+        entity_id="Q108subday",
+        revision_id=700013,
+        timestamp="1969-07-20T23:30:00Z",
+        precision=14,
+        latitude=50.5,
+        longitude=10.9,
+        coordinate_precision=0.5,
+    )
+    with pytest.raises(ValueError, match="not wholly within a single timezone"):
+        _ingest(session, payload, 700013, tmp_path)
 
 
 @pytest.mark.integration
@@ -450,6 +490,24 @@ def test_derived_occurrence_statement_does_not_attribute_the_local_day_to_wikida
     assert "July 20, 1969 23:30:45 UTC" in text  # the instant, attributed to Wikidata
     assert "Europe/Berlin civil time that is July 21, 1969" in text
     assert "records the occurrence on July 21" not in text
+
+
+def test_derived_occurrence_statement_normalizes_a_non_utc_instant_to_utc() -> None:
+    """DB-free. `exact_timestamp` round-trips through a TIMESTAMPTZ column and can
+    come back represented in a non-UTC Postgres session zone; the render must state
+    the true UTC wall-clock, not the session-zone one labeled 'UTC'.
+    """
+    plus_one = timezone(timedelta(hours=1))
+    # 1969-07-21 00:30 +01:00 is the same instant as 1969-07-20 23:30 UTC.
+    text = _recorded_statement_text(
+        "candidate_occurrence_date",
+        value={},
+        occurrence_date=date(1969, 7, 21),
+        occurrence_instant=datetime(1969, 7, 21, 0, 30, tzinfo=plus_one),
+        occurrence_timezone="Europe/Berlin",
+    )
+    assert "July 20, 1969 23:30:00 UTC" in text  # normalized, not "July 21 ... 00:30"
+    assert "Europe/Berlin civil time that is July 21, 1969" in text
 
 
 def test_reported_occurrence_statement_reads_as_wikidatas_stated_day() -> None:
@@ -573,6 +631,66 @@ def test_resolution_reuses_the_ingest_derivation_after_a_boundary_reseed(
     derived = (occurrence_claim.assertion_json or {})["derived_local_date"]
     assert derived["timezone"] == "Europe/Berlin"
     assert derived["timezone_dataset_version"] == "mini-test"
+
+
+@pytest.mark.integration
+def test_reingesting_an_existing_payload_is_idempotent_after_a_boundary_reseed(
+    session: Session, tmp_path: Path
+) -> None:
+    # Regression: the occurrence derivation consults the boundary table, so a retry
+    # of an already-ingested payload must return the existing release (idempotent)
+    # rather than re-derive against a reseeded table and raise. The checksum
+    # idempotence short-circuit runs BEFORE the derivation.
+    seed_test_timezones(session)
+    payload = _entity_document(
+        entity_id="Q108subday",
+        revision_id=700012,
+        timestamp="1969-07-20T23:30:00Z",
+        precision=14,
+    )
+    first = ingest_wikidata_entity(
+        session,
+        entity_id="Q108subday",
+        revision_id=700012,
+        fetcher=_Fetcher(payload, 700012),
+        raw_store=LocalFilesystemRawSourceStore(tmp_path / "raw"),
+    )
+    assert first.idempotent is False
+    assert first.source_release_id is not None
+
+    # Reseed so the coordinates (Berlin) are no longer covered by any boundary --
+    # a fresh derivation would now raise "No timezone boundary covers...".
+    only_anchorage = {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "properties": {"tzid": "America/Anchorage"},
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [
+                        [[-152, 58], [-144, 58], [-144, 63], [-152, 63], [-152, 58]]
+                    ],
+                },
+            }
+        ],
+    }
+    load_timezone_boundaries(
+        session,
+        geojson_text=json.dumps(only_anchorage),
+        dataset_version="reseed-nocover",
+    )
+
+    # The same bytes (same checksum) must short-circuit to the existing release.
+    second = ingest_wikidata_entity(
+        session,
+        entity_id="Q108subday",
+        revision_id=700012,
+        fetcher=_Fetcher(payload, 700012),
+        raw_store=LocalFilesystemRawSourceStore(tmp_path / "raw2"),
+    )
+    assert second.idempotent is True
+    assert second.source_release_id == first.source_release_id
 
 
 @pytest.mark.integration

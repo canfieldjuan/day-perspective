@@ -80,8 +80,8 @@ from app.temporal import (
     resolve_day,
 )
 from app.timezone_boundaries import (
+    timezone_covering_footprint,
     timezone_for_coordinates,
-    timezones_intersecting_footprint,
 )
 
 __all__ = [
@@ -540,17 +540,21 @@ def _ingest_entity_payload(
             # non-Gregorian calendar, or a sub-day instant whose place no boundary
             # covers is refused here rather than approximated.
             coordinates_statement = _optional(entity, "P625")
-            occurrence_resolution = _resolve_occurrence(
-                session,
-                occurrence_value=_value(_first(entity, "P585")),
-                coordinates_value=(
-                    _value(coordinates_statement)
-                    if coordinates_statement is not None
-                    else None
-                ),
+            coordinates_value = (
+                _value(coordinates_statement)
+                if coordinates_statement is not None
+                else None
             )
-            occurrence = occurrence_resolution.profile_date
             if dry_run:
+                # Validate only: derive to surface a bad P585/coordinates, then
+                # return without persisting candidates or touching the source
+                # reference. A dry run validates the current payload against
+                # current state; it does not short-circuit on an existing release.
+                _resolve_occurrence(
+                    session,
+                    occurrence_value=_value(_first(entity, "P585")),
+                    coordinates_value=coordinates_value,
+                )
                 session.add(
                     QualityCheck(
                         pipeline_run_id=run.id,
@@ -576,6 +580,12 @@ def _ingest_entity_payload(
                     False,
                     True,
                 )
+            # Resolve the source reference and short-circuit an already-ingested
+            # payload BEFORE deriving the occurrence: the derivation consults the
+            # timezone-boundary table (B3), so a retry after a boundary reseed must
+            # return the existing release rather than re-derive against changed
+            # external state and raise on a payload already stored under this
+            # checksum.
             source = session.scalar(
                 select(Source).where(Source.slug == WIKIDATA_SOURCE_SLUG)
             )
@@ -621,6 +631,12 @@ def _ingest_entity_payload(
                     True,
                     False,
                 )
+            occurrence_resolution = _resolve_occurrence(
+                session,
+                occurrence_value=_value(_first(entity, "P585")),
+                coordinates_value=coordinates_value,
+            )
+            occurrence = occurrence_resolution.profile_date
             storage_uri = raw_store.write(WIKIDATA_SOURCE_SLUG, checksum, payload)
             # The Special:EntityData URL of the exact revision -- the URL a live
             # fetch reads, and for the pinned fixture identical to what it
@@ -1117,12 +1133,13 @@ def _resolve_occurrence(
             "No timezone boundary covers the Wikidata coordinates, so the sub-day "
             "instant yields no local civil day."
         )
-    # The coordinates carry their own precision footprint (in degrees). If that
-    # footprint spans more than the point's zone, the instant's local civil day is
-    # not uniquely determined -- a different zone within the footprint could place
-    # it on another day near local midnight. Require a known footprint that
-    # resolves wholly to the one zone; otherwise fail closed. Finer
-    # same-civil-day-across-zones handling is tracked in #133.
+    # The coordinates carry their own precision footprint (in degrees). Unless
+    # that whole footprint lies inside the point's one zone, the instant's local
+    # civil day is not uniquely determined -- a different zone, or an uncovered
+    # gap/ocean, within the footprint could place it on another day near local
+    # midnight. Require a known footprint that a single zone wholly covers;
+    # otherwise fail closed. Finer same-civil-day-across-zones handling is
+    # tracked in #133.
     footprint_precision = coordinates_value.get("precision")
     if not isinstance(footprint_precision, int | float) or footprint_precision <= 0:
         raise ValueError(
@@ -1130,16 +1147,20 @@ def _resolve_occurrence(
             "place is not bounded well enough to name one timezone; the sub-day "
             "instant is not accepted."
         )
-    if timezones_intersecting_footprint(
-        session,
-        latitude=float(latitude),
-        longitude=float(longitude),
-        radius_degrees=float(footprint_precision),
-    ) != {zone.tzid}:
+    if (
+        timezone_covering_footprint(
+            session,
+            latitude=float(latitude),
+            longitude=float(longitude),
+            radius_degrees=float(footprint_precision),
+        )
+        != zone.tzid
+    ):
         raise ValueError(
-            "The Wikidata coordinate precision footprint spans more than one "
-            "timezone, so the sub-day instant's local civil day is not uniquely "
-            "determined; it is not accepted."
+            "The Wikidata coordinate precision footprint is not wholly within a "
+            "single timezone (it spans a zone boundary or reaches an area with no "
+            "established timezone), so the sub-day instant's local civil day is "
+            "not uniquely determined; it is not accepted."
         )
     instant = datetime.fromisoformat(time_text.lstrip("+").replace("Z", "+00:00"))
     resolved = resolve_day(instant=instant, timezone_name=zone.tzid)
@@ -1966,10 +1987,16 @@ def _recorded_statement_text(
                 "resolved occurrence date."
             )
         if occurrence_instant is not None and occurrence_timezone is not None:
+            # exact_timestamp round-trips through a TIMESTAMPTZ column, so it can
+            # come back represented in a non-UTC Postgres session zone. Normalize
+            # to UTC before formatting the wall-clock, so the stated time is the
+            # true UTC instant rather than a session-zone rendering labeled "UTC"
+            # (the USGS publication path normalizes the same way).
+            instant_utc = occurrence_instant.astimezone(UTC)
             return (
                 "Wikidata records the occurrence at "
-                f"{occurrence_instant:%B} {occurrence_instant.day}, "
-                f"{occurrence_instant.year} {occurrence_instant:%H:%M:%S} UTC; under "
+                f"{instant_utc:%B} {instant_utc.day}, "
+                f"{instant_utc.year} {instant_utc:%H:%M:%S} UTC; under "
                 f"{occurrence_timezone} civil time that is "
                 f"{occurrence_date:%B} {occurrence_date.day}, {occurrence_date.year}."
             )
