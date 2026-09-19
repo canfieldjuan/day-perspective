@@ -79,6 +79,7 @@ from app.temporal import (
     Meridian,
     resolve_day,
 )
+from app.timezone_boundaries import timezone_covering_footprint
 
 __all__ = [
     "HttpWikidataEntityFetcher",
@@ -530,11 +531,27 @@ def _ingest_entity_payload(
             # Derive the occurrence day from P585 through the shared resolver, so
             # a live entity's claims carry its own date rather than a constant
             # (the pinned fixture resolves to the same 1964-03-27 it was stamped
-            # with before). A date coarser than a day, or a calendar the resolver
-            # does not restate, is refused here rather than approximated; lifting
-            # the sub-day refusal is B3.
-            occurrence = _resolve_occurrence_date(_value(_first(entity, "P585")))
+            # with before). A day-precision P585 is taken as reported; a
+            # second-precision instant is placed on its local civil day via the
+            # coordinates' timezone (B3). Coarser or hour/minute precision, a
+            # non-Gregorian calendar, or a sub-day instant whose place no boundary
+            # covers is refused here rather than approximated.
+            coordinates_statement = _optional(entity, "P625")
+            coordinates_value = (
+                _value(coordinates_statement)
+                if coordinates_statement is not None
+                else None
+            )
             if dry_run:
+                # Validate only: derive to surface a bad P585/coordinates, then
+                # return without persisting candidates or touching the source
+                # reference. A dry run validates the current payload against
+                # current state; it does not short-circuit on an existing release.
+                _resolve_occurrence(
+                    session,
+                    occurrence_value=_value(_first(entity, "P585")),
+                    coordinates_value=coordinates_value,
+                )
                 session.add(
                     QualityCheck(
                         pipeline_run_id=run.id,
@@ -560,6 +577,12 @@ def _ingest_entity_payload(
                     False,
                     True,
                 )
+            # Resolve the source reference and short-circuit an already-ingested
+            # payload BEFORE deriving the occurrence: the derivation consults the
+            # timezone-boundary table (B3), so a retry after a boundary reseed must
+            # return the existing release rather than re-derive against changed
+            # external state and raise on a payload already stored under this
+            # checksum.
             source = session.scalar(
                 select(Source).where(Source.slug == WIKIDATA_SOURCE_SLUG)
             )
@@ -605,6 +628,12 @@ def _ingest_entity_payload(
                     True,
                     False,
                 )
+            occurrence_resolution = _resolve_occurrence(
+                session,
+                occurrence_value=_value(_first(entity, "P585")),
+                coordinates_value=coordinates_value,
+            )
+            occurrence = occurrence_resolution.profile_date
             storage_uri = raw_store.write(WIKIDATA_SOURCE_SLUG, checksum, payload)
             # The Special:EntityData URL of the exact revision -- the URL a live
             # fetch reads, and for the pinned fixture identical to what it
@@ -654,15 +683,41 @@ def _ingest_entity_payload(
                 )
             )
             new_claim_ids: list[UUID] = []
+            derived = (
+                occurrence_resolution.temporal_assignment
+                is not TemporalAssignment.REPORTED
+            )
             for candidate in candidates:
                 predicate = str(candidate["predicate"])
                 value = candidate["value"]
                 references = int(candidate["references"])
-                assertion_json = {
+                is_occurrence = predicate == "candidate_occurrence_date"
+                assertion_json: dict[str, Any] = {
                     "value": value,
                     "wikidata_reference_count": references,
                     "candidate_only": True,
                 }
+                if is_occurrence and derived:
+                    # A second-precision instant: record the derived local day
+                    # and the boundary release that placed it, so this immutable
+                    # claim snapshot is reproducible and consistent with the
+                    # SECOND/DIRECT_RECORD it is stamped with (not DAY/REPORTED).
+                    assertion_json["derived_local_date"] = {
+                        "date": occurrence.isoformat(),
+                        "timezone": occurrence_resolution.timezone_name,
+                        "utc_offset_minutes": occurrence_resolution.utc_offset_minutes,
+                        "timezone_dataset_version": (
+                            occurrence_resolution.timezone_dataset_version
+                        ),
+                        "instant": (
+                            occurrence_resolution.exact_timestamp.isoformat()
+                            if occurrence_resolution.exact_timestamp is not None
+                            else None
+                        ),
+                        # Recorded so resolve/publish reconstruct the same text
+                        # without re-running resolve_day (whose tzdata may change).
+                        "interpretation": occurrence_resolution.interpretation,
+                    }
                 claim = create_claim(
                     session,
                     source_release_id=release.id,
@@ -675,8 +730,15 @@ def _ingest_entity_payload(
                 )
                 claim.temporal_start = occurrence
                 claim.temporal_end = occurrence
-                claim.temporal_precision = TemporalPrecision.DAY
-                claim.temporal_assignment = TemporalAssignment.REPORTED
+                # The occurrence claim carries the resolution's own precision and
+                # assignment (SECOND/DIRECT_RECORD for a derived instant); the
+                # other predicates are not dates and stay DAY/REPORTED.
+                if is_occurrence:
+                    claim.temporal_precision = occurrence_resolution.temporal_precision
+                    claim.temporal_assignment = occurrence_resolution.temporal_assignment
+                else:
+                    claim.temporal_precision = TemporalPrecision.DAY
+                    claim.temporal_assignment = TemporalAssignment.REPORTED
                 claim.date_role = DateRole.OCCURRED
                 claim.data_status = DataStatus.REPORTED
                 claim.pipeline_run_id = run.id
@@ -833,15 +895,16 @@ REQUIRED_EVENT_CLAIMS = (
 
 
 def _wikidata_methodology(session: Session) -> Methodology:
-    # Version 2 records the day convention the resolver now enforces. It is a new
-    # version, not an edit to version 1: an existing database already holds
-    # version 1 and would return it unchanged (the lookup is by slug + version),
-    # so a convention added to version 1's definition would never be written.
-    # Bumping the version forces the new row, and events resolved under version 1
-    # keep pointing at it -- they were resolved before the calendar convention
-    # was enforced, and the version is how that difference stays auditable. The
-    # convention lives in `description`, which the provenance snapshot surfaces
-    # (`services._methodology_core_snapshot`); the raw definition is only hashed.
+    # Version 3 adds the second-precision (instant) resolution rule B3 introduces.
+    # It is a new version, not an edit to version 2: the lookup is by slug +
+    # version, so an existing database already holds version 2 and would return it
+    # unchanged; a rule added to version 2's definition would never be written,
+    # and every claim resolved under version 2 would carry an immutable
+    # methodology snapshot that omits the rule it was actually resolved under.
+    # Bumping the version forces the new row; events resolved under versions 1-2
+    # keep pointing at theirs. The convention lives in `description`, which the
+    # provenance snapshot surfaces (`services._methodology_core_snapshot`); the
+    # raw definition is only hashed.
     definition = {
         "authority": "Wikidata contributors (Wikimedia Foundation)",
         "resolution": (
@@ -849,30 +912,36 @@ def _wikidata_methodology(session: Session) -> Methodology:
             "acceptance, not independent corroboration."
         ),
         "day_convention": (
-            "P585 states a civil day at day precision (precision 11), in the "
-            "calendar its calendarmodel names -- Q1985727 Gregorian, Q1985786 "
-            "Julian. The day is resolved through the shared temporal resolver as "
-            "a local civil day: a Gregorian day is taken as reported, a Julian "
-            "day is refused pending exact restatement, and an absent or "
-            "unrecognized model fails closed rather than presuming a calendar."
+            "P585 states its time in the calendar its calendarmodel names -- "
+            "Q1985727 Gregorian, Q1985786 Julian. A day-precision value "
+            "(precision 11) is a stated local civil day, taken as reported. A "
+            "second-precision value (precision 14) is an instant: its local civil "
+            "day is derived through the shared temporal resolver from the "
+            "instant and the IANA timezone whose boundary (a recorded "
+            "timezone-boundary dataset release) covers the P625 coordinates, "
+            "recorded as a direct record rather than reported. All resolution is "
+            "through the shared resolver: a Julian day, a non-Gregorian instant, "
+            "hour/minute precision, an instant with no reviewed Earth place, and "
+            "an absent or unrecognized calendarmodel each fail closed rather than "
+            "presuming a value."
         ),
     }
     existing = session.scalar(
         select(Methodology).where(
             Methodology.slug == "wikidata-single-candidate",
-            Methodology.version == "2",
+            Methodology.version == "3",
         )
     )
     if existing is not None:
         return existing
     row = Methodology(
         slug="wikidata-single-candidate",
-        version="2",
+        version="3",
         name="Wikidata single-candidate resolution",
         description=f"{definition['resolution']} {definition['day_convention']}",
         method_kind="single_source_resolution",
         formula=None,
-        code_version="0.2.0",
+        code_version="0.3.0",
         definition_hash=hashlib.sha256(canonical_json_bytes(definition)).hexdigest(),
         legal_review_status=LegalReviewStatus.NOT_REQUIRED,
     )
@@ -946,6 +1015,193 @@ def _resolve_occurrence_date(value: dict[str, Any]) -> date:
         ),
     )
     return resolved.profile_date
+
+
+@dataclass(frozen=True)
+class _OccurrenceResolution:
+    """A resolved P585 occurrence: the local civil day plus what the ``EventTime``
+    needs to record how it was arrived at (D013).
+
+    For a reported day-precision P585 the derived fields stay None, exactly as the
+    reported EventTime path always left them. For a second-precision instant they
+    carry the instant, its zone, and the offset used to place it on a local day.
+    """
+
+    profile_date: date
+    temporal_assignment: TemporalAssignment
+    temporal_precision: TemporalPrecision
+    exact_timestamp: datetime | None = None
+    timezone_name: str | None = None
+    utc_offset_minutes: int | None = None
+    # The boundary-dataset release whose polygon selected the timezone. Without
+    # it a derived day cannot be reproduced after the boundary table is reseeded
+    # (the USGS local-date claim persists the same field).
+    timezone_dataset_version: str | None = None
+    interpretation: str | None = None
+
+
+def _resolve_occurrence(
+    session: Session,
+    *,
+    occurrence_value: dict[str, Any],
+    coordinates_value: dict[str, Any] | None,
+) -> _OccurrenceResolution:
+    """Resolve a P585 occurrence to one local civil day, with provenance (B3).
+
+    Day precision (11) is a stated local civil day, taken as reported (the
+    coordinates are not consulted and the derived fields stay None, exactly as the
+    reported path always has). Second precision (14) is an instant: the local
+    civil day is derived from it via the single timezone whose boundary wholly
+    covers the coordinates' precision footprint (A3,
+    ``timezone_covering_footprint``) and the shared resolver, and the D013 fields
+    record how.
+
+    Refused per the contract rather than approximated: a precision coarser than a
+    day (which cannot place an event on a date); hour or minute precision (12/13),
+    which the day/second-only ``TemporalPrecision`` cannot record without
+    overstating -- tracked in #133; a non-Gregorian sub-day calendar (#114); a
+    second-precise value whose before/after uncertainty bounds are nonzero (an
+    interval, not one exact instant); a second-precise instant with no
+    coordinates; and coordinates with no positive precision, or whose precision
+    footprint no single timezone wholly covers -- it spans a zone boundary or
+    reaches an area with no established timezone (the local civil day is not
+    uniquely determined).
+    """
+    precision = occurrence_value.get("precision")
+    if precision == 11:
+        return _OccurrenceResolution(
+            profile_date=_resolve_occurrence_date(occurrence_value),
+            temporal_assignment=TemporalAssignment.REPORTED,
+            temporal_precision=TemporalPrecision.DAY,
+        )
+    if precision != 14:
+        raise ValueError(
+            "Wikidata occurrence date is not day-precise or second-precise "
+            "(expected P585 precision 11 or 14). Coarser precision cannot place "
+            "the event on a date; hour and minute precision are not yet "
+            "supported (#133)."
+        )
+    time_text = occurrence_value.get("time")
+    if not isinstance(time_text, str):
+        raise ValueError("Wikidata occurrence instant is malformed.")
+    calendar = _calendar_system(occurrence_value)
+    if calendar is not CalendarSystem.GREGORIAN:
+        raise ValueError(
+            "Wikidata states a sub-day instant in the "
+            f"{calendar.value.capitalize()} calendar; restating it on the "
+            "product's Gregorian axis is not implemented (#114)."
+        )
+    # A P585 time value carries before/after uncertainty bounds (units of its
+    # precision). At precision 14 a nonzero bound makes the value an interval, not
+    # one exact instant: taking the central ``time`` as an exact SECOND /
+    # DIRECT_RECORD instant would overstate the source, and an interval crossing
+    # local midnight would not name one civil day. Only an exact instant (both
+    # bounds zero) is accepted; anything else fails closed, with the other sub-day
+    # limits tracked in #133.
+    if occurrence_value.get("before") != 0 or occurrence_value.get("after") != 0:
+        raise ValueError(
+            "Wikidata states the sub-day instant with a nonzero before/after "
+            "uncertainty interval, so it does not name one exact instant (nor "
+            "necessarily one local civil day); it is not accepted as a "
+            "second-precise occurrence."
+        )
+    if coordinates_value is None:
+        raise ValueError(
+            "Wikidata states a sub-day instant with no coordinates, so its place "
+            "of occurrence is unknown and it yields no date-specific event."
+        )
+    # The timezone table holds Earth polygons; a P625 point on another globe
+    # (the Moon, Mars, ...) would otherwise be read against Earth boundaries and
+    # given an unrelated zone. Fail closed unless the globe is Earth (Q2).
+    globe = coordinates_value.get("globe")
+    if not isinstance(globe, str) or globe.rstrip("/").rsplit("/", 1)[-1] != "Q2":
+        raise ValueError(
+            "Wikidata coordinates are not on Earth (globe is not Q2), so an "
+            "Earth timezone cannot place the instant on a local civil day."
+        )
+    latitude = coordinates_value.get("latitude")
+    longitude = coordinates_value.get("longitude")
+    if not (isinstance(latitude, int | float) and isinstance(longitude, int | float)):
+        raise ValueError("Wikidata coordinates are malformed.")
+    # The coordinates carry their own precision footprint (in degrees). The
+    # instant's local civil day is only well-defined when a single timezone wholly
+    # covers that footprint: otherwise a different zone, or an uncovered gap/ocean,
+    # within the footprint could place it on another day near local midnight. A
+    # missing/non-positive precision leaves the footprint unbounded, so refuse.
+    footprint_precision = coordinates_value.get("precision")
+    if not isinstance(footprint_precision, int | float) or footprint_precision <= 0:
+        raise ValueError(
+            "Wikidata coordinates carry no positive precision, so the instant's "
+            "place is not bounded well enough to name one timezone; the sub-day "
+            "instant is not accepted."
+        )
+    # One atomic query resolves the covering zone AND its boundary-dataset release
+    # together. Combining the zone lookup with the coverage check in a single
+    # statement means the release recorded as provenance is exactly the one that
+    # passed coverage -- a separate point lookup would leave a window in which a
+    # reseed committing between the two queries could make the recorded dataset
+    # and the checked footprint disagree. Finer same-civil-day-across-zones and
+    # antimeridian-wrapping handling are tracked in #133.
+    zone = timezone_covering_footprint(
+        session,
+        latitude=float(latitude),
+        longitude=float(longitude),
+        radius_degrees=float(footprint_precision),
+    )
+    if zone is None:
+        raise ValueError(
+            "No single timezone boundary wholly covers the Wikidata coordinate "
+            "precision footprint (the coordinates are uncovered, or the footprint "
+            "spans a zone boundary or reaches an area with no established "
+            "timezone), so the sub-day instant's local civil day is not uniquely "
+            "determined; it is not accepted."
+        )
+    instant = datetime.fromisoformat(time_text.lstrip("+").replace("Z", "+00:00"))
+    resolved = resolve_day(instant=instant, timezone_name=zone.tzid)
+    return _OccurrenceResolution(
+        profile_date=resolved.profile_date,
+        temporal_assignment=resolved.temporal_assignment,
+        temporal_precision=TemporalPrecision.SECOND,
+        exact_timestamp=resolved.exact_timestamp,
+        timezone_name=resolved.timezone_name,
+        utc_offset_minutes=resolved.utc_offset_minutes,
+        timezone_dataset_version=zone.dataset_version,
+        interpretation=resolved.interpretation,
+    )
+
+
+def _persisted_occurrence(claim: Claim) -> _OccurrenceResolution:
+    """Rebuild the occurrence resolution purely from what ingest recorded.
+
+    Ingest is the single point that consults the timezone-boundary table AND the
+    runtime tzdata (``_resolve_occurrence`` -> ``resolve_day``); it records the
+    derived day, offset, timezone, dataset version, instant, and interpretation
+    on the claim. Resolve and publish rebuild from those recorded values without
+    re-running any lookup: neither the boundary table (which may be reseeded) nor
+    ``ZoneInfo`` (whose tzdata may be corrected) is consulted, so the EventTime
+    and rendered statement cannot drift from the immutable claim snapshot the
+    reviewer accepted. A day-precision occurrence has no block and is the reported
+    day (that path derives no offset and consults no tzdata).
+    """
+    assertion = claim.assertion_json or {}
+    block = assertion.get("derived_local_date")
+    if isinstance(block, dict):
+        return _OccurrenceResolution(
+            profile_date=date.fromisoformat(str(block["date"])),
+            temporal_assignment=TemporalAssignment.DIRECT_RECORD,
+            temporal_precision=TemporalPrecision.SECOND,
+            exact_timestamp=datetime.fromisoformat(str(block["instant"])),
+            timezone_name=str(block["timezone"]),
+            utc_offset_minutes=int(block["utc_offset_minutes"]),
+            timezone_dataset_version=block.get("timezone_dataset_version"),
+            interpretation=block.get("interpretation"),
+        )
+    value = assertion.get("value")
+    return _OccurrenceResolution(
+        profile_date=_resolve_occurrence_date(value if isinstance(value, dict) else {}),
+        temporal_assignment=TemporalAssignment.REPORTED,
+        temporal_precision=TemporalPrecision.DAY,
+    )
 
 
 def _resolve_candidate(
@@ -1066,15 +1322,29 @@ def resolve_wikidata_event(session: Session) -> Event:
     if not isinstance(qid, str):
         raise ValueError("Wikidata identity candidate has no entity id.")
 
-    # Validate and resolve the occurrence date before any write: a bad P585, or
-    # one in a calendar the resolver does not restate (Julian, #114/#120), must
-    # not leave a half-resolved identity behind. The CLI commits its audit trail
-    # on failure, which would otherwise persist an identity with no event and
-    # wedge retries (the next call finds the identity, no event, and re-resolves
-    # without a supersession id).
-    occurrence_date = _resolve_occurrence_date(
-        _candidate_value(claims["candidate_occurrence_date"])
+    # Validate and resolve the occurrence before any write: a bad P585 must not
+    # leave a half-resolved identity behind (the CLI commits its audit trail on
+    # failure, which would otherwise persist an identity with no event and wedge
+    # retries). The derivation itself was done at ingest and recorded on the
+    # claim; reuse it (``_persisted_occurrence``) rather than re-running the
+    # boundary lookup, so a reseed between ingest and this human resolution cannot
+    # make the EventTime disagree with the immutable claim snapshot. A derived
+    # (second-precision) day still requires its place evidence -- the coordinate
+    # -- to be an accepted candidate, or the instant has no reviewed place.
+    occurrence = _persisted_occurrence(claims["candidate_occurrence_date"])
+    occurrence_derived = (
+        occurrence.temporal_assignment is not TemporalAssignment.REPORTED
     )
+    coordinates_claim = claims.get("candidate_coordinates")
+    if occurrence_derived and (
+        coordinates_claim is None
+        or coordinates_claim.assertion_status is not ClaimAssertionStatus.ACCEPTED
+    ):
+        raise ValueError(
+            "A second-precision Wikidata event's local day is derived from its "
+            "coordinates, so the coordinate candidate must be human-accepted "
+            "before it can be resolved into an event."
+        )
 
     # Serialize per entity so two concurrent resolves cannot double-create the
     # event or its location (the governance writers' advisory-lock pattern).
@@ -1126,19 +1396,38 @@ def resolve_wikidata_event(session: Session) -> Event:
         )
         session.add(event)
         session.flush()
+        # A derived day rests on the place evidence: resolve the accepted
+        # coordinate now so the EventTime can cite it as the local-date
+        # provenance. _ensure_event_location below reuses this resolved claim.
+        local_date_provenance_id = (
+            _resolve_candidate(
+                session,
+                qid=qid,
+                claim=claims["candidate_coordinates"],
+                methodology=methodology,
+            ).id
+            if occurrence_derived
+            else None
+        )
         session.add(
             EventTime(
                 event_id=event.id,
                 provenance_resolved_claim_id=resolved["candidate_occurrence_date"].id,
-                start_date=occurrence_date,
-                end_date=occurrence_date,
-                temporal_precision=TemporalPrecision.DAY,
-                # REPORTED, matching how the resolver classifies a stated local
-                # civil day: a secondary source naming the day, not a direct
-                # record derived from an instant.
-                temporal_assignment=TemporalAssignment.REPORTED,
+                local_date_provenance_resolved_claim_id=local_date_provenance_id,
+                start_date=occurrence.profile_date,
+                end_date=occurrence.profile_date,
+                # DAY / REPORTED for a stated local civil day (a secondary source
+                # naming the day); SECOND / DIRECT_RECORD for a day derived from a
+                # second-precision instant, whose D013 fields record how.
+                temporal_precision=occurrence.temporal_precision,
+                temporal_assignment=occurrence.temporal_assignment,
                 date_role=DateRole.OCCURRED,
                 is_primary=True,
+                exact_timestamp=occurrence.exact_timestamp,
+                local_date=occurrence.profile_date if occurrence_derived else None,
+                timezone_name=occurrence.timezone_name,
+                utc_offset_minutes=occurrence.utc_offset_minutes,
+                interpretation=occurrence.interpretation,
             )
         )
 
@@ -1663,20 +1952,51 @@ def _resolution_lineage(
     return claim, release
 
 
-def _recorded_statement_text(predicate: str, *, value: dict[str, Any]) -> str:
+def _recorded_statement_text(
+    predicate: str,
+    *,
+    value: dict[str, Any],
+    occurrence_date: date | None = None,
+    occurrence_instant: datetime | None = None,
+    occurrence_timezone: str | None = None,
+) -> str:
     """Honest, data-derived statement text for one recorded predicate.
 
     Every value is read from the resolved candidate; nothing is invented (§12).
+    The occurrence day is the one resolution filed the event under, passed in from
+    the EventTime rather than re-derived. When that day was derived from a
+    second-precision instant, the derived local day is NOT attributed to Wikidata:
+    the instant is what the source stated, and the local-day conversion is the
+    product's, stated as such (an EventTime with an instant and timezone is a
+    derived day; a day-precision occurrence carries neither).
     """
     if predicate == "candidate_name":
         return f'Wikidata records this event as "{value.get("label", "")}".'
     if predicate == "candidate_event_type":
         return f"Wikidata classifies the entity as type {value.get('id', '')}."
     if predicate == "candidate_occurrence_date":
-        occurrence = _resolve_occurrence_date(value)
+        if occurrence_date is None:
+            raise ValueError(
+                "Rendering the Wikidata occurrence statement requires the "
+                "resolved occurrence date."
+            )
+        if occurrence_instant is not None and occurrence_timezone is not None:
+            # exact_timestamp round-trips through a TIMESTAMPTZ column, so it can
+            # come back represented in a non-UTC Postgres session zone. Normalize
+            # to UTC before formatting the wall-clock, so the stated time is the
+            # true UTC instant rather than a session-zone rendering labeled "UTC"
+            # (the USGS publication path normalizes the same way).
+            instant_utc = occurrence_instant.astimezone(UTC)
+            return (
+                "Wikidata records the occurrence at "
+                f"{instant_utc:%B} {instant_utc.day}, "
+                f"{instant_utc.year} {instant_utc:%H:%M:%S} UTC; under "
+                f"{occurrence_timezone} civil time that is "
+                f"{occurrence_date:%B} {occurrence_date.day}, {occurrence_date.year}."
+            )
         return (
             "Wikidata records the occurrence on "
-            f"{occurrence:%B} {occurrence.day}, {occurrence.year}."
+            f"{occurrence_date:%B} {occurrence_date.day}, {occurrence_date.year}."
         )
     if predicate == "candidate_coordinates":
         return (
@@ -1948,17 +2268,45 @@ def publish_wikidata_event(
         session, qid=qid, predicate="candidate_occurrence_date"
     )
 
-    # The occurrence date is the resolution's once resolved, so the collision guard
-    # and the publish target are the same date -- a re-ingest that moves P585 cannot
-    # let the guard miss a recorded event on the date we actually publish on.
-    # Pre-resolution it falls back to the accepted candidate purely so a collision
-    # can still defer.
-    if event is not None and resolved_occurrence is not None:
-        occurrence_date = _resolve_occurrence_date(_resolved_value(resolved_occurrence))
-    else:
-        occurrence_date = _resolve_occurrence_date(
-            _candidate_value(claims["candidate_occurrence_date"])
+    # Once resolved, the occurrence date is the resolved event's own primary
+    # EventTime -- the exact date it publishes on, derived or reported -- so the
+    # collision guard and the publish target cannot diverge, and a
+    # second-precision instant's derived day is read from where resolution wrote
+    # it rather than re-derived. Pre-resolution it falls back to the accepted
+    # candidate purely so a collision can still defer.
+    if event is not None:
+        event_time = session.scalar(
+            select(EventTime).where(
+                EventTime.event_id == event.id, EventTime.is_primary.is_(True)
+            )
         )
+        if event_time is None:
+            raise ValueError("The resolved Wikidata event has no primary occurrence time.")
+        occurrence_date = event_time.start_date
+    else:
+        # Pre-resolution: reuse the day ingest recorded on the candidate (the
+        # same recorded derivation resolution will use), not a fresh boundary
+        # lookup, so the collision guard matches the eventual publish date.
+        occurrence_claim = claims["candidate_occurrence_date"]
+        coordinates_claim = claims.get("candidate_coordinates")
+        derived = isinstance(
+            (occurrence_claim.assertion_json or {}).get("derived_local_date"), dict
+        )
+        if derived and (
+            coordinates_claim is None
+            or coordinates_claim.assertion_status is not ClaimAssertionStatus.ACCEPTED
+        ):
+            # A derived (second-precision) day rests on its coordinates. Until
+            # those are accepted the event cannot resolve, so running the
+            # collision check here would open a merge-review task asserting an
+            # occurrence on a day derived from unreviewed place evidence, and
+            # leave it unactionable. Refuse rather than assert it.
+            raise ValueError(
+                "A second-precision Wikidata event's day is derived from its "
+                "coordinates, so the coordinate candidate must be human-accepted "
+                "and the event resolved before publication."
+            )
+        occurrence_date = _persisted_occurrence(occurrence_claim).profile_date
 
     # Dedup before minting a competing recorded event: a date that already
     # publishes a different recorded event defers to human merge review.
@@ -2054,7 +2402,15 @@ def publish_wikidata_event(
                     "_", "-"
                 ),
                 "statement": _recorded_statement_text(
-                    predicate, value=_resolved_value(resolved)
+                    predicate,
+                    value=_resolved_value(resolved),
+                    occurrence_date=event_time.start_date,
+                    # An instant + timezone means the day was derived, so the
+                    # statement renders the source instant and the product's
+                    # local-day conversion separately rather than attributing the
+                    # derived day to Wikidata.
+                    occurrence_instant=event_time.exact_timestamp,
+                    occurrence_timezone=event_time.timezone_name,
                 ),
                 "details": details,
                 "provenance_note": (
