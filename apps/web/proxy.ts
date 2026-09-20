@@ -8,7 +8,7 @@ import { canonicalizePublicDatePath } from "@/src/lib/date";
  * degrade to a meta refresh once the segment's loading boundary begins
  * streaming, which non-browser clients do not follow.
  */
-export function middleware(request: NextRequest) {
+export function proxy(request: NextRequest) {
   const match = /^\/day\/([^/]+)$/.exec(request.nextUrl.pathname);
   if (!match) {
     return NextResponse.next();
