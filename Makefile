@@ -10,7 +10,7 @@ TEST_DATABASE_URL ?= postgresql+psycopg://day_perspective:day_perspective@localh
 .PHONY: help install web-install api-install db-up db-down db-reset local-storage-reset clean-reset db-migrate seed-timezones seed api-migrate api-seed ingest-usgs-fixture ingest-usgs-live ingest-usgs-dry-run review-usgs-fixture ingest-un-wpp-fixture ingest-un-wpp-live ingest-un-wpp-dry-run review-un-wpp-fixture ingest-ucdp-annual-fixture ingest-ucdp-annual-live review-ucdp-annual-fixture review-ucdp-annual-all-years ingest-ucdp-ged-fixture review-ucdp-ged-fixture ingest-wikidata-fixture ingest-wikidata-live ingest-wikidata-dry-run enrich-wikidata resolve-wikidata validate-golden-set reconcile-publications reconcile-publications-repair publish-context-year publish-context-resume publish-context-retry-failed rebuild-coverage golden-canary publish-archive publish-golden api api-run api-test api-lint api-typecheck contracts-test contracts-lint contracts-typecheck web web-run web-test web-lint web-typecheck web-e2e web-e2e-full-stack web-build test-integration test-e2e build check audit verify
 
 help:
-	@printf '%s\n' 'Targets: install, db-up, db-down, db-reset, clean-reset, db-migrate, seed, ingest-usgs-fixture, ingest-usgs-live, ingest-usgs-dry-run, review-usgs-fixture, ingest-un-wpp-fixture, ingest-un-wpp-live, ingest-un-wpp-dry-run, review-un-wpp-fixture, ingest-ucdp-annual-fixture, ingest-ucdp-annual-live, review-ucdp-annual-fixture, review-ucdp-annual-all-years, ingest-ucdp-ged-fixture, review-ucdp-ged-fixture, ingest-wikidata-fixture, ingest-wikidata-live, ingest-wikidata-dry-run, publish-golden, golden-canary, publish-archive, rebuild-coverage, reconcile-publications, api, web, test-integration, test-e2e, build, check, verify'
+	@printf '%s\n' 'Targets: install, db-up, db-down, db-reset, clean-reset, db-migrate, seed, ingest-usgs-fixture, ingest-usgs-live, ingest-usgs-dry-run, review-usgs-fixture, ingest-un-wpp-fixture, ingest-un-wpp-live, ingest-un-wpp-dry-run, review-un-wpp-fixture, ingest-ucdp-annual-fixture, ingest-ucdp-annual-live, review-ucdp-annual-fixture, review-ucdp-annual-all-years, ingest-ucdp-ged-fixture, review-ucdp-ged-fixture, ingest-wikidata-fixture, ingest-wikidata-live, ingest-wikidata-dry-run, publish-golden, golden-canary, recorded-canary, publish-archive, rebuild-coverage, reconcile-publications, api, web, test-integration, test-e2e, build, check, verify'
 
 install: web-install api-install
 
@@ -132,6 +132,10 @@ publish-archive:
 
 golden-canary:
 	cd services/api && DATABASE_URL='$(DATABASE_URL)' PUBLISHED_PROFILE_ROOT='$(PROJECT_ROOT)/.local/published-profiles' $(API_PYTHON) -m app.publish_cli golden-canary $(ARGS)
+
+.PHONY: recorded-canary
+recorded-canary:
+	cd services/api && DATABASE_URL='$(DATABASE_URL)' PUBLISHED_PROFILE_ROOT='$(PROJECT_ROOT)/.local/published-profiles' $(API_PYTHON) -m app.publish_cli recorded-canary $(ARGS)
 
 rebuild-coverage:
 	cd services/api && DATABASE_URL='$(DATABASE_URL)' PUBLISHED_PROFILE_ROOT='$(PROJECT_ROOT)/.local/published-profiles' $(API_PYTHON) -m app.publish_cli rebuild-coverage
