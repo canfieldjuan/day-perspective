@@ -21,7 +21,7 @@ cachecontrol==0.14.4
     # via
     #   cachecontrol
     #   pip-audit
-certifi==2026.7.22
+certifi==2026.10.18
     # via
     #   httpcore
     #   httpx
@@ -38,7 +38,7 @@ et-xmlfile==2.0.0
     # via openpyxl
 fastapi==0.139.2
     # via day-perspective-api (services/api/pyproject.toml)
-filelock==3.32.0
+filelock==4.2.1
     # via cachecontrol
 geoalchemy2==0.16.0
     # via day-perspective-api (services/api/pyproject.toml)
@@ -71,7 +71,7 @@ markupsafe==3.0.3
     # via mako
 mdurl==0.1.2
     # via markdown-it-py
-msgpack==1.2.1
+msgpack==1.2.3
     # via cachecontrol
 mypy==1.14.1
     # via day-perspective-api (services/api/pyproject.toml)
@@ -158,7 +158,7 @@ typing-extensions==4.16.0
     #   typing-inspection
 typing-inspection==0.4.2
     # via fastapi
-urllib3==2.7.0
+urllib3==2.8.0
     # via requests
 uvicorn==0.34.0
     # via day-perspective-api (services/api/pyproject.toml)
