@@ -94,6 +94,9 @@ test("an ordinary context-only date is honest about what it holds", async ({
         year: "numeric", month: "long", day: "numeric", timeZone: "UTC"
       }).format(new Date(`${neighbour.date}T00:00:00Z`));
       await expect(discovery).toContainText(label);
+      await expect(discovery).toContainText(
+        neighbour.direction === "before" ? "earlier" : "later"
+      );
       await expect(
         discovery.locator(`a[href="/day/${neighbour.date}"]`)
       ).toBeVisible();
