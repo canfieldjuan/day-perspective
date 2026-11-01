@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import type { CoverageDateResponse } from "@day-perspective/contracts";
 
 test("serves the reviewed golden artifact through the complete runtime path", async ({
   page
@@ -67,12 +68,37 @@ test("an ordinary context-only date is honest about what it holds", async ({
 
   const discovery = page.getByTestId("coverage-discovery");
   await expect(discovery).toContainText("Find enriched dates");
-  // The real archive holds exactly one enriched date, decades away.
-  await expect(discovery).toContainText("March 27, 1964");
-  await expect(discovery).toContainText("years earlier");
-  await expect(discovery).toContainText(
-    "No enriched date is currently published after October 12, 1983."
+  // Live enrichment may add closer dates. Verify the real coverage contract
+  // reaches the browser instead of freezing the archive at its first event.
+  const response = await page.request.get("/api/coverage/1983-10-12");
+  expect(response.ok()).toBe(true);
+  const coverage: CoverageDateResponse = await response.json();
+  expect(coverage.status).toBe("coverage");
+  expect(coverage.date).toBe("1983-10-12");
+  // The reviewed USGS fixture guarantees at least an earlier destination.
+  expect(typeof coverage.nearest_enriched_before).toBe("string");
+  const neighbours = [
+    { date: coverage.nearest_enriched_before, direction: "before" },
+    { date: coverage.nearest_enriched_after, direction: "after" }
+  ];
+  await expect(discovery.getByRole("link")).toHaveCount(
+    neighbours.filter(({ date }) => date !== null).length
   );
+  for (const neighbour of neighbours) {
+    if (neighbour.date === null) {
+      await expect(discovery).toContainText(
+        `No enriched date is currently published ${neighbour.direction} October 12, 1983.`
+      );
+    } else {
+      const label = new Intl.DateTimeFormat("en-US", {
+        year: "numeric", month: "long", day: "numeric", timeZone: "UTC"
+      }).format(new Date(`${neighbour.date}T00:00:00Z`));
+      await expect(discovery).toContainText(label);
+      await expect(
+        discovery.locator(`a[href="/day/${neighbour.date}"]`)
+      ).toBeVisible();
+    }
+  }
 
   // Chronological navigation is untouched by this slice.
   await expect(
