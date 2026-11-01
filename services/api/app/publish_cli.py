@@ -134,6 +134,11 @@ def main() -> None:
         action="store_true",
         help="Publish a superseding version even when content is unchanged.",
     )
+    recorded_canary = subparsers.add_parser(
+        "recorded-canary",
+        help="Read and validate published recorded-event dates without publishing or changing readiness.",
+    )
+    recorded_canary.add_argument("--date", type=date.fromisoformat, action="append", required=True)
     subparsers.add_parser(
         "rebuild-coverage",
         help="Regenerate the coverage index from published state.",
@@ -433,6 +438,24 @@ def main() -> None:
             if not validation.clean or (
                 canary_report is not None and canary_report.failed
             ):
+                raise SystemExit(1)
+        elif args.command == "recorded-canary":
+            validation = CanaryValidation.of(
+                session,
+                store=LocalFilesystemPublishedProfileStore(settings.published_profile_root),
+                dates=args.date,
+                recorded_events=True,
+            )
+            print(
+                f"validated={validation.checked} missing={len(validation.missing)} "
+                f"dates_with_issues={len(validation.issues)}"
+            )
+            for profile_date in validation.missing:
+                print(f"missing date={profile_date.isoformat()}")
+            for issues in validation.issues.values():
+                for issue in issues:
+                    print(f"issue {issue}")
+            if not validation.clean:
                 raise SystemExit(1)
         elif args.command == "rebuild-coverage":
             rebuild = rebuild_coverage_index(

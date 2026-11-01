@@ -40,10 +40,12 @@ from app.golden_set import (
 )
 from app.models import (
     DayProfile,
+    ProfileType,
     PublicationBatchRun,
     PublicationManifest,
     PublicationTier,
     TemporalAssignment,
+    profile_type_for_date,
 )
 from app.services import PublishedProfileStore
 from app.un_wpp import SUPPORTED_YEARS
@@ -176,6 +178,54 @@ def _issue(profile_date: str, message: str) -> str:
 
 def validate_context_payload(payload: dict[str, Any]) -> list[str]:
     """Check one served profile for meaning defects. Empty list means clean."""
+    return _validate_payload(payload, required_sections=set(SECTION_KEYS))
+
+
+def validate_recorded_payload(payload: dict[str, Any]) -> list[str]:
+    """Qualify recorded events, including sparse early-era publications.
+
+    Only the limited-historical era lacks the annual-context pipeline. Later
+    profiles retain the complete context checks, as does validate_context_payload.
+    Included content always receives the same meaning checks in either mode.
+    """
+    profile_date = payload.get("date")
+    if not isinstance(profile_date, str):
+        return [_issue(str(profile_date), "profile date is not a calendar date")]
+    try:
+        expected_type = profile_type_for_date(date.fromisoformat(profile_date))
+    except (TypeError, ValueError):
+        return [_issue(str(profile_date), "profile date is not a calendar date")]
+    if expected_type is None or payload.get("profile_type") != expected_type.value:
+        return [_issue(str(profile_date), "profile date and public era do not agree")]
+    sections = payload.get("sections")
+    if not isinstance(sections, dict):
+        return [_issue(str(profile_date), "profile has no sections map")]
+    for key, statements in sections.items():
+        if not isinstance(statements, list) or any(
+            not isinstance(statement, dict)
+            or any(
+                not isinstance(statement.get(field), str) or not statement[field].strip()
+                for field in ("statement_id", "statement")
+            )
+            for statement in statements
+        ):
+            return [_issue(str(profile_date), f"{key} has malformed statements")]
+    required = (
+        {"recorded_on_this_date"}
+        if expected_type is ProfileType.LIMITED_HISTORICAL
+        else set(SECTION_KEYS)
+    )
+    issues = _validate_payload(payload, required_sections=required)
+    if payload.get("publication_tier") != PublicationTier.ENRICHED.value:
+        issues.append(_issue(str(profile_date), "recorded canary requires enriched tier"))
+    if not sections.get("recorded_on_this_date"):
+        issues.append(_issue(str(profile_date), "recorded canary requires a recorded event"))
+    return issues
+
+
+def _validate_payload(
+    payload: dict[str, Any], *, required_sections: set[str]
+) -> list[str]:
     issues: list[str] = []
     profile_date = str(payload.get("date", "unknown"))
     try:
@@ -190,7 +240,7 @@ def validate_context_payload(payload: dict[str, Any]) -> list[str]:
     if not isinstance(states, dict):
         return [_issue(profile_date, "profile has no section_states map")]
 
-    for key in sorted(set(SECTION_KEYS) | set(sections) | set(states)):
+    for key in sorted(required_sections | set(sections) | set(states)):
         if key not in SECTION_KEYS:
             issues.append(
                 _issue(profile_date, f"{key} is not a contract section key")
@@ -793,6 +843,7 @@ class CanaryValidation:
         *,
         store: PublishedProfileStore,
         dates: Sequence[date],
+        recorded_events: bool = False,
     ) -> CanaryValidation:
         result = cls()
         for profile_date in dates:
@@ -804,7 +855,13 @@ class CanaryValidation:
                 result.missing.append(profile_date)
                 continue
             result.checked += 1
-            issues = validate_context_payload(payload)
+            issues = (
+                validate_recorded_payload(payload)
+                if recorded_events
+                else validate_context_payload(payload)
+            )
+            if payload.get("date") != profile_date.isoformat():
+                issues.append(_issue(profile_date.isoformat(), "artifact does not match requested date"))
             if issues:
                 result.issues[profile_date.isoformat()] = issues
         return result
