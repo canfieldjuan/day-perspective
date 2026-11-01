@@ -5,6 +5,7 @@ from typing import Any
 import pytest
 
 from app import golden_canary, publish_cli
+from app.coverage import SECTION_KEYS
 
 
 def sparse_profile() -> dict[str, Any]:
@@ -69,7 +70,7 @@ def test_later_era_boundary_keeps_complete_context_requirement() -> None:
 def test_maximum_public_date_can_pass_with_complete_sections() -> None:
     payload = sparse_profile()
     payload.update(date="2025-12-31", profile_type="enhanced_structured")
-    for key in golden_canary.SECTION_KEYS:
+    for key in SECTION_KEYS:
         if key != "recorded_on_this_date":
             payload["sections"][key] = []
             payload["section_states"][key] = {"status": "not_yet_supported", "reason": "No evidence in this publication."}
