@@ -246,13 +246,13 @@ def _validate_payload(
                 _issue(profile_date, f"{key} is not a contract section key")
             )
             continue
-        if key not in sections:
+        if key not in sections and key in required_sections:
             # A section absent from the payload is not the same as an empty
             # one: the reader is told nothing rather than told there is
             # nothing.
             issues.append(_issue(profile_date, f"{key} is missing from sections"))
             continue
-        statements = sections[key]
+        statements = sections.get(key, [])
         state = states.get(key)
         if not isinstance(state, dict):
             issues.append(

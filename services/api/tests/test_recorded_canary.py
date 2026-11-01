@@ -105,6 +105,14 @@ def test_included_annual_statistics_still_get_meaning_checks() -> None:
     assert any("365" in x for x in golden_canary.validate_recorded_payload(payload))
 
 
+def test_optional_unavailable_state_can_omit_its_empty_section() -> None:
+    payload = sparse_profile()
+    payload["section_states"]["typical_day_in_this_year"] = {
+        "status": "not_yet_supported", "reason": "No demographic coverage for this year."
+    }
+    assert golden_canary.validate_recorded_payload(payload) == []
+
+
 def test_recorded_reader_checks_requested_date_and_cli_is_read_only(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     class ReadOnlySession:
         def __enter__(self) -> "ReadOnlySession":
