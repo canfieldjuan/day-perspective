@@ -156,8 +156,24 @@ test("unreadable coverage claims nothing about the archive", async ({ page }) =>
   await expect(page.getByTestId("day-arrival")).toBeVisible();
   await expect(page.getByTestId("coverage-discovery")).toHaveCount(0);
   await expect(page.getByTestId("publication-tier")).toHaveCount(0);
+  await expect(page.getByRole("region", { name: "Review and evidence quality" })).toHaveCount(0);
   // Silence, not a claim that the archive is empty.
   await expect(page.getByText(/No enriched dates/)).toHaveCount(0);
+});
+
+test("review and weakest evidence remain separate on an enriched date", async ({ page }) => {
+  const coverage = JSON.parse(coverageBody("1983-10-12", null, null, "enriched"));
+  coverage.review_status = "human_reviewed";
+  coverage.quality_floor = "D";
+  await arrive(page, "1983-10-12", JSON.stringify(coverage));
+  const metadata = page.getByRole("region", { name: "Review and evidence quality" });
+  await expect(metadata.getByText("Review status", { exact: true })).toBeVisible();
+  await expect(metadata.getByText("Human reviewed", { exact: true })).toBeVisible();
+  await expect(metadata.getByText("Evidence quality", { exact: true })).toBeVisible();
+  await expect(metadata.getByText("Grade D", { exact: true })).toBeVisible();
+  await expect(metadata.getByText("Weakest published evidence.", { exact: true })).toBeVisible();
+  await expect(page.getByTestId("coverage-discovery")).toHaveCount(0);
+  expect(await metadata.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
 });
 
 test("discovery controls meet the touch-target floor", async ({ page }) => {
