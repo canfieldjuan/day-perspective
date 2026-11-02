@@ -2,7 +2,7 @@
 
 import React, { useEffect, useState } from "react";
 
-import type { CoverageDateResponse } from "@day-perspective/contracts";
+import type { CoverageDateResponse, ReviewStatus } from "@day-perspective/contracts";
 import {
   discoveryStateFor,
   isCoverageResponse,
@@ -12,6 +12,12 @@ import { describeSparsePage } from "@/src/lib/coverage-copy";
 import { formatPublicDate } from "@/src/lib/date";
 import { CoverageDiscovery } from "./CoverageDiscovery";
 import { EnrichedNavigation } from "./EnrichedNavigation";
+
+const reviewLabels = {
+  automated_only: "Automated checks only",
+  review_pending: "Review pending",
+  human_reviewed: "Human reviewed"
+} satisfies Record<ReviewStatus, string>;
 
 /**
  * Everything the coverage index has to say about this date.
@@ -66,6 +72,25 @@ export function CoverageSection({ date }: { date: string }) {
 
   return (
     <>
+      {coverage ? (
+        <section aria-label="Review and evidence quality">
+          <dl className="coverage-metadata">
+            <div>
+              <dt>Review status</dt>
+              <dd>{reviewLabels[coverage.review_status]}</dd>
+            </div>
+            <div>
+              <dt>Evidence quality</dt>
+              <dd>
+                {coverage.quality_floor === "not_assessed"
+                  ? "Not assessed"
+                  : `Grade ${coverage.quality_floor}`}
+              </dd>
+              <dd>Weakest published evidence.</dd>
+            </div>
+          </dl>
+        </section>
+      ) : null}
       {coverage?.publication_tier === "context_only" ? (
         <p className="coverage-tier" data-testid="publication-tier">
           {describeSparsePage(state, monument)}

@@ -44,6 +44,21 @@
   font-weight: 800;
 }
 
+.coverage-metadata {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem 2rem;
+  color: var(--muted-ink);
+}
+
+.coverage-metadata dt {
+  font-weight: 700;
+}
+
+.coverage-metadata dd {
+  margin: 0;
+}
+
 .evidence-chips {
   display: flex;
   flex-wrap: wrap;
