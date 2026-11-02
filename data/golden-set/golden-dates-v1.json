@@ -811,7 +811,7 @@
         "timezone_boundary"
       ],
       "selection_rationale": "Selected to exercise timezone boundary evidence handling in the enhanced structured era. Selection does not assert that a reviewed event is already associated with this date.",
-      "manual_review_status": "pending_human_review",
+      "manual_review_status": "reviewed",
       "publication_status": "not_generated"
     },
     {
@@ -901,7 +901,7 @@
         "notable_birth_or_death"
       ],
       "selection_rationale": "Selected to exercise notable birth or death evidence handling in the enhanced structured era. Selection does not assert that a reviewed event is already associated with this date.",
-      "manual_review_status": "pending_human_review",
+      "manual_review_status": "reviewed",
       "publication_status": "not_generated"
     },
     {
