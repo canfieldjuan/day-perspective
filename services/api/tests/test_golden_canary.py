@@ -513,11 +513,20 @@ class TestGoldenSetStatuses:
         assert report.record_count == 100
         assert report.release_ready is False
 
+    @pytest.mark.parametrize("selected_review_status", ["reviewed", "pending_human_review"])
     def test_recording_a_canary_publication_updates_only_that_date(
-        self, tmp_path: Path
+        self, tmp_path: Path, selected_review_status: str
     ) -> None:
         path = tmp_path / "golden.json"
-        path.write_text(GOLDEN_SET.read_text(encoding="utf-8"), encoding="utf-8")
+        before = json.loads(GOLDEN_SET.read_text(encoding="utf-8"))
+        for record in before["records"]:
+            record["manual_review_status"] = "pending_human_review"
+            record["publication_status"] = NOT_GENERATED_STATUS
+            if record["date"] == "1952-02-29":
+                record["manual_review_status"] = selected_review_status
+            elif record["date"] == "1900-03-15":
+                record["manual_review_status"] = "reviewed"
+        path.write_text(json.dumps(before), encoding="utf-8")
 
         record_canary_publication(path, dates=[date(1952, 2, 29)])
 
@@ -528,11 +537,12 @@ class TestGoldenSetStatuses:
         }
         assert statuses["1952-02-29"] == CONTEXT_PUBLISHED_STATUS
         assert statuses["1900-03-15"] == NOT_GENERATED_STATUS
-        # The writeback must not disturb human review state.
-        assert all(
-            record["manual_review_status"] == "pending_human_review"
-            for record in payload["records"]
-        )
+        # Only the selected publication status changes; mixed human review
+        # states and every other date/field must survive unchanged.
+        for record in before["records"]:
+            if record["date"] == "1952-02-29":
+                record["publication_status"] = CONTEXT_PUBLISHED_STATUS
+        assert payload == before
         validate_golden_set(path)
 
     def test_recording_never_downgrades_a_validated_date(
