@@ -961,7 +961,7 @@
         "era_boundary"
       ],
       "selection_rationale": "Selected to exercise era boundary evidence handling in the enhanced structured era. Selection does not assert that a reviewed event is already associated with this date.",
-      "manual_review_status": "pending_human_review",
+      "manual_review_status": "reviewed",
       "publication_status": "not_generated"
     },
     {
@@ -981,7 +981,7 @@
         "pandemic"
       ],
       "selection_rationale": "Selected to exercise pandemic evidence handling in the enhanced structured era. Selection does not assert that a reviewed event is already associated with this date.",
-      "manual_review_status": "pending_human_review",
+      "manual_review_status": "reviewed",
       "publication_status": "not_generated"
     },
     {
