@@ -831,7 +831,7 @@
         "leap_calendar"
       ],
       "selection_rationale": "Selected to exercise leap calendar evidence handling in the enhanced structured era. Selection does not assert that a reviewed event is already associated with this date.",
-      "manual_review_status": "pending_human_review",
+      "manual_review_status": "reviewed",
       "publication_status": "not_generated"
     },
     {
@@ -991,7 +991,7 @@
         "large_disaster"
       ],
       "selection_rationale": "Selected to exercise large disaster evidence handling in the enhanced structured era. Selection does not assert that a reviewed event is already associated with this date.",
-      "manual_review_status": "pending_human_review",
+      "manual_review_status": "reviewed",
       "publication_status": "not_generated"
     },
     {
