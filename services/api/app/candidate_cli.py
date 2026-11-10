@@ -52,7 +52,7 @@ def _ingest(args: argparse.Namespace, settings: Any, session: Any) -> str:
 
 
 def _enrich(args: argparse.Namespace, settings: Any, session: Any) -> str:
-    outcome = attempt_wikidata_enrichment(session)
+    outcome = attempt_wikidata_enrichment(session, source_release_id=args.release)
     return (
         f"status={outcome.status} occurrence_date={outcome.occurrence_date} "
         f"colliding_manifest_id={outcome.colliding_manifest_id}"
@@ -60,7 +60,7 @@ def _enrich(args: argparse.Namespace, settings: Any, session: Any) -> str:
 
 
 def _resolve(args: argparse.Namespace, settings: Any, session: Any) -> str:
-    event = resolve_wikidata_event(session)
+    event = resolve_wikidata_event(session, source_release_id=args.release)
     return (
         f"event_id={event.id} event_type={event.event_type} "
         f"title={event.canonical_title!r}"
@@ -70,6 +70,7 @@ def _resolve(args: argparse.Namespace, settings: Any, session: Any) -> str:
 def _publish(args: argparse.Namespace, settings: Any, session: Any) -> str:
     outcome = publish_wikidata_event(
         session,
+        source_release_id=args.release,
         store=LocalFilesystemPublishedProfileStore(settings.published_profile_root),
         force_new_version=args.force_new_version,
     )
@@ -91,6 +92,7 @@ def _adjudicate(args: argparse.Namespace, settings: Any, session: Any) -> str:
     """
     recorded = resolve_merge_review(
         session,
+        source_release_id=args.release,
         decision=IdentityAdjudicationDecision(args.decision),
         reviewer=args.reviewer,
         rationale=args.rationale,
@@ -184,6 +186,12 @@ def main() -> None:
         help="The surviving event; required for merge and supersede only.",
     )
     adjudicate.set_defaults(handler=_adjudicate, commit_on_error=False)
+
+    for stage in (enrich, resolve, publish, adjudicate):
+        stage.add_argument(
+            "--release", type=UUID,
+            help="Exact Wikidata source-release UUID; required when multiple releases exist.",
+        )
 
     args = parser.parse_args()
     settings = get_settings()

@@ -226,3 +226,23 @@ make publish-golden
 Review is deliberately separate from publication. `publish-golden` must fail
 when claims remain candidates, review tasks remain open, required checks are not
 all passed, or the release lacks a public-display license snapshot.
+
+## Wikidata workflow targeting
+
+Use the `source_release_id` emitted by ingestion to target an immutable
+Wikidata release. Enrichment, resolution, publication and adjudication each
+accept `--release <UUID>`. For example:
+
+```bash
+make enrich-wikidata ARGS='--release <UUID>'
+make resolve-wikidata ARGS='--release <UUID>'
+make publish-wikidata ARGS='--release <UUID>'
+```
+
+For adjudication, pass the same selector to `app.candidate_cli adjudicate`
+alongside its existing decision, reviewer and rationale arguments. With
+multiple Wikidata releases, omitting the selector refuses and lists the
+available release identifiers. Singleton development fixtures remain usable
+without a selector. Resolution evidence from another revision is refused;
+select its original release or reconcile the revision separately. Neither
+a selector nor resolution records human acceptance or editorial selection.

@@ -110,10 +110,10 @@ ingest-wikidata-dry-run:
 	cd services/api && DATABASE_URL='$(DATABASE_URL)' RAW_SOURCE_ROOT='$(PROJECT_ROOT)/.local/raw-sources' $(API_PYTHON) -m app.candidate_cli ingest --fixture '$(PROJECT_ROOT)/data/fixtures/wikidata/Q749610.json' --dry-run
 
 enrich-wikidata:
-	cd services/api && DATABASE_URL='$(DATABASE_URL)' PUBLISHED_PROFILE_ROOT='$(PROJECT_ROOT)/.local/published-profiles' $(API_PYTHON) -m app.candidate_cli enrich
+	cd services/api && DATABASE_URL='$(DATABASE_URL)' PUBLISHED_PROFILE_ROOT='$(PROJECT_ROOT)/.local/published-profiles' $(API_PYTHON) -m app.candidate_cli enrich $(ARGS)
 
 resolve-wikidata:
-	cd services/api && DATABASE_URL='$(DATABASE_URL)' $(API_PYTHON) -m app.candidate_cli resolve
+	cd services/api && DATABASE_URL='$(DATABASE_URL)' $(API_PYTHON) -m app.candidate_cli resolve $(ARGS)
 
 publish-wikidata:
 	cd services/api && DATABASE_URL='$(DATABASE_URL)' PUBLISHED_PROFILE_ROOT='$(PROJECT_ROOT)/.local/published-profiles' $(API_PYTHON) -m app.candidate_cli publish $(ARGS)

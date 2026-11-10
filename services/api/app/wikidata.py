@@ -92,6 +92,7 @@ __all__ = [
     "ingest_wikidata_entity",
     "publish_wikidata_event",
     "resolve_wikidata_event",
+    "select_wikidata_release",
 ]
 
 WIKIDATA_SOURCE_SLUG = "wikidata-candidates"
@@ -832,7 +833,9 @@ class WikidataEnrichmentOutcome:
     colliding_manifest_id: UUID | None = None
 
 
-def attempt_wikidata_enrichment(session: Session) -> WikidataEnrichmentOutcome:
+def attempt_wikidata_enrichment(
+    session: Session, *, source_release_id: UUID | None = None
+) -> WikidataEnrichmentOutcome:
     """Report whether the ingested Wikidata candidate collides with a recorded event.
 
     A pure detector: it reads the candidate's occurrence date and reports whether
@@ -844,20 +847,7 @@ def attempt_wikidata_enrichment(session: Session) -> WikidataEnrichmentOutcome:
     merge/supersede/distinct-event lifecycle; the G2 publish path calls
     ``published_recorded_event_on`` -- exactly as this does -- before publishing.
     """
-    source = session.scalar(
-        select(Source).where(Source.slug == WIKIDATA_SOURCE_SLUG)
-    )
-    release = (
-        session.scalars(
-            select(SourceRelease)
-            .where(SourceRelease.source_id == source.id)
-            .order_by(SourceRelease.ingested_at.desc())
-        ).first()
-        if source is not None
-        else None
-    )
-    if release is None:
-        raise ValueError("Wikidata candidate has not been ingested.")
+    release = select_wikidata_release(session, source_release_id=source_release_id)
 
     occurrence = session.scalar(
         select(Claim).where(
@@ -1274,7 +1264,9 @@ def _ensure_event_location(
     session.flush()
 
 
-def resolve_wikidata_event(session: Session) -> Event:
+def resolve_wikidata_event(
+    session: Session, *, source_release_id: UUID | None = None
+) -> Event:
     """Turn the reviewed Wikidata candidate into a canonical Event.
 
     Requires the core candidate claims to be ACCEPTED first -- D019: Wikidata is
@@ -1287,20 +1279,7 @@ def resolve_wikidata_event(session: Session) -> Event:
     already-resolved Event. It does not publish; publishing a Wikidata recorded
     event is a later slice, gated by ``published_recorded_event_on``.
     """
-    source = session.scalar(
-        select(Source).where(Source.slug == WIKIDATA_SOURCE_SLUG)
-    )
-    release = (
-        session.scalars(
-            select(SourceRelease)
-            .where(SourceRelease.source_id == source.id)
-            .order_by(SourceRelease.ingested_at.desc())
-        ).first()
-        if source is not None
-        else None
-    )
-    if release is None:
-        raise ValueError("Wikidata candidate has not been ingested.")
+    release = select_wikidata_release(session, source_release_id=source_release_id)
 
     claims = {
         claim.claim_type: claim
@@ -1346,35 +1325,8 @@ def resolve_wikidata_event(session: Session) -> Event:
             "before it can be resolved into an event."
         )
 
-    # Serialize per entity so two concurrent resolves cannot double-create the
-    # event or its location (the governance writers' advisory-lock pattern).
-    session.execute(
-        select(
-            func.pg_advisory_xact_lock(
-                func.hashtextextended(f"wikidata-resolve:{qid}", 0)
-            )
-        )
-    )
-
+    _, event = _bound_resolutions(session, release=release, qid=qid, claims=claims)
     methodology = _wikidata_methodology(session)
-
-    # Idempotent on the required core: an already-resolved entity reuses its
-    # event rather than minting a second version of every resolved claim.
-    existing_identity = session.scalar(
-        select(ResolvedClaim)
-        .where(
-            ResolvedClaim.canonical_key
-            == f"wikidata:{qid}:candidate_event_identity"
-        )
-        .order_by(ResolvedClaim.version.desc())
-    )
-    event = (
-        session.scalar(
-            select(Event).where(Event.resolved_claim_id == existing_identity.id)
-        )
-        if existing_identity is not None
-        else None
-    )
 
     if event is None:
         resolved = {
@@ -1611,53 +1563,127 @@ def _ensure_merge_review_task(
     return task
 
 
-def _latest_release(session: Session) -> SourceRelease:
-    source = session.scalar(
-        select(Source).where(Source.slug == WIKIDATA_SOURCE_SLUG)
+def select_wikidata_release(
+    session: Session, *, source_release_id: UUID | None = None
+) -> SourceRelease:
+    """Resolve one immutable workflow subject; never infer it from recency."""
+    query = (
+        select(SourceRelease).join(Source).where(Source.slug == WIKIDATA_SOURCE_SLUG)
     )
-    release = (
-        session.scalars(
-            select(SourceRelease)
-            .where(SourceRelease.source_id == source.id)
-            .order_by(SourceRelease.ingested_at.desc())
-        ).first()
-        if source is not None
-        else None
-    )
-    if release is None:
+    if source_release_id is not None:
+        release = session.scalar(query.where(SourceRelease.id == source_release_id))
+        if release is None:
+            raise ValueError(
+                f"Wikidata source release {source_release_id} was not found."
+            )
+        return release
+    releases = list(session.scalars(query.order_by(SourceRelease.id)))
+    if not releases:
         raise ValueError("Wikidata candidate has not been ingested.")
-    return release
+    if len(releases) != 1:
+        raise ValueError(
+            "Multiple Wikidata releases exist; specify --release. Available releases: "
+            + ", ".join(str(release.id) for release in releases)
+        )
+    return releases[0]
 
 
-def _identity_claim(session: Session) -> Claim:
-    release = _latest_release(session)
-    claim = session.scalar(
-        select(Claim).where(
-            Claim.source_release_id == release.id,
-            Claim.claim_type == "candidate_event_identity",
+def _bound_resolutions(
+    session: Session, *, release: SourceRelease, qid: str, claims: dict[str, Claim]
+) -> tuple[dict[str, ResolvedClaim], Event | None]:
+    """Reuse only roots that actually resolve this release's immutable claims.
+
+    The entity lock is shared with resolution so validation and use cannot race
+    another Wikidata resolution. Return the checked roots for publication rather
+    than querying the latest version again after validation.
+    """
+    session.execute(
+        select(
+            func.pg_advisory_xact_lock(
+                func.hashtextextended(f"wikidata-resolve:{qid}", 0)
+            )
         )
     )
-    if claim is None:
+    roots: dict[str, ResolvedClaim] = {}
+    for predicate in (*REQUIRED_EVENT_CLAIMS, "candidate_coordinates"):
+        resolved = _latest_resolved(session, qid=qid, predicate=predicate)
+        if resolved is None:
+            continue
+        claim = claims.get(predicate)
+        supporting = set(
+            session.scalars(
+                select(ResolvedClaimEvidence.claim_id).where(
+                    ResolvedClaimEvidence.resolved_claim_id == resolved.id,
+                    ResolvedClaimEvidence.stance == "supporting",
+                )
+            )
+        )
+        if (
+            claim is None
+            or supporting != {claim.id}
+            or resolved.resolved_value
+            != (claim.assertion_json or {"text": claim.assertion_text})
+        ):
+            raise ValueError(
+                f"Wikidata resolution {resolved.canonical_key} does not belong to "
+                f"selected release {release.id}; revision reconciliation is required."
+            )
+        roots[predicate] = resolved
+    identity = roots.get("candidate_event_identity")
+    event = (
+        session.scalar(select(Event).where(Event.resolved_claim_id == identity.id))
+        if identity
+        else None
+    )
+    if event is not None:
+        time = session.scalar(
+            select(EventTime).where(
+                EventTime.event_id == event.id, EventTime.is_primary.is_(True)
+            )
+        )
+        occurrence = _persisted_occurrence(claims["candidate_occurrence_date"])
+        if time is None or (
+            time.start_date,
+            time.end_date,
+            time.temporal_precision,
+            time.temporal_assignment,
+            time.exact_timestamp,
+            time.timezone_name,
+            time.utc_offset_minutes,
+            time.interpretation,
+        ) != (
+            occurrence.profile_date,
+            occurrence.profile_date,
+            occurrence.temporal_precision,
+            occurrence.temporal_assignment,
+            occurrence.exact_timestamp,
+            occurrence.timezone_name,
+            occurrence.utc_offset_minutes,
+            occurrence.interpretation,
+        ):
+            raise ValueError(
+                "The resolved occurrence disagrees with the selected release."
+            )
+    return roots, event
+
+
+def _resolved_entity(
+    session: Session, *, release: SourceRelease
+) -> tuple[str, Event | None, Claim]:
+    claims = {
+        claim.claim_type: claim
+        for claim in session.scalars(
+            select(Claim).where(Claim.source_release_id == release.id)
+        )
+    }
+    identity = claims.get("candidate_event_identity")
+    if identity is None:
         raise ValueError("Wikidata candidate is missing candidate_event_identity.")
-    return claim
-
-
-def _resolved_entity(session: Session) -> tuple[str, Event | None]:
-    """The candidate's entity id and its resolved Event, when one exists yet."""
-    qid = _candidate_value(_identity_claim(session)).get("entity_id")
+    qid = _candidate_value(identity).get("entity_id")
     if not isinstance(qid, str):
         raise ValueError("Wikidata identity candidate has no entity id.")
-    identity_resolved = _latest_resolved(
-        session, qid=qid, predicate="candidate_event_identity"
-    )
-    event = (
-        session.scalar(
-            select(Event).where(Event.resolved_claim_id == identity_resolved.id)
-        )
-        if identity_resolved is not None
-        else None
-    )
-    return qid, event
+    _, event = _bound_resolutions(session, release=release, qid=qid, claims=claims)
+    return qid, event, identity
 
 
 def _collision_adjudication(
@@ -1771,6 +1797,7 @@ def resolve_merge_review(
     reviewer: str,
     rationale: str,
     survivor_event_id: UUID | None = None,
+    source_release_id: UUID | None = None,
 ) -> tuple[EventIdentityAdjudication, ...]:
     """Record a human's merge-review answer as the durable decision, and close it.
 
@@ -1780,7 +1807,8 @@ def resolve_merge_review(
     again. Resolving through here writes the pair-specific adjudication the guard
     consumes, links it to the task that asked, and then marks the task resolved.
     """
-    qid, event = _resolved_entity(session)
+    release = select_wikidata_release(session, source_release_id=source_release_id)
+    qid, event, identity_claim = _resolved_entity(session, release=release)
     if event is None:
         raise ValueError(
             "The Wikidata candidate must be resolved into an event before its "
@@ -1807,7 +1835,6 @@ def resolve_merge_review(
             "The colliding manifest's recorded event cannot be resolved to a "
             "canonical event, so the pair cannot be adjudicated."
         )
-    identity_claim = _identity_claim(session)
     # The reviewer answers about the pair a task showed them, so a task about
     # this exact collision has to exist. Resolved tasks count: the first answer
     # closes the task, and a retry of the same command must be checked against
@@ -2007,7 +2034,8 @@ def _recorded_statement_text(
 
 
 def _ranked_recorded_predicates(
-    session: Session, *, qid: str, profile_date: date
+    session: Session, *, profile_date: date,
+    roots: dict[str, ResolvedClaim],
 ) -> list[tuple[str, ResolvedClaim]]:
     """This entity's recorded predicates, in the human editorial-ranking order.
 
@@ -2030,7 +2058,7 @@ def _ranked_recorded_predicates(
             latest.setdefault(selection.resolved_claim_id, selection)
     ranked: list[tuple[int | None, str, ResolvedClaim]] = []
     for predicate in _PUBLISHED_PREDICATES:
-        resolved = _latest_resolved(session, qid=qid, predicate=predicate)
+        resolved = roots.get(predicate)
         if resolved is None:
             continue
         chosen = latest.get(resolved.id)
@@ -2200,6 +2228,7 @@ def publish_wikidata_event(
     *,
     store: PublishedProfileStore,
     force_new_version: bool = False,
+    source_release_id: UUID | None = None,
 ) -> WikidataPublishOutcome:
     """Publish the resolved Wikidata candidate as its date's recorded event.
 
@@ -2215,20 +2244,8 @@ def publish_wikidata_event(
     task and no competing event or profile is created. Re-publishing this entity's
     own recorded event is idempotent.
     """
-    source = session.scalar(
-        select(Source).where(Source.slug == WIKIDATA_SOURCE_SLUG)
-    )
-    release = (
-        session.scalars(
-            select(SourceRelease)
-            .where(SourceRelease.source_id == source.id)
-            .order_by(SourceRelease.ingested_at.desc())
-        ).first()
-        if source is not None
-        else None
-    )
-    if source is None or release is None:
-        raise ValueError("Wikidata candidate has not been ingested.")
+    release = select_wikidata_release(session, source_release_id=source_release_id)
+    source = session.scalars(select(Source).where(Source.id == release.source_id)).one()
 
     claims = {
         claim.claim_type: claim
@@ -2254,19 +2271,9 @@ def publish_wikidata_event(
     # keys on -- the occurrence date, the collision guard, statements, and
     # provenance -- binds to that resolution, not to whatever candidate the newest
     # release carries.
-    identity_resolved = _latest_resolved(
-        session, qid=qid, predicate="candidate_event_identity"
-    )
-    event = (
-        session.scalar(
-            select(Event).where(Event.resolved_claim_id == identity_resolved.id)
-        )
-        if identity_resolved is not None
-        else None
-    )
-    resolved_occurrence = _latest_resolved(
-        session, qid=qid, predicate="candidate_occurrence_date"
-    )
+    bound_roots, event = _bound_resolutions(session, release=release, qid=qid, claims=claims)
+    identity_resolved = bound_roots.get("candidate_event_identity")
+    resolved_occurrence = bound_roots.get("candidate_occurrence_date")
 
     # Once resolved, the occurrence date is the resolved event's own primary
     # EventTime -- the exact date it publishes on, derived or reported -- so the
@@ -2357,7 +2364,7 @@ def publish_wikidata_event(
     # (P2) -- not the source predicate order. An unranked candidate yields nothing
     # and is refused: the pass consumes the ranking stage, it never invents it.
     ranked = _ranked_recorded_predicates(
-        session, qid=qid, profile_date=occurrence_date
+        session, profile_date=occurrence_date, roots=bound_roots
     )
     if not ranked:
         raise ValueError(
