@@ -91,7 +91,7 @@
         "timezone_boundary"
       ],
       "selection_rationale": "Selected to exercise timezone boundary evidence handling in the limited historical era. Selection does not assert that a reviewed event is already associated with this date.",
-      "manual_review_status": "pending_human_review",
+      "manual_review_status": "reviewed",
       "publication_status": "not_generated"
     },
     {
@@ -171,7 +171,7 @@
         "cultural_milestone"
       ],
       "selection_rationale": "Selected to exercise cultural milestone evidence handling in the limited historical era. Selection does not assert that a reviewed event is already associated with this date.",
-      "manual_review_status": "pending_human_review",
+      "manual_review_status": "reviewed",
       "publication_status": "not_generated"
     },
     {
