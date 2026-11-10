@@ -583,21 +583,17 @@ Repeat the command until it reports nothing outstanding.
 `make reconcile-publications` reports interrupted publication state and
 `make reconcile-publications-repair` applies recovery. Coverage is
 maintained as publication's final step, so it does not normally need
-rebuilding; `make rebuild-coverage` regenerates it deterministically and
-exits non-zero if any published date's artifact cannot be read.
+rebuilding during ordinary publication. Populated archives must follow the
+[schema upgrade steps](DEPLOYMENT.md#schema-upgrade-steps) after an upgrade.
+`make rebuild-coverage` regenerates the index deterministically and exits
+non-zero if any published date's artifact cannot be read.
 
-**Distrust list.** The AA5 run was executed against a development
-database that had applied `20260726_0014` before that migration was
-amended, so it carries three vestigial columns (`quality_floor`,
-`review_status`, `index_version`) that the model no longer references.
-They are nullable or defaulted and affect neither publication nor the
-index, but a from-scratch database — which is what CI builds — will not
-have them. Treat CI's pipeline, not that database, as the authority on
-the migration.
-
-Coverage carries no quality floor or review status: both were deferred to
-issue #45 after repeatedly disagreeing between their six writers. Anything
-reading coverage for evidence quality or review state will find neither.
+**Historical AA5 schema note.** That run used an intermediate development
+schema before metadata was implemented. Migration `20260727_0016` now owns
+the coverage index's review status and quality floor. Both are derived by
+`derive_profile_metadata`; existing rows require the rebuild described in
+the [schema upgrade steps](DEPLOYMENT.md#schema-upgrade-steps). Use the
+migrations and current model when inspecting an upgraded database.
 
 ## UCDP annual: live acquisition (slice UC1, 2026-07-26)
 

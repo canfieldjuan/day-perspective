@@ -20,23 +20,27 @@ surface must be private and protected by production authentication.
 
 ## Schema Upgrade Steps
 
-`20260726_0014` backfills `coverage_entries` from published manifests, so
-applying it to an existing archive does not leave every date reporting
-`coverage_not_indexed`. Every indexed field derives from the manifest and
-its immutable statement evidence, so the backfill and a rebuild produce
-the same rows.
+`20260726_0014` creates and backfills the coverage index.
+`20260727_0016` adds review status and evidence quality with conservative
+defaults of `automated_only` and `not_assessed` for existing rows. It leaves
+their actual values to the coverage rebuild, which uses the same derivation
+as publication.
 
-A rebuild is still worth running after a migration on a populated archive,
-because it verifies each date's artifact is readable and drops any that are
-not:
+After upgrading a populated archive, run the coverage rebuild before
+resuming reader traffic. This is a required upgrade step. Without it,
+existing pages can continue showing the migration defaults despite having
+review decisions or graded evidence.
 
 ```bash
 make rebuild-coverage
 ```
 
-It is idempotent, reports what it indexed and dropped, and exits non-zero
-if any published date's artifact could not be read — an unreadable
-artifact is left out of the index rather than advertised to navigation.
+Require `dropped=0` and `unreadable=0` before resuming reader traffic.
+Investigate either nonzero count. The rebuild verifies each published
+artifact and derives its coverage metadata without republishing content.
+It is idempotent and reports what it indexed and dropped. An unreadable
+artifact is excluded from navigation and causes a nonzero exit status.
+An interrupted rebuild can be rerun to finish the remaining dates.
 
 ## Blocking Decisions
 
