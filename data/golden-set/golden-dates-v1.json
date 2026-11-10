@@ -281,7 +281,7 @@
         "scientific_milestone"
       ],
       "selection_rationale": "Selected to exercise scientific milestone evidence handling in the limited historical era. Selection does not assert that a reviewed event is already associated with this date.",
-      "manual_review_status": "pending_human_review",
+      "manual_review_status": "reviewed",
       "publication_status": "not_generated"
     },
     {
@@ -321,7 +321,7 @@
         "sparse_date"
       ],
       "selection_rationale": "Selected to exercise sparse date evidence handling in the limited historical era. Selection does not assert that a reviewed event is already associated with this date.",
-      "manual_review_status": "pending_human_review",
+      "manual_review_status": "reviewed",
       "publication_status": "not_generated"
     },
     {
