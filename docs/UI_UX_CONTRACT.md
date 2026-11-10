@@ -427,6 +427,8 @@ Deferred (tracked as issues, not designed here): dark theme;
 published-dates index/heatmap (needs backend endpoint); map or timeline
 visualizations; search; bookmarks/favorites; typed `details` vocabulary
 in `packages/contracts` (backend-coordination issue); CI docs-only fast
-path; admin console redesign; Golden-100-dependent editorial surfaces
+path; broad admin console redesign (the bounded selected-date review flow
+is governed by [ADMIN_REVIEW_CONTRACT.md](ADMIN_REVIEW_CONTRACT.md));
+Golden-100-dependent editorial surfaces
 (curated/wonder/comparison strata render their honest seams until
 pipelines exist).
