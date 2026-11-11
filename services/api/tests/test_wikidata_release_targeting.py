@@ -283,6 +283,7 @@ def test_existing_occurrence_must_still_agree_with_selected_release(
     event = _run("resolve", session, tmp_path, release)
     time = session.scalars(select(EventTime).where(EventTime.event_id == event.id)).one()
     time.start_date += timedelta(days=1)
+    time.end_date = time.start_date
     session.flush()
     before = _counts(session)
     with pytest.raises(ValueError, match="occurrence"):
