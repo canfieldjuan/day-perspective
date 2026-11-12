@@ -685,7 +685,7 @@ def test_publish_binds_provenance_to_the_resolution_not_the_latest_release(
     _reingest(session, label="REINGESTED-CHANGED-NAME")
     store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
 
-    outcome = publish_wikidata_event(session, store=store)
+    outcome = publish_wikidata_event(session, store=store, source_release_id=original_release.id)
 
     manifest = session.get(PublicationManifest, outcome.manifest_id)
     assert manifest is not None
@@ -766,6 +766,7 @@ def test_publish_checks_collision_on_the_resolved_date_not_the_reingested_candid
     _, golden = publish_golden(session, tmp_path)
     rebuild_coverage_index(session)
     session.flush()
+    original_release_id = _claim(session, "candidate_event_identity").source_release_id
     _reingest(session, occurrence_time="+1970-01-15T00:00:00Z")
     store = LocalFilesystemPublishedProfileStore(tmp_path / "published")
 
@@ -775,7 +776,7 @@ def test_publish_checks_collision_on_the_resolved_date_not_the_reingested_candid
     assert golden_manifest_before is not None
     hash_before = golden_manifest_before.content_hash
 
-    outcome = publish_wikidata_event(session, store=store)
+    outcome = publish_wikidata_event(session, store=store, source_release_id=original_release_id)
 
     assert outcome.status == "deferred_to_merge_review"
     assert outcome.occurrence_date == GOLDEN_DATE
