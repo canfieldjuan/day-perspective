@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, StringConstraints
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.admin_wikidata import router as wikidata_review_router
 from app.config import get_settings
 from app.coverage import (
     coverage_for_date,
@@ -190,6 +191,9 @@ def development_review_guard(
                 "This mechanism is not production authentication."
             ),
         )
+
+
+app.include_router(wikidata_review_router, dependencies=[Depends(development_review_guard)])
 
 
 @app.get("/health", response_model=HealthResponse)

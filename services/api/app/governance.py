@@ -342,6 +342,7 @@ def record_editorial_selection(
     display_rank: int | None,
     rationale: str,
     reviewed_by: str,
+    expected_decision_version: int | None = None,
 ) -> EditorialSelection:
     if (resolved_claim_id is None) == (derived_value_id is None):
         raise ValueError("Editorial selection requires exactly one evidence root.")
@@ -368,6 +369,10 @@ def record_editorial_selection(
         .where(*conditions)
         .order_by(EditorialSelection.decision_version.desc())
     )
+    if expected_decision_version is not None and expected_decision_version != (
+        existing.decision_version if existing is not None else 0
+    ):
+        raise ValueError("Editorial selection changed. Reload and review the current choices.")
     if (
         existing is not None
         and existing.status == status.value
