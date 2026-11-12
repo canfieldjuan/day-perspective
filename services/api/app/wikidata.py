@@ -2033,35 +2033,35 @@ def _recorded_statement_text(
     raise ValueError(f"No recorded-statement rendering for {predicate}.")
 
 
-def _ranked_recorded_predicates(
-    session: Session, *, profile_date: date,
-    roots: dict[str, ResolvedClaim],
-) -> list[tuple[str, ResolvedClaim]]:
-    """This entity's recorded predicates, in the human editorial-ranking order.
-
-    Drives *what* is published and *in what order* from the human editorial
-    selections, not the source predicate order -- so the editorial-ranking stage
-    the pass consumes actually decides the reader-visible order. Only resolved
-    predicates a human selected (latest decision ``SELECTED``) are returned;
-    unranked selections sort last, stably, behind ranked ones.
-    """
+def recorded_editorial_choices(
+    session: Session, *, profile_date: date, roots: dict[str, ResolvedClaim]
+) -> dict[UUID, EditorialSelection]:
+    """Read current editorial choices for this candidate's statement roots."""
     latest: dict[UUID, EditorialSelection] = {}
     for selection in session.scalars(
         select(EditorialSelection)
         .where(
             EditorialSelection.profile_date == profile_date,
             EditorialSelection.section_key == "recorded_on_this_date",
+            EditorialSelection.resolved_claim_id.in_([root.id for root in roots.values()]),
         )
         .order_by(EditorialSelection.decision_version.desc())
     ):
         if selection.resolved_claim_id is not None:
             latest.setdefault(selection.resolved_claim_id, selection)
+    return latest
+
+
+def ordered_recorded_roots(
+    roots: dict[str, ResolvedClaim], choices: dict[UUID, EditorialSelection]
+) -> list[tuple[str, ResolvedClaim]]:
+    """Return selected roots in editorial order, with unranked roots last."""
     ranked: list[tuple[int | None, str, ResolvedClaim]] = []
     for predicate in _PUBLISHED_PREDICATES:
         resolved = roots.get(predicate)
         if resolved is None:
             continue
-        chosen = latest.get(resolved.id)
+        chosen = choices.get(resolved.id)
         if chosen is None or chosen.status != EditorialSelectionStatus.SELECTED.value:
             continue
         ranked.append((chosen.display_rank, predicate, resolved))
@@ -2229,6 +2229,7 @@ def publish_wikidata_event(
     store: PublishedProfileStore,
     force_new_version: bool = False,
     source_release_id: UUID | None = None,
+    required_recorded_order: tuple[str, ...] | None = None,
 ) -> WikidataPublishOutcome:
     """Publish the resolved Wikidata candidate as its date's recorded event.
 
@@ -2363,9 +2364,14 @@ def publish_wikidata_event(
     # What to publish, and in what order, comes from the human editorial ranking
     # (P2) -- not the source predicate order. An unranked candidate yields nothing
     # and is refused: the pass consumes the ranking stage, it never invents it.
-    ranked = _ranked_recorded_predicates(
-        session, profile_date=occurrence_date, roots=bound_roots
+    ranked = ordered_recorded_roots(
+        bound_roots,
+        recorded_editorial_choices(session, profile_date=occurrence_date, roots=bound_roots),
     )
+    if required_recorded_order is not None and tuple(
+        predicate for predicate, _ in ranked if predicate in required_recorded_order
+    ) != required_recorded_order:
+        raise ValueError("Select the reviewed name, type and occurrence statements before publishing.")
     if not ranked:
         raise ValueError(
             "Publication requires a human editorial selection for the recorded event."
