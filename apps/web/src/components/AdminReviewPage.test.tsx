@@ -4,7 +4,7 @@ import {
   fireEvent,
   render,
   screen,
-  waitFor
+  within
 } from "@testing-library/react";
 import React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -121,6 +121,13 @@ describe("development review console", () => {
                   source_slug: "un-wpp-2024",
                   resolution_supported: false,
                   claim_statuses: ["accepted"]
+                },
+                {
+                  release_id: "wikidata-instant",
+                  release_label: "Wikidata clock-time release",
+                  source_slug: "wikidata-candidates",
+                  resolution_supported: false,
+                  claim_statuses: ["candidate"]
                 }
               ]
             }
@@ -140,13 +147,11 @@ describe("development review console", () => {
 
     await screen.findByText("USGS fixture");
     expect(screen.getByText("UN WPP fixture")).toBeInTheDocument();
+    const clockTime = screen.getByText("Wikidata clock-time release").closest("article");
+    expect(clockTime).not.toBeNull();
+    expect(within(clockTime!).getByText(/specific review workflow/i)).toBeInTheDocument();
     expect(
       screen.getAllByRole("button", { name: "Resolve accepted claims" })
     ).toHaveLength(1);
-    await waitFor(() => {
-      expect(
-        screen.getByText(/specific review workflow/i)
-      ).toBeInTheDocument();
-    });
   });
 });
