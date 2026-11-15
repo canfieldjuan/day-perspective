@@ -70,3 +70,48 @@
   justify-content: space-between;
   padding: 0.75rem 0;
 }
+
+.candidate-meta {
+  display: grid;
+  gap: 0.5rem 1rem;
+  grid-template-columns: repeat(auto-fit, minmax(min(15rem, 100%), 1fr));
+  overflow-wrap: anywhere;
+}
+
+.candidate-meta dt {
+  font-weight: 600;
+}
+
+.candidate-meta dd {
+  margin: 0;
+}
+
+.candidate-claim {
+  border-top: 1px solid var(--line);
+  margin-top: 1rem;
+  padding-top: 0.75rem;
+  overflow-wrap: anywhere;
+}
+
+.candidate-claim h5 {
+  font-size: 1rem;
+  text-transform: capitalize;
+}
+
+.candidate-actions {
+  align-items: end;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.candidate-actions label {
+  display: grid;
+  gap: 0.25rem;
+  max-width: 100%;
+}
+
+.candidate-actions textarea,
+.admin-panel select {
+  max-width: 100%;
+}
