@@ -23,16 +23,57 @@ published statement
 ## Public date shell and profile bands
 
 The public date shell accepts valid ISO Gregorian dates from `1900-01-01`
-through `2025-12-31`, inclusive. A supported date may still be unpublished.
+through December 31 of the current UTC calendar year, inclusive. The range
+advances on January 1 UTC. The shared UTC boundary gives readers and operators
+the same range across time zones. A supported date can be unpublished,
+including an upcoming date in the current year.
+
+The annual ceiling keeps later years outside the public calendar until their
+rollover. Random day samples the supported calendar, so an open-ended calendar
+would send most readers into empty future years. Each source has its own
+availability window. Using the latest publication or source date as the
+calendar ceiling would hide supported dates when evidence arrives late.
+
+The API owns the effective range and exposes it in system status, coverage
+metadata, and out-of-range responses. The reader calendar, date navigation,
+archive summary, profile validation, and operator console use this policy.
+Publication and editorial writes check the range at admission. Storage
+enforces date and profile-band consistency with time-independent constraints
+so existing rows stay valid during restore. Year rollover is automatic.
 
 | Date range | Profile type | Contract |
 | --- | --- | --- |
 | 1900-1949 | `limited_historical` | Limited historical profile. Direct records and structured statistics may be sparse or uneven. The product exposes gaps rather than inventing coverage. |
 | 1950-1988 | `standard_statistical` | Standard statistical profile. Period statistics may support labeled daily equivalents and comparisons when coverage permits. |
-| 1989-2025 | `enhanced_structured` | Enhanced structured profile. More structured evidence may be shown where source releases support it. |
+| 1989 through the public range end | `enhanced_structured` | Enhanced structured profile. More structured evidence may be shown where source releases support it. |
 
 The bands describe evidence shape, not historical importance or a guarantee of
 content. No band permits unprovenanced claims or synthetic filler.
+
+### Current-year pilot
+
+The first local pilot uses one completed 2026 event with a revision-pinned
+Wikidata day claim and a corroborating primary record. An operator reviews the
+claims and selects the statements before local publication. Readers see the
+recorded event, source release and reported day through the existing profile
+and evidence panel. The pinned release records its retrieval time. Changed
+claims go through review before publication. Conflicting revisions follow
+the existing reconciliation workflow.
+
+On another supported 2026 date with no publication, the reader sees the
+unpublished state. The coverage summary distinguishes the supported range from
+the latest published date. Period context appears where a qualified release
+supplies it, with estimates and projections labeled according to their source
+and methodology. Claims that a scheduled event took place require evidence
+of occurrence. A provisional report retains its status.
+
+Verification covers a previously published 2025 profile, the selected 2026
+event and its evidence on desktop and mobile, and a supported 2026 date with
+no publication. With the API clock fixed just before and after January 1 UTC,
+verify that the date picker, day links, reader API, and operator validation
+agree when the next year opens. Verify that database era checks still refuse
+inconsistent profiles and that the accepted range admits editorial selections
+and publication.
 
 ## Public content contract
 
