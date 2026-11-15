@@ -10,6 +10,15 @@ type Claim = {
   value: { value?: unknown; wikidata_reference_count?: number } | null;
   locator: string;
 };
+type Choice = {
+  predicate: string;
+  root_id: string;
+  version: number;
+  status: string | null;
+  rank: number | null;
+  rationale: string | null;
+  text: string;
+};
 type Candidate = {
   release_id: string;
   label: string;
@@ -18,9 +27,17 @@ type Candidate = {
   source_url: string | null;
   checksum: string;
   claims: Claim[];
+  preview: Choice[];
   can_resolve: boolean;
   resolved: boolean;
+  can_publish: boolean;
   blocked: string | null;
+};
+type Outcome = {
+  status: string;
+  manifest_id?: string | null;
+  occurrence_date?: string;
+  merge_review_task_id?: string | null;
 };
 type ReviewRequest = <T>(path: string, init?: RequestInit) => Promise<T>;
 
@@ -34,6 +51,8 @@ function CandidateEvidence({ candidate, busy, act }: {
   act: (action: string, body?: object) => void;
 }) {
   const [notes, setNotes] = useState<Record<string, string>>({});
+  const [editorial, setEditorial] = useState("");
+  const core = candidate.preview.filter((choice) => choice.predicate !== "candidate_coordinates");
   const source = candidate.source_url && URL.canParse(candidate.source_url)
     ? new URL(candidate.source_url) : null;
 
@@ -83,6 +102,33 @@ function CandidateEvidence({ candidate, busy, act }: {
       </button>
       {!candidate.can_resolve && !candidate.blocked && <p>Accept the identity, name, type and occurrence claims to resolve the event.</p>}
     </div>
+    {!!core.length && <div className="candidate-claim">
+      <h4>Editorial preview</h4>
+      <ol>
+        {core.map((choice) => <li key={choice.root_id}>
+          {choice.text}
+          <p>{choice.status ? `Current choice: ${choice.status}${choice.rank === null ? "" : `, rank ${choice.rank}`}. ${choice.rationale ?? ""}` : "No editorial choice recorded."}</p>
+        </li>)}
+      </ol>
+      {candidate.preview.filter((choice) => choice.predicate === "candidate_coordinates" && choice.status === "selected").map((choice) =>
+        <p key={choice.root_id}>Existing optional selection: {choice.text}</p>
+      )}
+      <div className="candidate-actions">
+        <label>Editorial rationale
+          <textarea value={editorial} disabled={busy} onChange={(event) => setEditorial(event.target.value)} />
+        </label>
+        <button type="button" disabled={busy || !editorial.trim()} onClick={() => act("select", {
+          rationale: editorial,
+          preview: core.map(({ root_id, version }) => ({ root_id, version }))
+        })}>Select statements</button>
+      </div>
+    </div>}
+    <div className="candidate-claim">
+      <h4>Publication</h4>
+      <button type="button" disabled={busy || !candidate.can_publish} onClick={() => act("publish")}>
+        Publish selected release
+      </button>
+    </div>
   </>;
 }
 
@@ -91,6 +137,7 @@ export function WikidataReview({ request, onMutation }: { request: ReviewRequest
   const [rows, setRows] = useState<Candidate[] | null>(null);
   const [releaseId, setReleaseId] = useState("");
   const [message, setMessage] = useState("");
+  const [published, setPublished] = useState<{ id: string; day: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const generation = useRef(0);
   const mutating = useRef(false);
@@ -103,6 +150,7 @@ export function WikidataReview({ request, onMutation }: { request: ReviewRequest
     const current = ++generation.current;
     setRows(null);
     setReleaseId("");
+    setPublished(null);
     setMessage("Loading candidates…");
     try {
       const { candidates } = await request<{ candidates: Candidate[] }>(path);
@@ -120,13 +168,25 @@ export function WikidataReview({ request, onMutation }: { request: ReviewRequest
     generation.current++;
     setBusy(true);
     onMutation(true);
+    setPublished(null);
     setMessage("Saving review action…");
     let result: string;
     try {
-      const outcome = await request<{ status: string }>(`${path}/${candidate.release_id}/${action}`, {
+      const outcome = await request<Outcome>(`${path}/${candidate.release_id}/${action}`, {
         method: "POST", body: JSON.stringify(body ?? {})
       });
-      result = `Recorded ${outcome.status}.`;
+      if (outcome.status === "published" && outcome.manifest_id && outcome.occurrence_date === day) {
+        setPublished({ id: outcome.manifest_id, day });
+        result = `Published manifest ${outcome.manifest_id}.`;
+      } else if (outcome.status === "published") {
+        result = "The publication response is missing a manifest for the selected date. Reload candidates to confirm the result.";
+      } else if (outcome.status === "deferred_to_merge_review") {
+        result = `Publication deferred for collision review. Task ${outcome.merge_review_task_id ?? "unavailable"}.`;
+      } else if (action === "publish") {
+        result = `Publication outcome: ${outcome.status.replaceAll("_", " ")}.`;
+      } else {
+        result = `Recorded ${outcome.status}.`;
+      }
     } catch (error) {
       result = String(error);
     }
@@ -155,6 +215,7 @@ export function WikidataReview({ request, onMutation }: { request: ReviewRequest
             setDay(event.target.value);
             setRows(null);
             setReleaseId("");
+            setPublished(null);
             setMessage("");
           }} />
       </label>
@@ -165,6 +226,7 @@ export function WikidataReview({ request, onMutation }: { request: ReviewRequest
       <select value={releaseId} disabled={busy} onChange={(event) => {
         if (mutating.current) return;
         setReleaseId(event.target.value);
+        setPublished(null);
         setMessage("");
       }}>
         <option value="">Choose a release</option>
@@ -174,5 +236,6 @@ export function WikidataReview({ request, onMutation }: { request: ReviewRequest
       </select>
     </label>}
     {candidate && <CandidateEvidence key={candidate.release_id} candidate={candidate} busy={busy} act={act} />}
+    {published && <p><a href={`/day/${published.day}`}>Open published profile for {published.day}</a></p>}
   </section>;
 }

@@ -6,27 +6,33 @@ from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, ConfigDict, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app import wikidata
+from app.config import get_settings
 from app.database import get_session
 from app.governance import (
+    EditorialSelection,
     ReviewDecisionValue,
     record_claim_review,
+    record_editorial_selection,
 )
 from app.models import (
     Claim,
     ClaimAssertionStatus,
     DateRole,
+    ResolvedClaim,
     Source,
     SourceRelease,
     TemporalPrecision,
     profile_type_for_date,
 )
+from app.services import LocalFilesystemPublishedProfileStore
 
 router = APIRouter(prefix="/api/v1/admin/wikidata")
+CORE_STATEMENTS = ("candidate_name", "candidate_event_type", "candidate_occurrence_date")
 OCCURRENCE = "candidate_occurrence_date"
 REVIEWER = "development-review-api"
 SessionDep = Annotated[Session, Depends(get_session)]
@@ -37,6 +43,18 @@ class DecisionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     decision: Literal["accepted", "rejected"]
     rationale: Rationale
+
+
+class ChoiceVersion(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    root_id: UUID
+    version: Annotated[int, Field(strict=True, ge=0)]
+
+
+class SelectionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    rationale: Rationale
+    preview: Annotated[list[ChoiceVersion], Field(min_length=3, max_length=3)]
 
 
 @dataclass(frozen=True)
@@ -101,15 +119,63 @@ def _subject(profile_date: date, release_id: UUID, session: SessionDep) -> Subje
 SubjectDep = Annotated[Subject, Depends(_subject)]
 
 
+def _editorial_state(
+    session: Session, subject: Subject
+) -> tuple[dict[str, ResolvedClaim], dict[UUID, EditorialSelection], bool]:
+    roots, event = wikidata._bound_resolutions(
+        session, release=subject.release, qid=subject.entity_id, claims=subject.claims
+    )
+    if (
+        event is None
+        or not subject.accepted_core
+        or not all(key in roots for key in CORE_STATEMENTS)
+    ):
+        return {}, {}, event is not None
+    choices = wikidata.recorded_editorial_choices(
+        session, profile_date=subject.day, roots=roots
+    )
+    return roots, choices, True
+
+
+def _core_selected(
+    roots: dict[str, ResolvedClaim], choices: dict[UUID, EditorialSelection]
+) -> bool:
+    return (
+        tuple(
+            predicate
+            for predicate, _ in wikidata.ordered_recorded_roots(roots, choices)
+            if predicate in CORE_STATEMENTS
+        )
+        == CORE_STATEMENTS
+    )
+
+
 def _view(session: Session, subject: Subject) -> dict[str, Any]:
     blocked = None
-    event = None
     try:
-        _, event = wikidata._bound_resolutions(
-            session, release=subject.release, qid=subject.entity_id, claims=subject.claims
-        )
+        roots, choices, resolved = _editorial_state(session, subject)
     except ValueError as error:
         blocked = str(error)
+        roots, choices, resolved = {}, {}, False
+    preview = []
+    for predicate in wikidata._PUBLISHED_PREDICATES:
+        root = roots.get(predicate)
+        if root is None:
+            continue
+        choice = choices.get(root.id)
+        preview.append(
+            {
+                "predicate": predicate,
+                "root_id": root.id,
+                "version": choice.decision_version if choice else 0,
+                "status": choice.status if choice else None,
+                "rank": choice.display_rank if choice else None,
+                "rationale": choice.rationale if choice else None,
+                "text": wikidata._recorded_statement_text(
+                    predicate, value=wikidata._resolved_value(root), occurrence_date=subject.day
+                ),
+            }
+        )
     identity = wikidata._candidate_value(subject.claims["candidate_event_identity"])
     name = subject.claims.get("candidate_name")
     claims = sorted(
@@ -139,7 +205,9 @@ def _view(session: Session, subject: Subject) -> dict[str, Any]:
             for claim in claims
         ],
         "can_resolve": subject.accepted_core and blocked is None,
-        "resolved": event is not None,
+        "resolved": resolved,
+        "preview": preview,
+        "can_publish": _core_selected(roots, choices),
         "blocked": blocked,
     }
 
@@ -206,3 +274,52 @@ def resolve(subject: SubjectDep, session: SessionDep) -> dict[str, str]:
         session.rollback()
         raise HTTPException(409, str(error)) from error
     return {"status": "resolved"}
+
+
+@router.post("/{profile_date}/{release_id}/select")
+def select_statements(
+    request: SelectionRequest, subject: SubjectDep, session: SessionDep
+) -> dict[str, str]:
+    try:
+        roots, _, _ = _editorial_state(session, subject)
+        if not roots:
+            raise ValueError("Resolve the accepted core claims before selecting statements.")
+        if [item.root_id for item in request.preview] != [roots[key].id for key in CORE_STATEMENTS]:
+            raise ValueError("Statement roots changed. Reload and review the current choices.")
+        for rank, item in enumerate(request.preview, start=1):
+            record_editorial_selection(
+                session,
+                profile_date=subject.day,
+                section_key="recorded_on_this_date",
+                resolved_claim_id=item.root_id,
+                display_rank=rank,
+                rationale=request.rationale,
+                reviewed_by=REVIEWER,
+                expected_decision_version=item.version,
+            )
+        session.commit()
+    except ValueError as error:
+        session.rollback()
+        raise HTTPException(409, str(error)) from error
+    return {"status": "selected"}
+
+
+@router.post("/{profile_date}/{release_id}/publish")
+def publish(subject: SubjectDep, session: SessionDep) -> wikidata.WikidataPublishOutcome:
+    try:
+        roots, choices, _ = _editorial_state(session, subject)
+        if not _core_selected(roots, choices):
+            raise ValueError(
+                "Select the reviewed name, type and occurrence statements before publishing."
+            )
+        outcome = wikidata.publish_wikidata_event(
+            session,
+            source_release_id=subject.release.id,
+            store=LocalFilesystemPublishedProfileStore(get_settings().published_profile_root),
+            required_recorded_order=CORE_STATEMENTS,
+        )
+        session.commit()
+    except (ValueError, RuntimeError, OSError) as error:
+        session.rollback()
+        raise HTTPException(409, str(error)) from error
+    return outcome

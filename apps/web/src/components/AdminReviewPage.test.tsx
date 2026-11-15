@@ -15,7 +15,7 @@ const release = {
   source_url: "https://www.wikidata.org/wiki/Q100?oldid=7", checksum: "fixture-checksum",
   claims: [{ id: "claim-a", predicate: "candidate_name", status: "candidate",
     value: { value: { label: "Fixture event" }, wikidata_reference_count: 0 }, locator: "record-7" }],
-  can_resolve: false, resolved: false, blocked: null
+  can_resolve: false, resolved: false, can_publish: false, preview: [], blocked: null
 };
 
 function enterDate(day: string) {
@@ -55,6 +55,15 @@ describe("development review console", () => {
     await screen.findByText("No matching imported candidates for this date.");
     await act(async () => complete(Response.json({ candidates: [release] })));
     expect(screen.queryByLabelText("Source release")).not.toBeInTheDocument();
+  });
+
+  it("shows the saved resolution when the operator reloads a release", async () => {
+    const resolved = { ...release, can_resolve: true, resolved: true };
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ candidates: [resolved] })));
+    render(<ReviewPage />);
+    enterDate("1964-03-27");
+    fireEvent.change(await screen.findByLabelText("Source release"), { target: { value: "release-a" } });
+    expect(screen.getByText("Event resolved from this release.")).toBeInTheDocument();
   });
 
   it("blocks duplicate decisions and refreshes a refused stale claim", async () => {

@@ -11,8 +11,10 @@ from app import wikidata
 from app.adapters.base import LocalFilesystemRawSourceStore
 from app.config import get_settings
 from app.database import get_session
+from app.governance import EditorialSelection, IdentityAdjudicationDecision
 from app.main import app
-from app.models import Event, EventLocation
+from app.models import Event, EventLocation, PublicationManifest, PublicationStatementEvidence
+from app.services import LocalFilesystemPublishedProfileStore
 
 from .test_usgs_vertical_slice import override_session
 from .test_usgs_vertical_slice import publish as publish_usgs
@@ -26,10 +28,10 @@ def test_selected_date_review_requires_the_development_token() -> None:
 
 
 @pytest.mark.integration
-def test_selected_release_review_and_resolve(
+def test_selected_release_review_resolve_select_and_publish(
     session: Session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    usgs, _ = publish_usgs(session, tmp_path)
+    usgs, golden = publish_usgs(session, tmp_path)
     settings = get_settings()
     published = tmp_path / "published"
     monkeypatch.setattr(settings, "published_profile_root", published)
@@ -72,6 +74,7 @@ def test_selected_release_review_and_resolve(
     assert client.post(f"{PREFIX}/{usgs.source_release_id}/resolve").status_code == 404
     assert client.post(f"{PREFIX}/{uuid4()}/resolve").status_code == 404
     assert client.post(f"{path}/resolve").status_code == 409
+    assert client.post(f"{path}/publish").status_code == 409
 
     choices = {claim["predicate"]: claim for claim in rows[first]["claims"]}
     name = choices["candidate_name"]
@@ -106,7 +109,8 @@ def test_selected_release_review_and_resolve(
         == 200
     )
     assert client.post(f"{path}/resolve").status_code == 200
-    assert read()[first]["resolved"]
+    candidate = read()[first]
+    assert candidate["resolved"] is True
     event = session.scalars(select(Event).where(Event.event_type == "Q7944")).one()
     assert event.canonical_title == name["value"]["value"]["label"]
     assert (
@@ -117,7 +121,70 @@ def test_selected_release_review_and_resolve(
         )
         == 0
     )
+    assert [item["predicate"] for item in candidate["preview"]] == [
+        "candidate_name",
+        "candidate_event_type",
+        "candidate_occurrence_date",
+    ]
+    assert all(item["version"] == 0 for item in candidate["preview"])
+    assert client.post(f"{path}/publish").status_code == 409
+    preview = [{"root_id": item["root_id"], "version": 0} for item in candidate["preview"]]
+    selection = {"rationale": "Select the three reviewed statements", "preview": preview}
+    assert (
+        client.post(f"{path}/select", json={**selection, "preview": preview[::-1]}).status_code
+        == 409
+    )
+    assert client.post(f"{path}/select", json=selection).status_code == 200
+    mixed = [{**preview[0], "version": 1}, *preview[1:]]
+    assert (
+        client.post(
+            f"{path}/select", json={"rationale": "A stale edit", "preview": mixed}
+        ).status_code
+        == 409
+    )
+    assert (
+        session.scalar(
+            select(func.count())
+            .select_from(EditorialSelection)
+            .where(EditorialSelection.rationale == "A stale edit")
+        )
+        == 0
+    )
+    assert read()[first]["can_publish"]
+    assert client.post(f"{path}/publish").json()["status"] == "deferred_to_merge_review"
+    wikidata.resolve_merge_review(
+        session,
+        source_release_id=first,
+        decision=IdentityAdjudicationDecision.DISTINCT_EVENT,
+        reviewer="test-human",
+        rationale="Exercise retention of an admitted event in the fixture",
+    )
+    session.commit()
+    response = client.post(f"{path}/publish")
+    assert response.status_code == 200, response.text
+    outcome = response.json()
+    assert outcome["status"] == "published"
+    assert client.post(f"{path}/publish").json()["manifest_id"] == outcome["manifest_id"]
+    public = client.get("/api/v1/day/1964-03-27").json()
+    assert public["manifest_id"] == outcome["manifest_id"]
+    statements = public["profile"]["sections"]["recorded_on_this_date"]
+    prior = session.get(PublicationManifest, golden.publication_manifest_id)
+    assert prior is not None
+    old = LocalFilesystemPublishedProfileStore(published).read(
+        prior.storage_uri, prior.content_hash
+    )
+    assert {item["statement"] for item in old["sections"]["recorded_on_this_date"]} <= {
+        item["statement"] for item in statements
+    }
+    assert any(name["value"]["value"]["label"] in item["statement"] for item in statements)
+    assert not any(item["statement_id"] == "wikidata-coordinates" for item in statements)
+    assert session.scalar(
+        select(func.count())
+        .select_from(PublicationStatementEvidence)
+        .where(PublicationStatementEvidence.publication_manifest_id == UUID(outcome["manifest_id"]))
+    ) == sum(len(items) for items in public["profile"]["sections"].values())
     assert read()[second] == rows[second]
+    assert read()[second]["resolved"] is False
     revision = entity_document(
         entity_id="Q749610", revision_id=2, occurrence="1964-03-27", optional_properties=False
     )
@@ -132,4 +199,5 @@ def test_selected_release_review_and_resolve(
     session.commit()
     conflict = read()[conflicting]
     assert "revision reconciliation" in conflict["blocked"]
-    assert not conflict["can_resolve"] and not conflict["resolved"]
+    assert conflict["resolved"] is False
+    assert not conflict["can_resolve"] and not conflict["can_publish"]
