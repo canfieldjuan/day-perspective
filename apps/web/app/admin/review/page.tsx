@@ -95,10 +95,8 @@ export default function ReviewPage() {
     }
   }
 
-  const allReleases = (data.releases?.releases || []) as JsonRecord[];
-  const wikidataReleases = new Set(allReleases.filter((release) => release.source_slug === "wikidata-candidates").map((release) => release.release_id));
-  const claims = ((data.claims?.claims || []) as JsonRecord[]).filter((claim) => !wikidataReleases.has(claim.source_release_id));
-  const releases = allReleases.filter((release) => !wikidataReleases.has(release.release_id));
+  const claims = (data.claims?.claims || []) as JsonRecord[];
+  const releases = (data.releases?.releases || []) as JsonRecord[];
 
   return (
     <main className="page-shell admin-shell" id="main-content">

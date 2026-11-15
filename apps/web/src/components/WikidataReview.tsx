@@ -29,6 +29,7 @@ type Candidate = {
   claims: Claim[];
   preview: Choice[];
   can_resolve: boolean;
+  resolved: boolean;
   can_publish: boolean;
   blocked: string | null;
 };
@@ -95,6 +96,7 @@ function CandidateEvidence({ candidate, busy, act }: {
     })}
     <div className="candidate-claim">
       <h4>Resolution</h4>
+      {candidate.resolved && <p>Event resolved from this release.</p>}
       <button type="button" disabled={busy || !candidate.can_resolve} onClick={() => act("resolve")}>
         Resolve Wikidata claims
       </button>

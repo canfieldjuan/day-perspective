@@ -121,7 +121,7 @@ SubjectDep = Annotated[Subject, Depends(_subject)]
 
 def _editorial_state(
     session: Session, subject: Subject
-) -> tuple[dict[str, ResolvedClaim], dict[UUID, EditorialSelection]]:
+) -> tuple[dict[str, ResolvedClaim], dict[UUID, EditorialSelection], bool]:
     roots, event = wikidata._bound_resolutions(
         session, release=subject.release, qid=subject.entity_id, claims=subject.claims
     )
@@ -130,10 +130,11 @@ def _editorial_state(
         or not subject.accepted_core
         or not all(key in roots for key in CORE_STATEMENTS)
     ):
-        return {}, {}
-    return roots, wikidata.recorded_editorial_choices(
+        return {}, {}, event is not None
+    choices = wikidata.recorded_editorial_choices(
         session, profile_date=subject.day, roots=roots
     )
+    return roots, choices, True
 
 
 def _core_selected(
@@ -152,10 +153,10 @@ def _core_selected(
 def _view(session: Session, subject: Subject) -> dict[str, Any]:
     blocked = None
     try:
-        roots, choices = _editorial_state(session, subject)
+        roots, choices, resolved = _editorial_state(session, subject)
     except ValueError as error:
         blocked = str(error)
-        roots, choices = {}, {}
+        roots, choices, resolved = {}, {}, False
     preview = []
     for predicate in wikidata._PUBLISHED_PREDICATES:
         root = roots.get(predicate)
@@ -204,6 +205,7 @@ def _view(session: Session, subject: Subject) -> dict[str, Any]:
             for claim in claims
         ],
         "can_resolve": subject.accepted_core and blocked is None,
+        "resolved": resolved,
         "preview": preview,
         "can_publish": _core_selected(roots, choices),
         "blocked": blocked,
@@ -279,7 +281,7 @@ def select_statements(
     request: SelectionRequest, subject: SubjectDep, session: SessionDep
 ) -> dict[str, str]:
     try:
-        roots, _ = _editorial_state(session, subject)
+        roots, _, _ = _editorial_state(session, subject)
         if not roots:
             raise ValueError("Resolve the accepted core claims before selecting statements.")
         if [item.root_id for item in request.preview] != [roots[key].id for key in CORE_STATEMENTS]:
@@ -305,7 +307,7 @@ def select_statements(
 @router.post("/{profile_date}/{release_id}/publish")
 def publish(subject: SubjectDep, session: SessionDep) -> wikidata.WikidataPublishOutcome:
     try:
-        roots, choices = _editorial_state(session, subject)
+        roots, choices, _ = _editorial_state(session, subject)
         if not _core_selected(roots, choices):
             raise ValueError(
                 "Select the reviewed name, type and occurrence statements before publishing."

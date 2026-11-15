@@ -13,7 +13,7 @@ from app.config import get_settings
 from app.database import get_session
 from app.governance import EditorialSelection, IdentityAdjudicationDecision
 from app.main import app
-from app.models import PublicationManifest, PublicationStatementEvidence
+from app.models import Event, EventLocation, PublicationManifest, PublicationStatementEvidence
 from app.services import LocalFilesystemPublishedProfileStore
 
 from .test_usgs_vertical_slice import override_session
@@ -110,6 +110,17 @@ def test_selected_release_review_resolve_select_and_publish(
     )
     assert client.post(f"{path}/resolve").status_code == 200
     candidate = read()[first]
+    assert candidate["resolved"] is True
+    event = session.scalars(select(Event).where(Event.event_type == "Q7944")).one()
+    assert event.canonical_title == name["value"]["value"]["label"]
+    assert (
+        session.scalar(
+            select(func.count())
+            .select_from(EventLocation)
+            .where(EventLocation.event_id == event.id)
+        )
+        == 0
+    )
     assert [item["predicate"] for item in candidate["preview"]] == [
         "candidate_name",
         "candidate_event_type",
@@ -173,6 +184,7 @@ def test_selected_release_review_resolve_select_and_publish(
         .where(PublicationStatementEvidence.publication_manifest_id == UUID(outcome["manifest_id"]))
     ) == sum(len(items) for items in public["profile"]["sections"].values())
     assert read()[second] == rows[second]
+    assert read()[second]["resolved"] is False
     revision = entity_document(
         entity_id="Q749610", revision_id=2, occurrence="1964-03-27", optional_properties=False
     )
@@ -187,4 +199,5 @@ def test_selected_release_review_resolve_select_and_publish(
     session.commit()
     conflict = read()[conflicting]
     assert "revision reconciliation" in conflict["blocked"]
+    assert conflict["resolved"] is False
     assert not conflict["can_resolve"] and not conflict["can_publish"]

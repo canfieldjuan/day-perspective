@@ -4,7 +4,7 @@ import {
   fireEvent,
   render,
   screen,
-  waitFor
+  within
 } from "@testing-library/react";
 import React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -15,7 +15,7 @@ const release = {
   source_url: "https://www.wikidata.org/wiki/Q100?oldid=7", checksum: "fixture-checksum",
   claims: [{ id: "claim-a", predicate: "candidate_name", status: "candidate",
     value: { value: { label: "Fixture event" }, wikidata_reference_count: 0 }, locator: "record-7" }],
-  can_resolve: false, can_publish: false, preview: [], blocked: null
+  can_resolve: false, resolved: false, can_publish: false, preview: [], blocked: null
 };
 
 function enterDate(day: string) {
@@ -55,6 +55,15 @@ describe("development review console", () => {
     await screen.findByText("No matching imported candidates for this date.");
     await act(async () => complete(Response.json({ candidates: [release] })));
     expect(screen.queryByLabelText("Source release")).not.toBeInTheDocument();
+  });
+
+  it("shows the saved resolution when the operator reloads a release", async () => {
+    const resolved = { ...release, can_resolve: true, resolved: true };
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ candidates: [resolved] })));
+    render(<ReviewPage />);
+    enterDate("1964-03-27");
+    fireEvent.change(await screen.findByLabelText("Source release"), { target: { value: "release-a" } });
+    expect(screen.getByText("Event resolved from this release.")).toBeInTheDocument();
   });
 
   it("blocks duplicate decisions and refreshes a refused stale claim", async () => {
@@ -121,6 +130,13 @@ describe("development review console", () => {
                   source_slug: "un-wpp-2024",
                   resolution_supported: false,
                   claim_statuses: ["accepted"]
+                },
+                {
+                  release_id: "wikidata-instant",
+                  release_label: "Wikidata clock-time release",
+                  source_slug: "wikidata-candidates",
+                  resolution_supported: false,
+                  claim_statuses: ["candidate"]
                 }
               ]
             }
@@ -140,13 +156,11 @@ describe("development review console", () => {
 
     await screen.findByText("USGS fixture");
     expect(screen.getByText("UN WPP fixture")).toBeInTheDocument();
+    const clockTime = screen.getByText("Wikidata clock-time release").closest("article");
+    expect(clockTime).not.toBeNull();
+    expect(within(clockTime!).getByText(/specific review workflow/i)).toBeInTheDocument();
     expect(
       screen.getAllByRole("button", { name: "Resolve accepted claims" })
     ).toHaveLength(1);
-    await waitFor(() => {
-      expect(
-        screen.getByText(/specific review workflow/i)
-      ).toBeInTheDocument();
-    });
   });
 });
