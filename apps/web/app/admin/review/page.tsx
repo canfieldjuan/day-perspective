@@ -1,6 +1,8 @@
 "use client";
 
-import React, { FormEvent, useState } from "react";
+import React, { FormEvent, useRef, useState } from "react";
+
+import { WikidataReview } from "@/src/components/WikidataReview";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -14,12 +16,15 @@ const ENDPOINTS = [
 
 export default function ReviewPage() {
   const [token, setToken] = useState("");
+  const [candidateBusy, setCandidateBusy] = useState(false);
+  const [credentialEpoch, setCredentialEpoch] = useState(0);
+  const credentialGeneration = useRef(0);
   const [data, setData] = useState<Record<string, JsonRecord>>({});
   const [message, setMessage] = useState(
     "Enter the local development token to load review data."
   );
 
-  async function request(path: string, init?: RequestInit) {
+  async function request<T = JsonRecord>(path: string, init?: RequestInit): Promise<T> {
     const response = await fetch(`/api/admin/${path}`, {
       ...init,
       headers: {
@@ -30,21 +35,25 @@ export default function ReviewPage() {
     });
     const result = (await response.json()) as JsonRecord;
     if (!response.ok) {
-      throw new Error(String(result.detail || "Review request failed."));
+      const detail = result.detail;
+      throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail ?? "Review request failed."));
     }
-    return result;
+    return result as T;
   }
 
   async function loadAll(event: FormEvent) {
     event.preventDefault();
+    const generation = credentialGeneration.current;
     setMessage("Loading review state...");
     try {
       const entries = await Promise.all(
         ENDPOINTS.map(async ([path]) => [path, await request(path)] as const)
       );
+      if (generation !== credentialGeneration.current) return;
       setData(Object.fromEntries(entries));
       setMessage("Review state loaded from the development-only API.");
     } catch (error) {
+      if (generation !== credentialGeneration.current) return;
       setMessage(error instanceof Error ? error.message : "Review request failed.");
     }
   }
@@ -86,8 +95,10 @@ export default function ReviewPage() {
     }
   }
 
-  const claims = (data.claims?.claims || []) as JsonRecord[];
-  const releases = (data.releases?.releases || []) as JsonRecord[];
+  const allReleases = (data.releases?.releases || []) as JsonRecord[];
+  const wikidataReleases = new Set(allReleases.filter((release) => release.source_slug === "wikidata-candidates").map((release) => release.release_id));
+  const claims = ((data.claims?.claims || []) as JsonRecord[]).filter((claim) => !wikidataReleases.has(claim.source_release_id));
+  const releases = allReleases.filter((release) => !wikidataReleases.has(release.release_id));
 
   return (
     <main className="page-shell admin-shell" id="main-content">
@@ -106,16 +117,25 @@ export default function ReviewPage() {
           id="review-token"
           type="password"
           value={token}
-          onChange={(event) => setToken(event.target.value)}
+          disabled={candidateBusy}
+          onChange={(event) => {
+            if (candidateBusy) return;
+            setToken(event.target.value);
+            setCredentialEpoch(++credentialGeneration.current);
+            setData({});
+            setMessage("Enter the local development token to load review data.");
+          }}
           autoComplete="off"
         />
-        <button className="action-button" type="submit">
+        <button type="submit" disabled={candidateBusy}>
           Load review state
         </button>
       </form>
       <p role="status" className="admin-status">
         {message}
       </p>
+
+      <WikidataReview key={credentialEpoch} request={request} onMutation={setCandidateBusy} />
 
       <section className="admin-panel">
         <div className="admin-panel__heading">
